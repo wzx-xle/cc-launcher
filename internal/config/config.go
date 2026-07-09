@@ -1,11 +1,11 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
-	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -27,33 +27,53 @@ func NewManager(settingsPath, backupDir string, maxBackups int) *Manager {
 	}
 }
 
-// LoadSettings 读取 settings.json。文件不存在时返回空 map。
+// LoadSettings 读取 settings.json，保持原始 JSON 字段顺序。
+// 文件不存在时返回空 map。
 func (m *Manager) LoadSettings() (map[string]any, error) {
+	om, err := m.loadOrdered()
+	if err != nil {
+		return nil, err
+	}
+	return om.toMap(), nil
+}
+
+func (m *Manager) loadOrdered() (*orderedMap, error) {
 	data, err := os.ReadFile(m.settingsPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return map[string]any{}, nil
+			return newOrderedMap(), nil
 		}
 		return nil, err
 	}
-	var settings map[string]any
-	if err := json.Unmarshal(data, &settings); err != nil {
+	om, err := decodeOrdered(data)
+	if err != nil {
 		return nil, fmt.Errorf("settings.json 解析失败: %w", err)
 	}
-	return settings, nil
+	return om, nil
 }
 
-// SaveSettings 将配置写入 settings.json。
+// SaveSettings 将配置写入 settings.json，保持原始字段顺序。
 func (m *Manager) SaveSettings(settings map[string]any) error {
+	om := mapToOrdered(settings)
+	return m.saveOrdered(om)
+}
+
+func (m *Manager) saveOrdered(om *orderedMap) error {
 	dir := filepath.Dir(m.settingsPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(settings, "", "  ")
+	data, err := encodeOrdered(om)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(m.settingsPath, data, 0644)
+	// 美化输出：缩进 2 空格
+	var buf bytes.Buffer
+	if err := json.Indent(&buf, data, "", "  "); err != nil {
+		return os.WriteFile(m.settingsPath, data, 0644)
+	}
+	buf.WriteByte('\n')
+	return os.WriteFile(m.settingsPath, buf.Bytes(), 0644)
 }
 
 // Backup 备份当前 settings.json 到 backupDir，自动轮转保留最近 maxBackups 个。
@@ -104,62 +124,89 @@ func (m *Manager) rotateBackups() error {
 	return nil
 }
 
-// Merge 执行配置合并：备份 → 清理旧快照 → 注入新配置。
+// Merge 执行配置合并：备份 → 清理旧快照 → 清理认证冲突 → 注入新配置。
 func (m *Manager) Merge(providerCfg, oldSnapshot map[string]any) error {
 	if err := m.Backup(); err != nil {
 		return err
 	}
 
-	settings, err := m.LoadSettings()
+	settings, err := m.loadOrdered()
 	if err != nil {
 		return err
 	}
 
+	// 1. 清理旧快照
 	if oldSnapshot != nil {
-		cleanSnapshot(settings, oldSnapshot)
+		snapshotOM := mapToOrdered(oldSnapshot)
+		cleanSnapshotOrdered(settings, snapshotOM)
 	}
 
-	deepMerge(settings, providerCfg)
+	// 2. 清理认证冲突：provider 有 ANTHROPIC_API_KEY 时删除 AUTH_TOKEN，反之亦然
+	providerOM := mapToOrdered(providerCfg)
+	resolveAuthConflict(settings, providerOM)
 
-	return m.SaveSettings(settings)
+	// 3. 注入新提供商配置
+	deepMergeOrdered(settings, providerOM)
+
+	return m.saveOrdered(settings)
+}
+
+// resolveAuthConflict 确保 ANTHROPIC_AUTH_TOKEN 和 ANTHROPIC_API_KEY 不会同时存在。
+// 如果 provider 指定了其中一个，则从 settings 中删除另一个。
+func resolveAuthConflict(settings, providerCfg *orderedMap) {
+	provEnv, ok := providerCfg.get("env")
+	if !ok {
+		return
+	}
+	provEnvOM, ok := provEnv.(*orderedMap)
+	if !ok {
+		return
+	}
+
+	settEnv, ok := settings.get("env")
+	if !ok {
+		return
+	}
+	settEnvOM, ok := settEnv.(*orderedMap)
+	if !ok {
+		return
+	}
+
+	_, hasAPIKey := provEnvOM.get("ANTHROPIC_API_KEY")
+	_, hasAuthToken := provEnvOM.get("ANTHROPIC_AUTH_TOKEN")
+
+	if hasAPIKey {
+		settEnvOM.del("ANTHROPIC_AUTH_TOKEN")
+	}
+	if hasAuthToken {
+		settEnvOM.del("ANTHROPIC_API_KEY")
+	}
 }
 
 // cleanSnapshot 递归遍历 snapshot，删除 settings 中值与 snapshot 相同的字段。
 func cleanSnapshot(settings, snapshot map[string]any) {
-	for key, snapVal := range snapshot {
-		curVal, exists := settings[key]
-		if !exists {
-			continue
-		}
-
-		if reflect.DeepEqual(curVal, snapVal) {
-			delete(settings, key)
-			continue
-		}
-
-		snapMap, snapIsMap := snapVal.(map[string]any)
-		curMap, curIsMap := curVal.(map[string]any)
-		if snapIsMap && curIsMap {
-			cleanSnapshot(curMap, snapMap)
-			if len(curMap) == 0 {
-				delete(settings, key)
-			}
-		}
+	settingsOM := mapToOrdered(settings)
+	snapshotOM := mapToOrdered(snapshot)
+	cleanSnapshotOrdered(settingsOM, snapshotOM)
+	// 全量替换 dst 内容
+	for k := range settings {
+		delete(settings, k)
+	}
+	for k, v := range settingsOM.toMap() {
+		settings[k] = v
 	}
 }
 
-// deepMerge 将 src 递归合并到 dst。src 中的值覆盖 dst 同名 key，嵌套 map 递归合并。
+// deepMerge 将 src 递归合并到 dst。
 func deepMerge(dst, src map[string]any) {
-	for key, srcVal := range src {
-		if dstVal, exists := dst[key]; exists {
-			srcMap, srcIsMap := srcVal.(map[string]any)
-			dstMap, dstIsMap := dstVal.(map[string]any)
-			if srcIsMap && dstIsMap {
-				deepMerge(dstMap, srcMap)
-				continue
-			}
-		}
-		dst[key] = srcVal
+	dstOM := mapToOrdered(dst)
+	srcOM := mapToOrdered(src)
+	deepMergeOrdered(dstOM, srcOM)
+	for k := range dst {
+		delete(dst, k)
+	}
+	for k, v := range dstOM.toMap() {
+		dst[k] = v
 	}
 }
 

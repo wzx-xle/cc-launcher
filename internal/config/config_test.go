@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -262,5 +263,129 @@ func TestMerge_FullFlow(t *testing.T) {
 	backups, _ := filepath.Glob(filepath.Join(backupDir, "settings-*.json"))
 	if len(backups) != 1 {
 		t.Errorf("expected 1 backup, got %d", len(backups))
+	}
+}
+
+func TestMerge_AuthConflict(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+	backupDir := filepath.Join(dir, "backups")
+	m := NewManager(settingsPath, backupDir, 10)
+
+	// settings.json 中有 OAuth 登录设置的 AUTH_TOKEN
+	m.SaveSettings(map[string]any{
+		"env": map[string]any{
+			"ANTHROPIC_AUTH_TOKEN": "oauth-token",
+		},
+	})
+
+	// provider 配置含 API_KEY
+	newProvider := map[string]any{
+		"env": map[string]any{
+			"ANTHROPIC_API_KEY": "sk-key",
+			"ANTHROPIC_MODEL":   "sonnet",
+		},
+	}
+
+	if err := m.Merge(newProvider, nil); err != nil {
+		t.Fatalf("Merge() error = %v", err)
+	}
+
+	result, _ := m.LoadSettings()
+	env := result["env"].(map[string]any)
+
+	if _, ok := env["ANTHROPIC_AUTH_TOKEN"]; ok {
+		t.Error("ANTHROPIC_AUTH_TOKEN should be removed when API_KEY is injected")
+	}
+	if env["ANTHROPIC_API_KEY"] != "sk-key" {
+		t.Error("ANTHROPIC_API_KEY should be injected")
+	}
+	if env["ANTHROPIC_MODEL"] != "sonnet" {
+		t.Error("ANTHROPIC_MODEL should be injected")
+	}
+}
+
+func TestMerge_AuthConflict_Reverse(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+	backupDir := filepath.Join(dir, "backups")
+	m := NewManager(settingsPath, backupDir, 10)
+
+	m.SaveSettings(map[string]any{
+		"env": map[string]any{
+			"ANTHROPIC_API_KEY": "old-key",
+		},
+	})
+
+	// provider 含 AUTH_TOKEN
+	newProvider := map[string]any{
+		"env": map[string]any{
+			"ANTHROPIC_AUTH_TOKEN": "new-token",
+		},
+	}
+
+	if err := m.Merge(newProvider, nil); err != nil {
+		t.Fatalf("Merge() error = %v", err)
+	}
+
+	result, _ := m.LoadSettings()
+	env := result["env"].(map[string]any)
+
+	if _, ok := env["ANTHROPIC_API_KEY"]; ok {
+		t.Error("ANTHROPIC_API_KEY should be removed when AUTH_TOKEN is injected")
+	}
+	if env["ANTHROPIC_AUTH_TOKEN"] != "new-token" {
+		t.Error("ANTHROPIC_AUTH_TOKEN should be injected")
+	}
+}
+
+func TestSaveSettings_PreservesOrder(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	m := NewManager(path, filepath.Join(dir, "backups"), 10)
+
+	// 模拟 Claude Code 自身的 settings.json 初始顺序
+	original := `{
+  "env": {
+    "KEY_FIRST": "1"
+  },
+  "model": "sonnet",
+  "tipsHistory": {
+    "some-tip": 99
+  }
+}
+`
+	os.WriteFile(path, []byte(original), 0644)
+
+	// 合并新配置
+	m.Merge(
+		map[string]any{
+			"env": map[string]any{"NEW_KEY": "val"},
+		},
+		nil,
+	)
+
+	// 读取输出
+	data, _ := os.ReadFile(path)
+	result := string(data)
+
+	// 验证 top-level key 顺序：env 应在 model 前面（因为原文件 env 在前）
+	envIdx := strings.Index(result, "\"env\"")
+	modelIdx := strings.Index(result, "\"model\"")
+	tipsIdx := strings.Index(result, "\"tipsHistory\"")
+	if envIdx < 0 || modelIdx < 0 || tipsIdx < 0 {
+		t.Fatal("missing expected keys in output")
+	}
+	if envIdx >= modelIdx {
+		t.Error("env should appear before model (original order preserved)")
+	}
+	if modelIdx >= tipsIdx {
+		t.Error("model should appear before tipsHistory (original order preserved)")
+	}
+	// NEW_KEY 应该在 KEY_FIRST 后面（注入的新 key 追加在后）
+	firstIdx := strings.Index(result, "\"KEY_FIRST\"")
+	newIdx := strings.Index(result, "\"NEW_KEY\"")
+	if newIdx < firstIdx {
+		t.Error("NEW_KEY should appear after KEY_FIRST (new keys appended)")
 	}
 }
