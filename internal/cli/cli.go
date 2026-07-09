@@ -151,7 +151,7 @@ func (c *CLI) newProvider(name string) error {
 	baseURL, _ := readLine()
 	baseURL = strings.TrimSpace(baseURL)
 
-	fmt.Print("api_key: ")
+	fmt.Print("auth_token: ")
 	apiKey, ok := readLine()
 	if !ok {
 		return fmt.Errorf("已取消")

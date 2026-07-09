@@ -23,7 +23,7 @@ func TestList_WithProviders(t *testing.T) {
 	m := NewManager(dir)
 
 	writeProvider(t, dir, "anthropic.json", map[string]any{
-		"env": map[string]any{"ANTHROPIC_API_KEY": "sk-test"},
+		"env": map[string]any{"ANTHROPIC_AUTH_TOKEN": "sk-test"},
 	})
 	writeProvider(t, dir, "bedrock.json", map[string]any{
 		"env": map[string]any{"CLAUDE_CODE_USE_BEDROCK": "1"},
@@ -95,7 +95,7 @@ func TestGet(t *testing.T) {
 	m := NewManager(dir)
 
 	cfg := map[string]any{
-		"env":   map[string]any{"ANTHROPIC_API_KEY": "sk-test"},
+		"env":   map[string]any{"ANTHROPIC_AUTH_TOKEN": "sk-test"},
 		"model": "sonnet",
 	}
 	writeProvider(t, dir, "anthropic.json", cfg)
@@ -141,8 +141,8 @@ func TestCreate(t *testing.T) {
 	if env["ANTHROPIC_BASE_URL"] != "https://api.example.com" {
 		t.Errorf("base_url = %v, want https://api.example.com", env["ANTHROPIC_BASE_URL"])
 	}
-	if env["ANTHROPIC_API_KEY"] != "sk-custom" {
-		t.Errorf("api_key = %v, want sk-custom", env["ANTHROPIC_API_KEY"])
+	if env["ANTHROPIC_AUTH_TOKEN"] != "sk-custom" {
+		t.Errorf("api_key = %v, want sk-custom", env["ANTHROPIC_AUTH_TOKEN"])
 	}
 }
 

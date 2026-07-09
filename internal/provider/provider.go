@@ -83,14 +83,14 @@ func (m *Manager) Create(name, baseURL, apiKey string) error {
 		return fmt.Errorf("提供商名称不能为空")
 	}
 	if apiKey == "" {
-		return fmt.Errorf("api_key 不能为空")
+		return fmt.Errorf("auth_token 不能为空")
 	}
 	if m.Exists(name) {
 		return fmt.Errorf("提供商 %q 已存在", name)
 	}
 
 	env := map[string]any{
-		"ANTHROPIC_API_KEY": apiKey,
+		"ANTHROPIC_AUTH_TOKEN": apiKey,
 	}
 	if baseURL != "" {
 		env["ANTHROPIC_BASE_URL"] = baseURL
