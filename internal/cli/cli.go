@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"strings"
@@ -203,14 +204,13 @@ func (c *CLI) listModes() error {
 	return nil
 }
 
-// readLine 从 stdin 读取一行。返回 ("", false) 表示 EOF。
+var stdinReader = bufio.NewReader(os.Stdin)
+
+// readLine 从 stdin 读取一行（含空行）。返回 ("", false) 表示 EOF。
 func readLine() (string, bool) {
-	var line string
-	n, err := fmt.Scanln(&line)
+	line, err := stdinReader.ReadString('\n')
 	if err != nil {
-		if n == 0 {
-			return "", false
-		}
+		return "", false
 	}
-	return line, true
+	return strings.TrimRight(line, "\r\n"), true
 }
