@@ -95,8 +95,8 @@ func runTUI(pm *provider.Manager, sm *state.Manager, cm *config.Manager) error {
 		opts.Continue = true
 		sessionLabel = "继续上次会话"
 	case "resume":
-		opts.ResumeID = result.SessionID
-		sessionLabel = "恢复会话 " + result.SessionID
+		opts.Resume = true
+		sessionLabel = "从会话列表选择"
 	}
 
 	fmt.Printf("正在启动 Claude Code (%s / %s / %s)...\n", result.Provider, result.Mode, sessionLabel)

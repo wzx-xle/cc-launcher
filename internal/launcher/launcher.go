@@ -10,8 +10,8 @@ import (
 // Options 启动 Claude Code 的参数。
 type Options struct {
 	PermissionMode string
-	Continue       bool   // --continue
-	ResumeID       string // --resume <id>
+	Continue       bool // --continue
+	Resume         bool // --resume（无 ID，打开原生会话列表）
 }
 
 // Launch 用 exec 替换当前进程启动 Claude Code。
@@ -28,8 +28,8 @@ func Launch(opts Options) error {
 	if opts.Continue {
 		args = append(args, "--continue")
 	}
-	if opts.ResumeID != "" {
-		args = append(args, "--resume", opts.ResumeID)
+	if opts.Resume {
+		args = append(args, "--resume")
 	}
 
 	argv := append([]string{claudePath}, args[1:]...)
