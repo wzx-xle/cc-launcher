@@ -8,22 +8,22 @@
 
 ### 入口
 
-`cc` 命令，通过 shell wrapper（别名/符号链接/PATH）指向 Go 编译的二进制 `cc-launcher`。
+`ccl` 命令，通过 shell wrapper（别名/符号链接/PATH）指向 Go 编译的二进制 `cc-launcher`。
 
 ### 命令结构
 
 ```
-cc                              → 完整 TUI: 选提供商 → 选模式 → 启动 Claude Code
+ccl                              → 完整 TUI: 选提供商 → 选模式 → 启动 Claude Code
 
-cc provider                     → 列出所有提供商（标记当前激活的）
-cc provider <name>              → 切换到指定提供商，更新 state.json
-cc provider --new               → 交互式新增提供商（询问 name、base_url、api_key）
-cc provider --new <name>        → 直接新增并进入配置填写
-cc provider --list              → 列出所有提供商
-cc provider --delete <name>     → 删除指定提供商（当前激活的需二次确认）
+ccl provider                     → 列出所有提供商（标记当前激活的）
+ccl provider <name>              → 切换到指定提供商，更新 state.json
+ccl provider --new               → 交互式新增提供商（询问 name、base_url、api_key）
+ccl provider --new <name>        → 直接新增并进入配置填写
+ccl provider --list              → 列出所有提供商
+ccl provider --delete <name>     → 删除指定提供商（当前激活的需二次确认）
 
-cc mode                         → 列出 6 种权限模式（标记当前目录默认模式）
-cc mode <name>                  → 设置当前目录的默认权限模式，更新 state.json
+ccl mode                         → 列出 6 种权限模式（标记当前目录默认模式）
+ccl mode <name>                  → 设置当前目录的默认权限模式，更新 state.json
 ```
 
 全局选项：`-h` / `--help`，`-v` / `--version`。
@@ -107,7 +107,7 @@ cc mode <name>                  → 设置当前目录的默认权限模式，�
 
 **只操作 `~/.claude/settings.json` 的任意字段，不碰 `~/.claude.json`。**
 
-### 完整 TUI 启动流程（`cc`）
+### 完整 TUI 启动流程（`ccl`）
 
 ```
 1. 加载 ~/.cc-launcher/providers/*.json
@@ -156,25 +156,25 @@ cc mode <name>                  → 设置当前目录的默认权限模式，�
 
 通用原则：fail fast，不留下半脏状态，错误信息打印到 stderr。
 
-### `cc provider` 子命令行为
+### `ccl provider` 子命令行为
 
 ```
-cc provider --list              → 打印列表，▶ 标记当前激活的
-cc provider <name>              → 切换 active_provider，更新 state.json
-cc provider --new               → 交互式：name → base_url → api_key → 写入 JSON
-cc provider --new <name>        → 直接进入 base_url → api_key → 写入
-cc provider --delete <name>     → 删除 providers/<name>.json
+ccl provider --list              → 打印列表，▶ 标记当前激活的
+ccl provider <name>              → 切换 active_provider，更新 state.json
+ccl provider --new               → 交互式：name → base_url → api_key → 写入 JSON
+ccl provider --new <name>        → 直接进入 base_url → api_key → 写入
+ccl provider --delete <name>     → 删除 providers/<name>.json
                                   ├─ 非激活提供商 → 直接删除
                                   └─ 激活的提供商 → 二次确认 ⚠️
 ```
 
-`cc provider`（无参数）等价于 `cc provider --list`。
+`ccl provider`（无参数）等价于 `ccl provider --list`。
 
-### `cc mode` 子命令行为
+### `ccl mode` 子命令行为
 
 ```
-cc mode                         → 打印 6 种模式，▶ 标记当前目录默认
-cc mode <name>                  → 更新 last_permission_modes[当前目录]
+ccl mode                         → 打印 6 种模式，▶ 标记当前目录默认
+ccl mode <name>                  → 更新 last_permission_modes[当前目录]
                                   └─ 非法值 → 提示合法值列表
 ```
 

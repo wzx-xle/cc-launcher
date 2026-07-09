@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 构建 `cc` 终端启动器，在启动 Claude Code 时提供 AI 提供商配置切换和权限模式选择的 TUI 界面。
+**Goal:** 构建 `ccl` 终端启动器，在启动 Claude Code 时提供 AI 提供商配置切换和权限模式选择的 TUI 界面。
 
 **Architecture:** Go + bubbletea TUI 框架，通过 CLI 子命令管理提供商和权限模式配置。配置合并采用「快照比对」机制——切换提供商时只清理未被用户手动修改的字段，保留用户自定义修改。
 
@@ -1435,7 +1435,7 @@ git commit -m "feat: add Claude Code launcher with exec"
 
 ---
 
-### Task 6: CLI 子命令 (cc provider / cc mode)
+### Task 6: CLI 子命令 (ccl provider / ccl mode)
 
 **Files:**
 - Create: `internal/cli/cli.go`
@@ -1677,7 +1677,7 @@ func (c *CLI) runProvider(args []string) error {
 		return c.newProvider(name)
 	case "--delete":
 		if len(args) < 2 {
-			return fmt.Errorf("用法: cc provider --delete <name>")
+			return fmt.Errorf("用法: ccl provider --delete <name>")
 		}
 		return c.deleteProvider(args[1])
 	default:
@@ -2360,10 +2360,10 @@ Expected: 生成 stripped `cc-launcher` 二进制。
 ```bash
 # 方案 A: 符号链接到 PATH 中的目录
 ln -sf "$(pwd)/cc-launcher" /usr/local/bin/cc 2>/dev/null || \
-  echo "提示: 将 cc-launcher 添加到 PATH，或创建 shell alias: alias cc='$(pwd)/cc-launcher'"
+  echo "提示: 将 cc-launcher 添加到 PATH，或创建 shell alias: alias ccl='$(pwd)/cc-launcher'"
 
 # 方案 B: shell alias（添加到 ~/.bashrc 或 ~/.zshrc）
-# alias cc='/home/zxwang/workspace/golang/cc-launcher/cc-launcher'
+# alias ccl='/home/zxwang/workspace/golang/cc-launcher/cc-launcher'
 ```
 
 - [ ] **Step 3: 创建测试提供商配置**
@@ -2391,7 +2391,7 @@ cat > ~/.cc-launcher/providers/bedrock.json << 'EOF'
 EOF
 ```
 
-- [ ] **Step 4: 验证 cc provider 子命令**
+- [ ] **Step 4: 验证 ccl provider 子命令**
 
 ```bash
 ./cc-launcher provider --list
@@ -2418,7 +2418,7 @@ Expected: `已切换到 anthropic`
 ./cc-launcher provider --delete test-provider
 ```
 
-- [ ] **Step 5: 验证 cc mode 子命令**
+- [ ] **Step 5: 验证 ccl mode 子命令**
 
 ```bash
 ./cc-launcher mode
