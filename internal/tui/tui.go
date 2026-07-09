@@ -13,7 +13,16 @@ import (
 // ErrCancelled 表示用户取消操作。
 var ErrCancelled = fmt.Errorf("已取消")
 
-// 权限模式及其描述。
+// Result TUI 选择结果。
+type Result struct {
+	Provider    string
+	Mode        string
+	SessionKind string // "" = 新会话, "continue" = 继续上次, "resume" = 指定会话
+	SessionID   string // SessionKind == "resume" 时有效
+}
+
+// ─── 选项定义 ───
+
 type modeItem struct {
 	mode string
 	desc string
@@ -26,6 +35,18 @@ var modeItems = []modeItem{
 	{"bypassPermissions", "跳过所有权限检查"},
 	{"dontAsk", "不询问，直接执行"},
 	{"plan", "只读，仅分析不执行"},
+}
+
+type sessionItem struct {
+	label string
+	desc  string
+	key   string // "", "continue", "resume"
+}
+
+var sessionItems = []sessionItem{
+	{"新会话", "开始全新对话", ""},
+	{"继续上次", "恢复最近一次会话", "continue"},
+	{"指定会话", "输入 Session ID 恢复", "resume"},
 }
 
 // ─── 样式 ───
@@ -42,8 +63,10 @@ var (
 type stage int
 
 const (
-	stageProvider stage = iota
+	stageProvider  stage = iota
 	stageMode
+	stageSession
+	stageSessionID // 输入 Session ID
 	stageDone
 )
 
@@ -53,13 +76,17 @@ type model struct {
 
 	providers []provider.Info
 	modes     []modeItem
+	sessions  []sessionItem
 
 	defaultProvider string
 	defaultMode     string
 
 	selectedProvider string
 	selectedMode     string
-	quitting         bool
+	selectedSession  string // "", "continue", "resume"
+	sessionID        string // 用户输入的 session ID
+
+	quitting bool
 }
 
 func newModel(providers []provider.Info, defaultProvider, defaultMode string) model {
@@ -76,9 +103,9 @@ func newModel(providers []provider.Info, defaultProvider, defaultMode string) mo
 		cursor:          defaultIdx,
 		providers:       providers,
 		modes:           modeItems,
+		sessions:        sessionItems,
 		defaultProvider: defaultProvider,
 		defaultMode:     defaultMode,
-		selectedMode:    defaultMode,
 	}
 }
 
@@ -95,27 +122,48 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 
 		case "esc":
-			if m.stage == stageProvider {
+			switch m.stage {
+			case stageProvider:
 				m.quitting = true
 				return m, tea.Quit
+			case stageMode:
+				m.stage = stageProvider
+			case stageSession:
+				m.stage = stageMode
+				// 恢复 mode 光标
+				m.cursor = 0
+				for i, mode := range m.modes {
+					if mode.mode == m.defaultMode {
+						m.cursor = i
+						break
+					}
+				}
+			case stageSessionID:
+				m.stage = stageSession
+				m.sessionID = ""
+				m.cursor = 2 // 光标回到 "指定会话"
 			}
-			m.stage = stageProvider
 			return m, nil
 
 		case "up", "k":
-			m.cursor--
-			if m.cursor < 0 {
-				m.cursor = m.currentLen() - 1
+			if m.stage != stageSessionID {
+				m.cursor--
+				if m.cursor < 0 {
+					m.cursor = m.currentLen() - 1
+				}
 			}
 
 		case "down", "j":
-			m.cursor++
-			if m.cursor >= m.currentLen() {
-				m.cursor = 0
+			if m.stage != stageSessionID {
+				m.cursor++
+				if m.cursor >= m.currentLen() {
+					m.cursor = 0
+				}
 			}
 
 		case "enter":
-			if m.stage == stageProvider {
+			switch m.stage {
+			case stageProvider:
 				info := m.providers[m.cursor]
 				if info.Error != "" {
 					return m, nil
@@ -129,10 +177,45 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						break
 					}
 				}
-			} else {
+
+			case stageMode:
 				m.selectedMode = m.modes[m.cursor].mode
-				m.stage = stageDone
-				return m, tea.Quit
+				m.stage = stageSession
+				m.cursor = 0 // 默认停在 "新会话"
+
+			case stageSession:
+				sess := m.sessions[m.cursor]
+				if sess.key == "resume" {
+					m.stage = stageSessionID
+					m.sessionID = ""
+				} else {
+					m.selectedSession = sess.key
+					m.stage = stageDone
+					return m, tea.Quit
+				}
+
+			case stageSessionID:
+				if m.sessionID != "" {
+					m.selectedSession = "resume"
+					m.stage = stageDone
+					return m, tea.Quit
+				}
+			}
+
+		case "backspace":
+			if m.stage == stageSessionID && len(m.sessionID) > 0 {
+				m.sessionID = m.sessionID[:len(m.sessionID)-1]
+			}
+
+		default:
+			// 文本输入：stageSessionID 阶段接受可打印字符
+			if m.stage == stageSessionID {
+				if len(msg.String()) == 1 {
+					ch := msg.String()[0]
+					if ch >= 32 && ch <= 126 {
+						m.sessionID += msg.String()
+					}
+				}
 			}
 		}
 	}
@@ -140,10 +223,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) currentLen() int {
-	if m.stage == stageProvider {
+	switch m.stage {
+	case stageProvider:
 		return len(m.providers)
+	case stageMode:
+		return len(m.modes)
+	case stageSession:
+		return len(m.sessions)
+	default:
+		return 0
 	}
-	return len(m.modes)
 }
 
 func (m model) View() string {
@@ -152,14 +241,18 @@ func (m model) View() string {
 	}
 
 	var sb strings.Builder
-
 	sb.WriteString(titleStyle.Render("Claude Code Launcher"))
 	sb.WriteString("\n\n")
 
-	if m.stage == stageProvider {
+	switch m.stage {
+	case stageProvider:
 		m.renderProviderView(&sb)
-	} else {
+	case stageMode:
 		m.renderModeView(&sb)
+	case stageSession:
+		m.renderSessionView(&sb)
+	case stageSessionID:
+		m.renderSessionIDView(&sb)
 	}
 
 	return sb.String()
@@ -172,7 +265,6 @@ func (m model) renderProviderView(sb *strings.Builder) {
 		if i == m.cursor {
 			marker = "[*]"
 		}
-
 		line := fmt.Sprintf("  %s %s", marker, p.Name)
 		if p.Error != "" {
 			line += dimStyle.Render(fmt.Sprintf(" — %s", p.Error))
@@ -180,7 +272,6 @@ func (m model) renderProviderView(sb *strings.Builder) {
 		if p.Name == m.defaultProvider && p.Error == "" {
 			line += "  " + tagStyle.Render("默认")
 		}
-
 		if i == m.cursor {
 			line = cursorStyle.Render(line)
 		}
@@ -195,13 +286,11 @@ func (m model) renderModeView(sb *strings.Builder) {
 	sb.WriteString(labelStyle.Render(fmt.Sprintf("提供商: %s", m.selectedProvider)))
 	sb.WriteString("\n\n")
 	sb.WriteString("选择权限模式:\n\n")
-
 	for i, mode := range m.modes {
 		marker := "[ ]"
 		if i == m.cursor {
 			marker = "[*]"
 		}
-
 		line := fmt.Sprintf("  %s %s", marker, mode.mode)
 		if mode.desc != "" {
 			line += "  " + dimStyle.Render("— "+mode.desc)
@@ -209,7 +298,6 @@ func (m model) renderModeView(sb *strings.Builder) {
 		if mode.mode == m.defaultMode {
 			line += "  " + tagStyle.Render("默认")
 		}
-
 		if i == m.cursor {
 			line = cursorStyle.Render(line)
 		}
@@ -220,14 +308,53 @@ func (m model) renderModeView(sb *strings.Builder) {
 	sb.WriteString(footerStyle.Render("Enter 确认  Esc 返回  ↑↓ 移动"))
 }
 
+func (m model) renderSessionView(sb *strings.Builder) {
+	sb.WriteString(labelStyle.Render(fmt.Sprintf("提供商: %s", m.selectedProvider)))
+	sb.WriteString("  ")
+	sb.WriteString(labelStyle.Render(fmt.Sprintf("模式: %s", m.selectedMode)))
+	sb.WriteString("\n\n")
+	sb.WriteString("选择会话:\n\n")
+	for i, s := range m.sessions {
+		marker := "[ ]"
+		if i == m.cursor {
+			marker = "[*]"
+		}
+		line := fmt.Sprintf("  %s %s", marker, s.label)
+		if s.desc != "" {
+			line += "  " + dimStyle.Render("— "+s.desc)
+		}
+		if i == m.cursor {
+			line = cursorStyle.Render(line)
+		}
+		sb.WriteString(line)
+		sb.WriteString("\n")
+	}
+	sb.WriteString("\n")
+	sb.WriteString(footerStyle.Render("Enter 确认  Esc 返回  ↑↓ 移动"))
+}
+
+func (m model) renderSessionIDView(sb *strings.Builder) {
+	sb.WriteString(labelStyle.Render(fmt.Sprintf("提供商: %s", m.selectedProvider)))
+	sb.WriteString("  ")
+	sb.WriteString(labelStyle.Render(fmt.Sprintf("模式: %s", m.selectedMode)))
+	sb.WriteString("\n\n")
+	sb.WriteString("输入 Session ID:\n\n")
+	sb.WriteString("  ")
+	sb.WriteString(cursorStyle.Render(m.sessionID))
+	if len(m.sessionID) == 0 {
+		sb.WriteString(dimStyle.Render("（输入完成后回车确认）"))
+	}
+	sb.WriteString("\n\n")
+	sb.WriteString(footerStyle.Render("Enter 确认  Esc 返回  Backspace 删除"))
+}
+
 // ─── 公开入口 ───
 
-// Run 启动 TUI，依次让用户选择提供商和权限模式。
-func Run(providers []provider.Info, defaultProvider, defaultMode string) (string, string, error) {
+// Run 启动 TUI，依次让用户选择提供商、权限模式和会话恢复。
+func Run(providers []provider.Info, defaultProvider, defaultMode string) (*Result, error) {
 	if len(providers) == 0 {
-		return "", "", fmt.Errorf("暂无提供商配置，请在 ~/.cc-launcher/providers/ 下添加 JSON 文件")
+		return nil, fmt.Errorf("暂无提供商配置，请在 ~/.cc-launcher/providers/ 下添加 JSON 文件")
 	}
-
 	if defaultMode == "" {
 		defaultMode = "manual"
 	}
@@ -235,13 +362,18 @@ func Run(providers []provider.Info, defaultProvider, defaultMode string) (string
 	m := newModel(providers, defaultProvider, defaultMode)
 	finalModel, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
 	if err != nil {
-		return "", "", err
+		return nil, err
 	}
 
 	result := finalModel.(model)
 	if result.quitting || result.selectedProvider == "" {
-		return "", "", ErrCancelled
+		return nil, ErrCancelled
 	}
 
-	return result.selectedProvider, result.selectedMode, nil
+	return &Result{
+		Provider:    result.selectedProvider,
+		Mode:        result.selectedMode,
+		SessionKind: result.selectedSession,
+		SessionID:   result.sessionID,
+	}, nil
 }
