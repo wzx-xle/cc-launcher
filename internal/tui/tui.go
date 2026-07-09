@@ -31,11 +31,12 @@ var modeItems = []modeItem{
 // ─── 样式 ───
 
 var (
-	titleStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("5"))
-	labelStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	cursorStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
-	dimStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	footerStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	titleStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("5"))
+	labelStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	cursorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
+	dimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	tagStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
+	footerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 )
 
 type stage int
@@ -47,11 +48,14 @@ const (
 )
 
 type model struct {
-	stage   stage
-	cursor  int
+	stage  stage
+	cursor int
 
 	providers []provider.Info
 	modes     []modeItem
+
+	defaultProvider string
+	defaultMode     string
 
 	selectedProvider string
 	selectedMode     string
@@ -68,12 +72,13 @@ func newModel(providers []provider.Info, defaultProvider, defaultMode string) mo
 	}
 
 	return model{
-		stage:     stageProvider,
-		cursor:    defaultIdx,
-		providers: providers,
-		modes:     modeItems,
-		selectedMode: defaultMode,
-		// 光标初始在 defaultModeIdx（但当前 stage 是 provider，暂不用 mode cursor）
+		stage:           stageProvider,
+		cursor:          defaultIdx,
+		providers:       providers,
+		modes:           modeItems,
+		defaultProvider: defaultProvider,
+		defaultMode:     defaultMode,
+		selectedMode:    defaultMode,
 	}
 }
 
@@ -113,14 +118,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.stage == stageProvider {
 				info := m.providers[m.cursor]
 				if info.Error != "" {
-					return m, nil // 跳过解析失败的
+					return m, nil
 				}
 				m.selectedProvider = info.Name
 				m.stage = stageMode
-				// 恢复光标到 mode 的默认位置
 				m.cursor = 0
 				for i, mode := range m.modes {
-					if mode.mode == m.selectedMode {
+					if mode.mode == m.defaultMode {
 						m.cursor = i
 						break
 					}
@@ -149,66 +153,71 @@ func (m model) View() string {
 
 	var sb strings.Builder
 
-	// 标题
 	sb.WriteString(titleStyle.Render("Claude Code Launcher"))
 	sb.WriteString("\n\n")
 
-	// 提供商选择阶段
 	if m.stage == stageProvider {
-		sb.WriteString("选择提供商:\n\n")
-		for i, p := range m.providers {
-			cursor := " "
-			if i == m.cursor {
-				cursor = "*"
-			}
-			marker := "[ ]"
-			if cursor == "*" {
-				marker = "[*]"
-			}
-
-			line := fmt.Sprintf("  %s %s", marker, p.Name)
-			if i == m.cursor {
-				line = cursorStyle.Render(line)
-			}
-			if p.Error != "" {
-				line += dimStyle.Render(fmt.Sprintf(" — %s", p.Error))
-			}
-			sb.WriteString(line)
-			sb.WriteString("\n")
-		}
-		sb.WriteString("\n")
-		sb.WriteString(footerStyle.Render("Enter 确认  Esc 退出  ↑↓ 移动"))
+		m.renderProviderView(&sb)
 	} else {
-		// 权限模式选择阶段
-		sb.WriteString(labelStyle.Render(fmt.Sprintf("提供商: %s", m.selectedProvider)))
-		sb.WriteString("\n\n")
-		sb.WriteString("选择权限模式:\n\n")
-
-		for i, mode := range m.modes {
-			cursor := " "
-			if i == m.cursor {
-				cursor = "*"
-			}
-			marker := "[ ]"
-			if cursor == "*" {
-				marker = "[*]"
-			}
-
-			line := fmt.Sprintf("  %s %s", marker, mode.mode)
-			if mode.desc != "" {
-				line += "  " + dimStyle.Render("— "+mode.desc)
-			}
-			if i == m.cursor {
-				line = cursorStyle.Render(line)
-			}
-			sb.WriteString(line)
-			sb.WriteString("\n")
-		}
-		sb.WriteString("\n")
-		sb.WriteString(footerStyle.Render("Enter 确认  Esc 返回  ↑↓ 移动"))
+		m.renderModeView(&sb)
 	}
 
 	return sb.String()
+}
+
+func (m model) renderProviderView(sb *strings.Builder) {
+	sb.WriteString("选择提供商:\n\n")
+	for i, p := range m.providers {
+		marker := "[ ]"
+		if i == m.cursor {
+			marker = "[*]"
+		}
+
+		line := fmt.Sprintf("  %s %s", marker, p.Name)
+		if p.Error != "" {
+			line += dimStyle.Render(fmt.Sprintf(" — %s", p.Error))
+		}
+		if p.Name == m.defaultProvider && p.Error == "" {
+			line += "  " + tagStyle.Render("默认")
+		}
+
+		if i == m.cursor {
+			line = cursorStyle.Render(line)
+		}
+		sb.WriteString(line)
+		sb.WriteString("\n")
+	}
+	sb.WriteString("\n")
+	sb.WriteString(footerStyle.Render("Enter 确认  Esc 退出  ↑↓ 移动"))
+}
+
+func (m model) renderModeView(sb *strings.Builder) {
+	sb.WriteString(labelStyle.Render(fmt.Sprintf("提供商: %s", m.selectedProvider)))
+	sb.WriteString("\n\n")
+	sb.WriteString("选择权限模式:\n\n")
+
+	for i, mode := range m.modes {
+		marker := "[ ]"
+		if i == m.cursor {
+			marker = "[*]"
+		}
+
+		line := fmt.Sprintf("  %s %s", marker, mode.mode)
+		if mode.desc != "" {
+			line += "  " + dimStyle.Render("— "+mode.desc)
+		}
+		if mode.mode == m.defaultMode {
+			line += "  " + tagStyle.Render("默认")
+		}
+
+		if i == m.cursor {
+			line = cursorStyle.Render(line)
+		}
+		sb.WriteString(line)
+		sb.WriteString("\n")
+	}
+	sb.WriteString("\n")
+	sb.WriteString(footerStyle.Render("Enter 确认  Esc 返回  ↑↓ 移动"))
 }
 
 // ─── 公开入口 ───
