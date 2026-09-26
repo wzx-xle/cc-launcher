@@ -39,3 +39,10 @@
 - [x] 6.3 commit: test — 新增 contract test + TUI/CLI 一致锁
 - [x] 6.4 commit: docs+chore — README 契约章节、build.sh 新子命令、.gitignore
 - [x] 6.5 commit: openspec change artifacts — proposal/design/specs/tasks
+
+## 7. 重构与契约测试加固
+
+- [x] 7.1 新增 `internal/modes` 包：把 names + 中文描述从 cli / tui 抽出，作为单一事实源；`cli` 与 `tui` 都依赖 `modes`；删除 `internal/tui/modes_test.go` 的跨包 import，改在 `internal/modes/modes_test.go` 锁 names / descriptions / ByName。
+- [x] 7.2 把契约测试从脆弱的 `--help` 文本解析改为行为探测：`claude --permission-mode <probe>` 解析错误信息中的 `Allowed choices are ...`；本机 `claude --permission-mode __cc_launcher_probe__` 实测返回稳定单行消息，可直接正则提取。
+- [x] 7.3 `internal/cli/cli.go` 移除 `ValidModes`，改为 `modes.Names()`。
+- [x] 7.4 `internal/tui/tui.go` 移除 `modeItem` / `modeItems`，model.modes 改用 `[]modes.Mode`，字段访问从 `.mode/.desc` 改为 `.Name/.Description`。

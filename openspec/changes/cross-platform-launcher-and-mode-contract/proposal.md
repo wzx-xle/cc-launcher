@@ -6,10 +6,10 @@
 
 - **新增 `internal/launcher/launcher_unix.go`（`//go:build !windows`）与 `internal/launcher/launcher_windows.go`（`//go:build windows`）**。把 `Launch` 拆成跨平台的 `resolveClaude(opts) (path, args, err)`（留在 `launcher.go`）和平台特定的 `Launch(opts) error`。
 - **Windows 实现**：没有 `exec` 系统调用，改为 spawn 子进程、继承 stdio；为 npm 全局安装生成的 `claude.cmd/.bat` 走 `cmd /c` 启动；`os.Exit` 透传子进程退出码，模拟 Unix `syscall.Exec` 成功时不返回的语义。
-- **导出 `cli.ValidModes`**，让其他包可以引用。
-- **新增 build tag `contract` 的契约测试** `internal/cli/permission_contract_test.go`：执行本机 `claude --help`，解析 `(choices: ...)` 段，与 `cli.ValidModes` 比对。本机无 `claude` 时自动 SKIP。修复位置同时标注 CLI 和 TUI 两份列表。
-- **新增常规测试** `internal/tui/modes_test.go`：锁死 TUI `modeItems` 的 mode 集合与 `cli.ValidModes` 排序后一致，并校验每个 mode 都有非空中文描述。
-- **修正 `modeItems` 的中文描述**：旧描述把 `dontAsk` 写成"不询问，直接执行"会误导（实际是最严格模式、未预授权则直接拒绝）；同步更新 README 的权限模式表。
+- **新增 `internal/modes` 包**，作为权限模式名称与中文描述的单一事实源；`internal/cli` 与 `internal/tui` 都改为依赖它，消除之前 `internal/tui/modes_test.go` 跨包 import `internal/cli` 的隐患。
+- **新增 build tag `contract` 的契约测试** `internal/cli/permission_contract_test.go`：用行为探测（`claude --permission-mode __cc_launcher_probe__`）抓 `Allowed choices are ...` 行，与 `modes.Names()` 比对。比解析 `--help` 文本更稳定：本机 v2.1.267 实测错误信息为单行、机器可读、跨上下文（--help/裸调用/--print）一致。本机无 `claude` 时自动 SKIP。
+- **新增常规测试** `internal/modes/modes_test.go`：锁 names 顺序与 all 一致、每条都有非空中文描述、names 全局唯一、`ByName` 命中与未命中两条路径都覆盖。
+- **修正 mode 描述**：旧 TUI 描述把 `dontAsk` 写成"不询问，直接执行"会误导（实际是最严格模式、未预授权则直接拒绝）；同步更新 README 的权限模式表。
 - **`build.sh`**：新增 `contract` / `windows` / `release` 子命令；`clean` 同步清理 `dist/`。
 
 ## Capabilities

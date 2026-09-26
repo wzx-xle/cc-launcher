@@ -55,24 +55,34 @@ return nil  // 让 Go 编译器满意（os.Exit 不做控制流分析）
 
 **备选**：用环境变量门控 → 不接受，build tag 更明确，且 IDE/test runner 友好。
 
-### 5. 契约测试解析 `claude --help` 输出
+### 5. 契约测试用行为探测取代 `--help` 文本解析（修订）
 
-help 输出按终端宽度折行；`--permission-mode` 选项的描述可能跨多行，并以 `(choices: "foo", "bar", ...)` 收尾。算法：
-1. 找到以 `--permission-mode` 开头的行
-2. 把后续非"以 `--` / `-x,` 开头"的行追加到同一段（终止续行收集）
-3. 在段内定位 `(choices:` 和最近的 `)`，提取引号里的值
+> 决策 5 的最初版本要求解析 `claude --help` 的 `(choices: ...)` 段。实施时发现更稳定的来源：claude 在收到未知 `--permission-mode` 值时会输出 `Allowed choices are A, B, C.`（实测 v2.1.267，单行、机器可读，跨 `--help` / 裸调用 / `--print` 一致）。改为基于这个错误信息做契约测试。
 
-**理由**：Claude Code CLI 当前的 help 格式就是这个；写测试时已实测可解析。
+算法：
+1. 探测参数 `__cc_launcher_probe__`（绝不可能合法）触发错误路径
+2. 在 CombinedOutput 里正则抓 `Allowed choices are (.*?)\.`
+3. 在抓到的列表里用 `[A-Za-z][A-Za-z0-9]*` 提项并去重
 
-**风险**：help 格式变化（`choices:` 改名 / 改为结构化输出）→ 测试会假阳性。缓解：测试报错信息打印完整的 `--permission-mode` 段，便于快速定位格式变化。
+**理由**：行为探测走的是 Claude Code 的运行时参数校验器，不依赖 help 文本的排版（help 文本会按终端宽度折行、可能改格式）；错误信息是单行字符串，更稳。
 
-### 6. TUI / CLI 一致锁放在常规测试
+**风险**：Claude Code 改 `Allowed choices are` 的措辞 → 测试会假阳性。缓解：错误信息是 SDK / CLI 通用约定（commander.js / yargs 都这么写），跨大版本变化概率低；报错信息打印完整原始输出便于快速修复。
 
-`internal/tui/modes_test.go` 直接 `import "cc-launcher/internal/cli"`，把 `modeItems` 与 `cli.ValidModes` 排序后比对。
+**实测样本**（v2.1.267）：
+```
+$ claude --permission-mode bogusMode
+error: option '--permission-mode <mode>' argument 'bogusMode' is invalid. Allowed choices are acceptEdits, auto, bypassPermissions, manual, dontAsk, plan.
+```
 
-**理由**：最直接的 lock；不引入共享 internal 包的成本最小。tui 包本来就没有 cli 反向依赖，无循环。
+### 6. 抽 `internal/modes` 包作为单一事实源（新增）
 
-**未来重构**（不在本次范围）：把 `ValidModes` 抽到 `internal/modes` 包，让 tui 不直接依赖 cli。
+`internal/modes` 包持有 `Mode{Name, Description}`、`Names()`、`All()`、`ByName()` 与包级 `all` 切片。`internal/cli` 用 `modes.Names()` 校验；`internal/tui` 用 `modes.All()` 渲染；`internal/modes/modes_test.go` 锁 names 顺序、唯一性、描述非空、`ByName` 双路径。
+
+**理由**：(a) 消除 `internal/tui/modes_test.go` 跨包 import `internal/cli` 的方向性问题；(b) 描述是用户做选择的依据，属于领域知识而不是 TUI 展示细节；(c) 三处共用一份字面量，新增 / 删除模式只改一处。
+
+**备选 A**：`modes` 包只放 names，descriptions 留在 `tui` → 不接受。描述是模式本身的语义，不是 TUI 的展示细节。
+
+**备选 B**：把 `Names()` / `All()` 改成全局变量（而不是函数返回值）→ 不接受。每次访问都 copy 一份切片避免调用方误改内部状态。
 
 ### 7. 修正 mode 描述
 
@@ -81,15 +91,19 @@ help 输出按终端宽度折行；`--permission-mode` 选项的描述可能跨�
 ## Risks / Trade-offs
 
 - [Windows 退出码透传不可见] 在 Windows 上 cmd.Run() 的 exit code 与 Unix syscall.Exec 的行为不完全对齐（Windows 的 ExitError.ExitCode() 可能不返回 Unix 信号导致的退出码）→ 不解决：cc-launcher 的目标是用户体验一致，不深入 Windows 进程信号语义。
-- [契约测试脆性] 解析 `claude --help` 文本是脆性契约 → 缓解：测试报错信息友好，定位快；如未来 Claude Code 提供 `--print-schema` 可切换。
-- [modeItems 跨包依赖 tui → cli] 短期可接受，长期应抽 `internal/modes` 包 → 留作后续重构。
+- [契约测试措辞依赖] 探测依赖 `Allowed choices are` 这串英文 → 缓解：错误信息是 SDK / CLI 通用约定，跨大版本变化概率低；测试报错信息打印完整原始输出便于快速修复；未来如 Claude Code 提供 `--print-schema` 可一键切换。
 - [`.cmd` 判断依赖后缀] 若 Claude Code 改名（如 `claudejs.cmd`）会失效 → 缓解：注释明确该判断的目的，后续可通过实际安装路径前缀扩展。
+- [modes 包描述是中文] 当前 descriptions 是中文，与 TUI / README 一致；如果未来要支持英文环境 → 后续可加 `modes.DescriptionEN` 或本地化层。
 
 ## Migration Plan
 
-无需数据迁移；旧的 `validModes` 是包内未导出，导出为 `ValidModes` 是兼容改动（同包内调用方式不变）。
+旧的 `cli.validModes`（小写、未导出）→ `cli.ValidModes`（导出）→ 移除，改用 `modes.Names()`。这是一个三阶段的兼容改动，因为：
+- 阶段 1（已合并 `5077e1b`）：导出 `ValidModes`，让测试可以引用。
+- 阶段 2（本次 7.x）：移除 `ValidModes`，统一走 `modes.Names()`。
+
+如果项目里还有其他调用方引用 `cli.ValidModes`，阶段 2 会破坏它们——但 cc-launcher 是单一仓库，且 grep 已确认只有 cli / tui / 测试三处引用，安全。
 
 ## Open Questions
 
-- 是否需要在 `tui/modes_test.go` 之外再为 `tui` 单测加一个"modeItems 顺序与 Claude Code 官方顺序一致"的检查？目前不强约束（用户面向的是展示，不是 CLI 参数顺序）。
 - `dist/` 加入 .gitignore 后，构建产物的发布流程怎么走？当前无 release 脚本，可能后续需要。
+- 是否需要在 `modes_test.go` 之外再为 TUI 加一个"渲染时把 Description 当成一行内文本而不是段落"的测试？目前由 `renderModeView` 的拼接逻辑保证，但未单独测。
