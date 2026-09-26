@@ -28,12 +28,12 @@ type modeItem struct {
 }
 
 var modeItems = []modeItem{
-	{"manual", "每次操作询问确认"},
-	{"acceptEdits", "自动接受文件编辑"},
-	{"auto", "自动执行非破坏性操作"},
-	{"bypassPermissions", "跳过所有权限检查"},
-	{"dontAsk", "不询问，直接执行"},
-	{"plan", "只读，仅分析不执行"},
+	{"manual", "每次危险操作都询问确认（default 别名）"},
+	{"acceptEdits", "自动接受文件编辑，其余仍询问"},
+	{"auto", "模型分类器自动判定批准/拒绝"},
+	{"bypassPermissions", "跳过所有权限检查（危险）"},
+	{"dontAsk", "不询问；未预授权的操作直接拒绝"},
+	{"plan", "计划模式，只读不执行工具"},
 }
 
 type sessionItem struct {
