@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"cc-launcher/internal/modes"
 	"cc-launcher/internal/provider"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -21,20 +22,6 @@ type Result struct {
 }
 
 // ─── 选项定义 ───
-
-type modeItem struct {
-	mode string
-	desc string
-}
-
-var modeItems = []modeItem{
-	{"manual", "每次危险操作都询问确认（default 别名）"},
-	{"acceptEdits", "自动接受文件编辑，其余仍询问"},
-	{"auto", "模型分类器自动判定批准/拒绝"},
-	{"bypassPermissions", "跳过所有权限检查（危险）"},
-	{"dontAsk", "不询问；未预授权的操作直接拒绝"},
-	{"plan", "计划模式，只读不执行工具"},
-}
 
 type sessionItem struct {
 	label string
@@ -73,7 +60,7 @@ type model struct {
 	cursor int
 
 	providers []provider.Info
-	modes     []modeItem
+	modes     []modes.Mode
 	sessions  []sessionItem
 
 	defaultProvider string
@@ -99,7 +86,7 @@ func newModel(providers []provider.Info, defaultProvider, defaultMode string) mo
 		stage:           stageProvider,
 		cursor:          defaultIdx,
 		providers:       providers,
-		modes:           modeItems,
+		modes:           modes.All(),
 		sessions:        sessionItems,
 		defaultProvider: defaultProvider,
 		defaultMode:     defaultMode,
@@ -129,7 +116,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.stage = stageMode
 				m.cursor = 0
 				for i, mode := range m.modes {
-					if mode.mode == m.defaultMode {
+					if mode.Name == m.defaultMode {
 						m.cursor = i
 						break
 					}
@@ -160,14 +147,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.stage = stageMode
 				m.cursor = 0
 				for i, mode := range m.modes {
-					if mode.mode == m.defaultMode {
+					if mode.Name == m.defaultMode {
 						m.cursor = i
 						break
 					}
 				}
 
 			case stageMode:
-				m.selectedMode = m.modes[m.cursor].mode
+				m.selectedMode = m.modes[m.cursor].Name
 				m.stage = stageSession
 				m.cursor = 0 // 始终默认新会话
 
@@ -248,11 +235,11 @@ func (m model) renderModeView(sb *strings.Builder) {
 		if i == m.cursor {
 			marker = "[*]"
 		}
-		line := fmt.Sprintf("  %s %s", marker, mode.mode)
-		if mode.desc != "" {
-			line += "  " + dimStyle.Render("— "+mode.desc)
+		line := fmt.Sprintf("  %s %s", marker, mode.Name)
+		if mode.Description != "" {
+			line += "  " + dimStyle.Render("— "+mode.Description)
 		}
-		if mode.mode == m.defaultMode {
+		if mode.Name == m.defaultMode {
 			line += "  " + tagStyle.Render("默认")
 		}
 		if i == m.cursor {

@@ -6,13 +6,10 @@ import (
 	"os"
 	"strings"
 
+	"cc-launcher/internal/modes"
 	"cc-launcher/internal/provider"
 	"cc-launcher/internal/state"
 )
-
-// ValidModes 是 Claude Code `--permission-mode` 接受的合法取值。
-// 必须与 `claude --help` 中的 choices 保持一致，由 permission_contract_test.go（-tags contract）校验。
-var ValidModes = []string{"manual", "acceptEdits", "auto", "bypassPermissions", "dontAsk", "plan"}
 
 // CLI 处理 cc 子命令路由。
 type CLI struct {
@@ -78,7 +75,7 @@ func (c *CLI) runMode(args []string) error {
 		return fmt.Errorf("未知选项: %s", mode)
 	}
 
-	for _, m := range ValidModes {
+	for _, m := range modes.Names() {
 		if m == mode {
 			wd, err := os.Getwd()
 			if err != nil {
@@ -91,7 +88,7 @@ func (c *CLI) runMode(args []string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("无效的权限模式 %q，合法值: %s", mode, strings.Join(ValidModes, ", "))
+	return fmt.Errorf("无效的权限模式 %q，合法值: %s", mode, strings.Join(modes.Names(), ", "))
 }
 
 func (c *CLI) listProviders() error {
@@ -195,7 +192,7 @@ func (c *CLI) listModes() error {
 	}
 	currentMode, _ := c.state.GetPermissionMode(wd)
 
-	for _, mode := range ValidModes {
+	for _, mode := range modes.Names() {
 		marker := "  "
 		if mode == currentMode {
 			marker = "▶ "
