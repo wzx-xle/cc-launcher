@@ -1,5 +1,6 @@
 /cc-launcher
 /.claude/
+/dist/
 *.swp
 *.swo
 *~

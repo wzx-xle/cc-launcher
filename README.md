@@ -69,12 +69,14 @@
 
 | 模式 | 说明 | CLI 参数 |
 |------|------|----------|
-| manual | 每次操作询问确认 | `--permission-mode manual` |
-| acceptEdits | 自动接受文件编辑 | `--permission-mode acceptEdits` |
-| auto | 自动执行非破坏性操作 | `--permission-mode auto` |
-| bypassPermissions | 跳过所有权限检查 | `--permission-mode bypassPermissions` |
-| dontAsk | 不询问，直接执行 | `--permission-mode dontAsk` |
-| plan | 只读，仅分析不执行 | `--permission-mode plan` |
+| manual | 标准行为，危险操作逐次询问确认（Claude Code 内部 `default` 的别名） | `--permission-mode manual` |
+| acceptEdits | 自动接受文件编辑操作，其余操作仍询问 | `--permission-mode acceptEdits` |
+| auto | 由模型分类器自动批准/拒绝权限请求 | `--permission-mode auto` |
+| bypassPermissions | 跳过所有权限检查（危险，仅建议在隔离沙箱使用） | `--permission-mode bypassPermissions` |
+| dontAsk | 不弹权限询问；未被 allow 规则预先授权的操作**直接拒绝** | `--permission-mode dontAsk` |
+| plan | 计划模式，只分析不实际执行工具 | `--permission-mode plan` |
+
+> 语义以本机 `claude --help` / Claude Code 2.1.x 为准。注意 `dontAsk` 是**最严格**的非交互模式（适合 CI），不是"自动放行"。
 
 ## 配置合并机制
 
@@ -105,9 +107,25 @@
 # 运行测试
 ./build.sh test
 
+# 运行契约测试（校验权限模式列表与本机 claude CLI 一致）
+./build.sh contract
+
 # 编译
 ./build.sh build
 
 # 编译并运行（带参数）
 ./build.sh run
 ```
+
+### 契约测试
+
+`--permission-mode` 的合法取值由 Claude Code 定义，会随其版本变动。
+`internal/cli/permission_contract_test.go`（build tag `contract`）会执行本机
+`claude --help`，解析出实际的 choices 集合并与 `cli.ValidModes` 比对，
+不一致就报错并列出需要新增/移除的模式。
+
+- 用 build tag 隔离，不污染常规 `go test ./...`
+- 本机没有 `claude` 命令时自动 SKIP，CI 环境安全
+- `internal/tui/modes_test.go` 走常规测试，锁死 TUI 展示列表与 `cli.ValidModes` 一致
+
+也就是说：Claude Code 一旦增删权限模式，`./build.sh contract` 会直接变红。
