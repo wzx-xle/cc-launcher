@@ -18,11 +18,21 @@ const topHelp = `用法: ccl [子命令] [选项]
 
 子命令:
     (无)              启动 TUI 引导：选提供商 → 选权限模式 → 启动 Claude Code
+    serve             OTel daemon 模式（ccl 自动 fork，通常不需手动跑）
+    stats             显示 token / cost 聚合（直读 SQLite，无需 daemon 在跑）
+    stop              停掉 OTel daemon
+    restore           还原 settings.json 到 ccl 之前的状态
     provider          管理提供商（详见 ccl provider --help）
     mode              管理当前目录的权限模式（详见 ccl mode --help）
 
 选项:
     -h, --help        显示本帮助并退出
+
+用量监控：
+  - ccl 首次跑会拉起 OTel daemon（监听 :4318）
+  - 跑过 Claude Code session 后用 ccl stats 查看
+  - 不要 daemon 时跑 ccl stop；要彻底清除注入用 ccl restore
+  - 隐私：daemon 不解析 logs/traces；本地 SQLite 永远没有 prompt 内容
 
 想看具体怎么配置 deepseek / MiniMax / 智谱 / 阿里云？
     ccl provider --template        # 列出全部 7 种支持的模板
@@ -42,6 +52,14 @@ func run(args []string) error {
 		case "-h", "--help", "help":
 			fmt.Println(topHelp)
 			return nil
+		case "serve":
+			return runServe(args[1:])
+		case "stats":
+			return runStats(args[1:])
+		case "stop":
+			return runStop(args[1:])
+		case "restore":
+			return runRestore(args[1:])
 		}
 	}
 
@@ -123,6 +141,52 @@ func runTUI(pm *provider.Manager, sm *state.Manager, cm *config.Manager) error {
 		sessionLabel = "从会话列表选择"
 	}
 
+	// 注入 OTel env（备份 + 写默认值）
+	if err := injectOTelEnv(cm); err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ 注入 OTel env 失败: %v\n", err)
+	}
+
+	// 拉起 OTel daemon（按需；端口已占 → skip）
+	started, _ := ensureDaemonRunning()
+	if started {
+		fmt.Println("✓ OTel daemon 拉起成功（监听 :4318）")
+	}
+
 	fmt.Printf("正在启动 Claude Code (%s / %s / %s)...\n", result.Provider, result.Mode, sessionLabel)
 	return launcher.Launch(opts)
+}
+
+// injectOTelEnv 在 exec Claude Code 前把 OTel env 注入 ~/.claude/settings.json。
+//
+// 失败仅警告，不阻断 ccl 主流程（决策 10：daemon 是 optional）。
+func injectOTelEnv(cm *config.Manager) error {
+	settings, err := cm.LoadSettings()
+	if err != nil {
+		return err
+	}
+	envAny, _ := settings["env"].(map[string]any)
+	env := make(map[string]string, len(envAny))
+	for k, v := range envAny {
+		if s, ok := v.(string); ok {
+			env[k] = s
+		}
+	}
+	updated := backupAndInjectOTel(env)
+
+	// 比较是否真的改了
+	changed := len(envAny) != len(updated)
+	if !changed {
+		for k, v := range updated {
+			if cur, ok := envAny[k]; !ok || cur != v {
+				changed = true
+				break
+			}
+		}
+	}
+	if !changed {
+		return nil // 无变更，不写盘
+	}
+
+	settings["env"] = updated
+	return cm.SaveSettings(settings)
 }
