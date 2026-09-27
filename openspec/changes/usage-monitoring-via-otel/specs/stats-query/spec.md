@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: ccl stats prints a table of session usage
-`ccl stats` MUST call the daemon's HTTP `:4319/stats` endpoint and print a human-readable table with one row per session. Default window is the last 7 days. The table MUST include a `PROJECT` column derived from `filepath.Base(session.cwd)`.
+`ccl stats` MUST open `~/.cc-launcher/telemetry.db` directly (no daemon HTTP) and print a human-readable table with one row per session. Default window is the last 7 days. The table MUST include a `PROJECT` column derived from `filepath.Base(session.cwd)`.
 
 #### Scenario: stats table is readable
 - **WHEN** user runs `ccl stats` after one Claude Code session
@@ -31,31 +31,16 @@
 - **WHEN** user runs `ccl stats --json`
 - **THEN** stdout is a valid JSON object with `sessions: [...]` (each session has `project` field derived from cwd basename) and `totals: {...}`; pipeable to `jq`
 
-### Requirement: ccl stats handles the offline case
-If the daemon is not running, `ccl stats` MUST print a clear error and exit non-zero — NOT silently print empty results.
+### Requirement: ccl stats handles the missing-db case
+If `~/.cc-launcher/telemetry.db` does not exist (e.g., daemon never started), `ccl stats` MUST print a clear error and exit non-zero — NOT silently print empty results.
 
-#### Scenario: daemon not running
-- **WHEN** user runs `ccl stats` and `:4319` is unreachable
-- **THEN** stdout says "daemon not running, run ccl to start one" and exit code is non-zero
+#### Scenario: db file does not exist
+- **WHEN** user runs `ccl stats` and `~/.cc-launcher/telemetry.db` is missing
+- **THEN** stdout says "no telemetry data yet; run `ccl` to start a session"; exit code is non-zero
 
-#### Scenario: daemon alive but db empty
-- **WHEN** user runs `ccl stats` and SQLite has no sessions
+#### Scenario: db exists but has no sessions
+- **WHEN** user runs `ccl stats` and SQLite has no rows in `sessions`
 - **THEN** stdout shows an empty table (no rows) with a "no data" hint; exit code 0
-
-### Requirement: HTTP API on :4319 returns the same data
-The daemon MUST expose HTTP endpoints for stats so non-CLI consumers (future TUI / web dashboard) can use the same API.
-
-#### Scenario: GET /stats returns sessions + totals
-- **WHEN** a HTTP client sends `GET http://localhost:4319/stats?since=2026-09-01&by_provider=true`
-- **THEN** the response is JSON with `sessions` array and `totals` object
-
-#### Scenario: GET /stats accepts project filter
-- **WHEN** a HTTP client sends `GET http://localhost:4319/stats?project=cc-launcher`
-- **THEN** only sessions whose cwd contains `cc-launcher` appear in the response
-
-#### Scenario: GET /health returns 200
-- **WHEN** a HTTP client sends `GET http://localhost:4319/health`
-- **THEN** the response is `200 OK` with `{"status":"ok"}`
 
 ### Requirement: queries aggregate by metric name
 `ccl stats` MUST aggregate the per-event `input_tokens` / `output_tokens` / `cache_creation_input_tokens` / `cache_read_input_tokens` into session totals.
@@ -67,3 +52,14 @@ The daemon MUST expose HTTP endpoints for stats so non-CLI consumers (future TUI
 #### Scenario: cache tokens are shown separately
 - **WHEN** a session has metrics with both `input_tokens` and `cache_creation_input_tokens`
 - **THEN** the row shows distinct columns for both; no double-counting
+
+### Requirement: ccl stats uses WAL-safe concurrent reads
+`ccl stats` MUST NOT block waiting for the daemon's writes; SQLite WAL mode MUST allow concurrent reads while the daemon is the single writer.
+
+#### Scenario: ccl stats runs while daemon is writing
+- **WHEN** user runs `ccl stats` and the daemon is actively persisting metrics to the same SQLite file
+- **THEN** `ccl stats` returns results in <500ms with no lock contention errors
+
+#### Scenario: no daemon HTTP is involved
+- **WHEN** user inspects `ccl stats` source code
+- **THEN** there is NO HTTP client / no :4319 reference; ccl stats opens the SQLite file directly

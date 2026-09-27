@@ -1,26 +1,37 @@
 ## ADDED Requirements
 
 ### Requirement: ccl auto-starts the daemon when port is free
-On every `ccl` invocation, before exec'ing Claude Code, ccl MUST probe `localhost:4317` with a 200ms TCP connect timeout. If unreachable AND no daemon record exists, ccl MUST fork `ccl serve` as a detached child process and wait up to 3s for the port to become reachable.
+On every `ccl` invocation, before exec'ing Claude Code, ccl MUST probe `localhost:4318` with a 200ms TCP connect timeout. If unreachable AND no daemon record exists, ccl MUST fork `ccl serve` as a detached child process and wait up to 3s for the port to become reachable.
 
 #### Scenario: first ccl invocation in a session
-- **WHEN** user runs `ccl` and `:4317` is unreachable
-- **THEN** ccl forks `ccl serve` (detached), polls `:4317` every 100ms, exits the wait when port opens, then proceeds to exec Claude Code; total pre-exec latency ≤ 3s
+- **WHEN** user runs `ccl` and `:4318` is unreachable
+- **THEN** ccl forks `ccl serve` (detached, in a new process group), polls `:4318` every 100ms, exits the wait when port opens, then proceeds to exec Claude Code; total pre-exec latency ≤ 3s
 
 #### Scenario: subsequent ccl invocation (daemon alive)
-- **WHEN** user runs `ccl` and `:4317` is reachable
+- **WHEN** user runs `ccl` and `:4318` is reachable
 - **THEN** ccl skips fork, proceeds to exec Claude Code; pre-exec latency < 50ms
 
 #### Scenario: daemon fails to bind (port stolen between probe and fork)
 - **WHEN** ccl forks `ccl serve` but the new daemon exits within 3s with "port already in use"
 - **THEN** ccl prints "OTel daemon failed to start, falling back" and proceeds to exec Claude Code without OTEL env (Claude Code won't push metrics this session but still runs)
 
+### Requirement: daemon is forked into a new process group
+`ccl serve` MUST be launched with `SysProcAttr.Setpgid: true` so that the daemon has its own PGID, independent of ccl's PID and Claude Code's forked children. This prevents `ccl stop` from accidentally signaling Claude Code or its child processes.
+
+#### Scenario: daemon survives ccl's syscall.Exec
+- **WHEN** ccl forks `ccl serve` (new PGID) and then `syscall.Exec`s Claude Code (inherits ccl's original PGID)
+- **THEN** the daemon's PID and PGID are different from Claude Code's; killing one does not affect the other
+
+#### Scenario: ccl stop SIGTERM does not affect Claude Code
+- **WHEN** Claude Code is running (started by previous `ccl`) and user runs `ccl stop`
+- **THEN** the SIGTERM goes only to the daemon PGID (not Claude Code's); Claude Code keeps running
+
 ### Requirement: ccl stop sends SIGTERM to daemon
-`ccl stop` MUST find the running daemon (via pidfile at `~/.cc-launcher/daemon.pid`) and send SIGTERM. After SIGTERM, ccl MUST wait up to 5s for the process to exit; if still alive, send SIGKILL.
+`ccl stop` MUST find the running daemon (via pidfile at `~/.cc-launcher/daemon.pid`) and send SIGTERM to the daemon's PGID. After SIGTERM, ccl MUST wait up to 5s for the process to exit; if still alive, send SIGKILL.
 
 #### Scenario: stop kills daemon gracefully
 - **WHEN** user runs `ccl stop` and daemon PID is in `daemon.pid`
-- **THEN** SIGTERM is sent; daemon flushes SQLite within 5s and exits; ccl prints "daemon stopped"
+- **THEN** SIGTERM is sent to the daemon PGID; daemon flushes SQLite within 5s and exits; ccl prints "daemon stopped"
 
 #### Scenario: stop SIGKILLs hung daemon
 - **WHEN** daemon does not exit within 5s after SIGTERM
@@ -46,12 +57,27 @@ On startup `ccl serve` MUST write its PID to `~/.cc-launcher/daemon.pid` atomica
 - **THEN** `ccl serve` overwrites the pidfile (no error); ccl stop finds the new PID
 
 ### Requirement: daemon refuses to start if port is occupied
-`ccl serve` MUST attempt to bind `:4317` on startup. If bind fails with `EADDRINUSE` (or equivalent), it MUST log an actionable error and exit non-zero. It MUST NOT auto-pick a different port.
+`ccl serve` MUST attempt to bind `:4318` on startup. If bind fails with `EADDRINUSE` (or equivalent), it MUST log an actionable error and exit non-zero. It MUST NOT auto-pick a different port.
 
 #### Scenario: port occupied by another OTel service
-- **WHEN** `ccl serve` starts and `:4317` is held by, say, an OpenTelemetry Collector
-- **THEN** daemon prints: `port 4317 already in use; either stop the conflicting service or set OTEL_EXPORTER_OTLP_ENDPOINT to a different port and re-run claude with that env var`; exit non-zero
+- **WHEN** `ccl serve` starts and `:4318` is held by, say, an OpenTelemetry Collector
+- **THEN** daemon prints: `port 4318 already in use; either stop the conflicting service or set OTEL_EXPORTER_OTLP_ENDPOINT to a different port and re-run claude with that env var`; exit non-zero
 
 #### Scenario: port free
-- **WHEN** `ccl serve` starts and `:4317` is free
+- **WHEN** `ccl serve` starts and `:4318` is free
 - **THEN** bind succeeds and the daemon accepts OTLP traffic
+
+### Requirement: fork failure does NOT block ccl's core function
+The daemon is an OPTIONAL enhancement for usage statistics. If the daemon fails to start (port taken, fork fails, bind error, etc.), ccl MUST still proceed to exec Claude Code. The user loses usage stats for that session but the core flow continues.
+
+#### Scenario: daemon refuses to start, ccl still works
+- **WHEN** user runs `ccl` and `ccl serve` exits within 3s with port conflict
+- **THEN** ccl prints "OTel daemon failed to start; usage stats for this session will be lost" and proceeds to exec Claude Code; user can still use ccl
+
+#### Scenario: fork timeout, ccl still works
+- **WHEN** user runs `ccl` and the forked `ccl serve` does NOT bind `:4318` within 3s
+- **THEN** ccl prints "OTel daemon did not start in time; falling back" and proceeds to exec Claude Code
+
+#### Scenario: subsequent ccl retries daemon
+- **WHEN** user runs `ccl` again (after a previous session's daemon failed to start)
+- **THEN** ccl re-attempts the fork; user can recover from transient failures

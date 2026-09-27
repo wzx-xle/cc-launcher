@@ -4,10 +4,10 @@
 On every `ccl` invocation (before fork-if-needed and exec Claude Code), ccl MUST inspect `~/.claude/settings.json` and ensure the `env` map contains:
 
 - `CLAUDE_CODE_ENABLE_TELEMETRY=1`
-- `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317`
+- `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318`
 - `OTEL_METRICS_EXPORTER=otlp`
-- `OTEL_LOGS_EXPORTER=otlp`
-- `OTEL_EXPORTER_OTLP_PROTOCOL=grpc`
+- `OTEL_LOGS_EXPORTER=none` (**explicit disable** to prevent accidental prompt logging)
+- `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf`
 
 If any key is missing, ccl MUST write the missing keys (without disturbing existing keys). If `~/.claude/settings.json` does not exist, ccl MUST create it with the required keys.
 
@@ -27,6 +27,10 @@ If any key is missing, ccl MUST write the missing keys (without disturbing exist
 - **WHEN** user has manually set `OTEL_EXPORTER_OTLP_ENDPOINT=http://other:9999` and runs `ccl`
 - **THEN** ccl does NOT overwrite that key (respects manual override); the docstring/help tells users to remove the override to use the local daemon
 
+#### Scenario: OTEL_LOGS_EXPORTER is always set to none
+- **WHEN** user runs `ccl` and `OTEL_LOGS_EXPORTER` is missing from settings.json
+- **THEN** ccl sets `OTEL_LOGS_EXPORTER=none` regardless of any other config; this is the privacy default (decision 8)
+
 ### Requirement: existing settings.json field order is preserved
 ccl MUST use the ordered JSON read/write from `internal/config/ordered.go` so the existing key ordering is not disrupted when ccl adds new keys.
 
@@ -38,5 +42,5 @@ ccl MUST use the ordered JSON read/write from `internal/config/ordered.go` so th
 If `CLAUDE_CODE_ENABLE_TELEMETRY=1` is missing but the user explicitly set `OTEL_EXPORTER_OTLP_ENDPOINT` to a non-localhost value, ccl MUST NOT auto-start the daemon (the user wants remote push, no local sink needed).
 
 #### Scenario: user points to a remote OTel collector
-- **WHEN** user runs `ccl` with `~/.claude/settings.json` having `OTEL_EXPORTER_OTLP_ENDPOINT=https://otel-collector.example.com:4317`
-- **THEN** ccl adds `CLAUDE_CODE_ENABLE_TELEMETRY=1` but does NOT fork a daemon (Claude Code will push to the user's remote collector, not localhost)
+- **WHEN** user runs `ccl` with `~/.claude/settings.json` having `OTEL_EXPORTER_OTLP_ENDPOINT=https://otel-collector.example.com:4318`
+- **THEN** ccl adds `CLAUDE_CODE_ENABLE_TELEMETRY=1` and the OTEL_* keys but does NOT fork a daemon (Claude Code will push to the user's remote collector, not localhost)
