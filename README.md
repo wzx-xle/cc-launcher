@@ -163,3 +163,98 @@ ccl provider --new --type deepseek my-deepseek
 - `internal/tui/modes_test.go` 走常规测试，锁死 TUI 展示列表与 `cli.ValidModes` 一致
 
 也就是说：Claude Code 一旦增删权限模式，`./build.sh contract` 会直接变红。
+
+## 用量监控
+
+ccl 在后台启一个轻量 OTel daemon，自动收集每次 Claude Code session 的 token / cost 消耗。
+
+### 数据来源
+
+Claude Code v2.1.x 原生支持 OTel 推送（`CLAUDE_CODE_ENABLE_TELEMETRY=1`）。ccl 检测到 settings.json 里没配 OTel 时，会自动写入 5 个 key：
+
+| Key | 默认值 | ccl 是否改写 |
+|-----|--------|------------|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4318` | **是**（让 Claude Code 推到本地 daemon） |
+| `OTEL_METRICS_EXPORTER` | `otlp` | 否（备份用户原值） |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/protobuf` | 否 |
+| `CLAUDE_CODE_ENABLE_TELEMETRY` | `1` | 否 |
+| `OTEL_LOGS_EXPORTER` | _不主动注入_ | 否 |
+
+**改写机制**：ccl 写入前会先把原值备份到 `CC_ORIG_<KEY>`，然后只对 `OTEL_EXPORTER_OTLP_ENDPOINT` 改写为本地 daemon 地址；其它 4 个 key 保留用户原值。
+
+### 自动启动 daemon
+
+每次 `ccl` 启动前会探活 `:4318`：
+- 端口已在用 → 已有 daemon，跳过 fork
+- 端口空 → fork `ccl serve`（新进程组，不影响 Claude Code），等 ≤ 3s 就绪
+
+fork 失败 / 端口冲突 → ccl 仍 exec Claude Code（OTel 推送静默失败，但 Claude Code 正常使用）。
+
+### 查看 stats
+
+```bash
+ccl stats                       # 最近 7 天的所有 session（表格）
+ccl stats --since 2026-09-20    # 从指定日期起
+ccl stats --by-provider         # 按提供商聚合
+ccl stats --by-project          # 按项目（cwd basename）聚合
+ccl stats --project cc-launcher # cwd 子串过滤
+ccl stats --json                # JSON 输出（pipeable to jq）
+```
+
+`ccl stats` **不依赖 daemon 正在跑**——它直接打开 `~/.cc-launcher/telemetry.db` 读。db 文件用 SQLite WAL，所以 daemon 写和 ccl stats 读并发安全。
+
+### 端口冲突怎么办
+
+如果 `:4318` 被别的 OTel collector 占了，`ccl serve` 会报错退出。两种解法：
+
+```bash
+# 方案 1：停掉冲突服务
+sudo lsof -i :4318   # 找占用进程
+
+# 方案 2：让 Claude Code 推到其它端口
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:14318
+ccl  # 此时 ccl 不会 fork daemon（决策：远程 endpoint 不拉本地 daemon）
+```
+
+### 隐私默认
+
+- daemon **不解析 logs / traces 的内容**——只把原始 bytes 转发出去
+- 本地 SQLite **永远不会**有 prompt / response 文本
+- 仅 metrics（含 token / cost / session 数）入库
+
+如果你希望 logs 也推到本地 SQLite——ccl 不做，**永远不做**。日志走 forwarding（见下）。
+
+### 转发到远程 collector
+
+如果你公司有 OTel collector（如 `otel.example.com:4317`），ccl 启动后会自动：
+
+1. 把你的 `OTEL_EXPORTER_OTLP_ENDPOINT` 备份到 `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT`
+2. 把 endpoint 改写到 `http://localhost:4318`（本地 daemon）
+3. daemon 把所有 metrics / logs / traces **异步**转发到 `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT`
+
+如需鉴权：
+```bash
+export CC_FORWARD_AUTH_HEADER="Authorization=Bearer my-token"
+ccl  # daemon 自动加上 auth 头
+```
+
+转发失败：daemon stderr 一行（**不带 auth 值**），本地 SQLite 仍完整。
+
+### 关闭 / 还原
+
+```bash
+ccl stop        # 优雅停 daemon（5s 内 graceful shutdown）
+ccl restore     # 还原 settings.json 到 ccl 之前的状态（删 CC_ORIG_* + ccl 注入的默认）
+```
+
+`ccl restore` 是**不可逆**操作（spec 明确）。会先备份到 `~/.cc-launcher/backups/settings-<时间戳>.json`。
+
+### 文件位置
+
+| 文件 | 用途 |
+|------|------|
+| `~/.cc-launcher/telemetry.db` | SQLite 数据（WAL 模式） |
+| `~/.cc-launcher/telemetry.db-wal` / `-shm` | WAL 配套文件，sqlite 自动管理 |
+| `~/.cc-launcher/daemon.pid` | daemon 运行时 PID 文件 |
+| `~/.cc-launcher/state.json` | ccl 自身状态（active provider / permission mode） |
+| `~/.cc-launcher/backups/` | settings.json 自动备份轮转（最近 10 个） |
