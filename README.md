@@ -29,18 +29,52 @@
 
 | 命令 | 说明 |
 |------|------|
-| `ccl` | TUI 启动流程：选提供商 → 选权限模式 → 启动 Claude Code |
+| `ccl` / `ccl --help` | TUI 启动流程：选提供商 → 选权限模式 → 启动 Claude Code |
+| `ccl provider --help` | provider 子命令帮助 |
+| `ccl mode --help` | mode 子命令帮助 |
 | `ccl provider --list` | 列出所有提供商，`▶` 标记当前激活的 |
 | `ccl provider <name>` | 切换到指定提供商 |
-| `ccl provider --new` | 交互式新增提供商（name、base_url、auth_token） |
-| `ccl provider --new <name>` | 新增提供商并进入配置填写 |
+| `ccl provider --template` / `-T` | 列出 7 种支持的提供商模板 |
+| `ccl provider --template <type>` | 打印指定 type 的 JSON 模板（如 `--template deepseek`） |
+| `ccl provider --new` | 交互式新增提供商（选模板 → 按字段填值） |
+| `ccl provider --new --type <type>` | 用指定模板引导式新建（跳过选模板步骤） |
 | `ccl provider --delete <name>` | 删除提供商（激活的需二次确认） |
 | `ccl mode` | 列出 6 种权限模式，`▶` 标记当前目录默认 |
 | `ccl mode <name>` | 设置当前目录的默认权限模式 |
 
 ## 提供商配置
 
-配置文件存放在 `~/.cc-launcher/providers/`，一个文件一个提供商，结构与 Claude Code 的 `settings.json` 一致：
+配置文件存放在 `~/.cc-launcher/providers/`，一个文件一个提供商，结构与 Claude Code 的 `settings.json` 一致。
+
+### 用模板配置（推荐）
+
+```bash
+# 看有哪些模板
+ccl provider --template
+# 7 种：anthropic, deepseek, minimax, glm, aliyun-coding, aliyun-pay, aliyun-token
+
+# 看某个模板的字段（无需联网、可被 jq 处理）
+ccl provider --template deepseek
+
+# 引导式填值，按提示回答即可
+ccl provider --new --type deepseek my-deepseek
+```
+
+每个 type 都已校对官方原页（`internal/templates/templates.go` 注释里有 `// verified 2026-09-27: <URL>`）：
+
+| Type | base_url | 默认模型 | 备注 |
+|------|---------|---------|------|
+| `anthropic` | （官方） | （官方） | 2 字段 |
+| `deepseek` | `api.deepseek.com/anthropic` | `deepseek-flash[1m]` | 7 字段 |
+| `minimax` | `api.minimax.cn/anthropic`（国内）/ `api.minimax.io/anthropic`（国际） | `MiniMax-M3[1m]` | 6 字段；交互流会让用户选 cn/io |
+| `glm` | `open.bigmodel.cn/api/anthropic` | HAIKU=`glm-5.3-flash[1m]`, SONNET/OPUS=`glm-5.3[1m]` | 8 字段（智谱 Coding Plan） |
+| `aliyun-coding` | `coding.dashscope.aliyuncs.com/apps/anthropic` | `qwen3.7-plus` | 6 字段 |
+| `aliyun-pay` | `{WorkspaceId}.cn-beijing.maas.aliyuncs.com/apps/anthropic` | `qwen3.7-max` | 7 字段；交互流会让用户填 WorkspaceId |
+| `aliyun-token` | `token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic` | `auto` | 7 字段 |
+
+未列出的提供商：可直接编辑 `~/.cc-launcher/providers/<name>.json`，结构同上。
+
+### 历史示例（仍可参考）
 
 ```jsonc
 // ~/.cc-launcher/providers/anthropic.json
@@ -51,7 +85,7 @@
   }
 }
 
-// ~/.cc-launcher/providers/bedrock.json
+// ~/.cc-launcher/providers/bedrock.json（已废弃，请改用 aliyun-coding / aliyun-pay）
 {
   "env": {
     "CLAUDE_CODE_USE_BEDROCK": "1",
