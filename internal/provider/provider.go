@@ -24,6 +24,11 @@ func NewManager(providersDir string) *Manager {
 	return &Manager{providersDir: providersDir}
 }
 
+// ProvidersDir 返回 providers 目录路径（供 CLI 层显示用）。
+func (m *Manager) ProvidersDir() string {
+	return m.providersDir
+}
+
 // List 列出所有提供商。JSON 解析失败的在 Info.Error 中标记，不阻塞其他文件。
 func (m *Manager) List() ([]Info, error) {
 	if err := os.MkdirAll(m.providersDir, 0755); err != nil {
@@ -77,23 +82,20 @@ func (m *Manager) Get(name string) (map[string]any, error) {
 	return cfg, nil
 }
 
-// Create 创建新的提供商配置文件。baseURL 为空时不写入 ANTHROPIC_BASE_URL。
-func (m *Manager) Create(name, baseURL, apiKey string) error {
+// Create 创建新的提供商配置文件，接受任意 env 字段集合。
+// 旧签名 Create(name, baseURL, apiKey) 已删除，由 CreateWithEnv 取代。
+func (m *Manager) CreateWithEnv(name string, env map[string]any) error {
 	if name == "" {
 		return fmt.Errorf("提供商名称不能为空")
 	}
-	if apiKey == "" {
-		return fmt.Errorf("auth_token 不能为空")
+	if len(env) == 0 {
+		return fmt.Errorf("env 不能为空")
+	}
+	if _, ok := env["ANTHROPIC_AUTH_TOKEN"]; !ok {
+		return fmt.Errorf("env 必须包含 ANTHROPIC_AUTH_TOKEN")
 	}
 	if m.Exists(name) {
 		return fmt.Errorf("提供商 %q 已存在", name)
-	}
-
-	env := map[string]any{
-		"ANTHROPIC_AUTH_TOKEN": apiKey,
-	}
-	if baseURL != "" {
-		env["ANTHROPIC_BASE_URL"] = baseURL
 	}
 
 	cfg := map[string]any{"env": env}

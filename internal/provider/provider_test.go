@@ -124,7 +124,10 @@ func TestCreate(t *testing.T) {
 	dir := t.TempDir()
 	m := NewManager(dir)
 
-	err := m.Create("custom", "https://api.example.com", "sk-custom")
+	err := m.CreateWithEnv("custom", map[string]any{
+		"ANTHROPIC_BASE_URL":   "https://api.example.com",
+		"ANTHROPIC_AUTH_TOKEN": "sk-custom",
+	})
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
@@ -146,23 +149,16 @@ func TestCreate(t *testing.T) {
 	}
 }
 
-func TestCreate_EmptyBaseURL(t *testing.T) {
+func TestCreate_MissingAuthToken(t *testing.T) {
 	dir := t.TempDir()
 	m := NewManager(dir)
 
-	err := m.Create("custom", "", "sk-custom")
-	if err != nil {
-		t.Fatalf("Create() error = %v", err)
-	}
-
-	got, err := m.Get("custom")
-	if err != nil {
-		t.Fatalf("Get() error = %v", err)
-	}
-
-	env := got["env"].(map[string]any)
-	if _, exists := env["ANTHROPIC_BASE_URL"]; exists {
-		t.Error("ANTHROPIC_BASE_URL should be omitted when empty")
+	// env 中没有 ANTHROPIC_AUTH_TOKEN 必须失败
+	err := m.CreateWithEnv("custom", map[string]any{
+		"ANTHROPIC_BASE_URL": "https://api.example.com",
+	})
+	if err == nil {
+		t.Fatal("Create() expected error when ANTHROPIC_AUTH_TOKEN missing")
 	}
 }
 
@@ -171,7 +167,9 @@ func TestCreate_AlreadyExists(t *testing.T) {
 	m := NewManager(dir)
 
 	writeProvider(t, dir, "existing.json", map[string]any{})
-	err := m.Create("existing", "", "key")
+	err := m.CreateWithEnv("existing", map[string]any{
+		"ANTHROPIC_AUTH_TOKEN": "key",
+	})
 	if err == nil {
 		t.Fatal("Create() expected error for duplicate name")
 	}

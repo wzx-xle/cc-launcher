@@ -13,6 +13,21 @@ import (
 	"cc-launcher/internal/tui"
 )
 
+// topHelp 是顶层 ccl --help 输出的内容。
+const topHelp = `用法: ccl [子命令] [选项]
+
+子命令:
+    (无)              启动 TUI 引导：选提供商 → 选权限模式 → 启动 Claude Code
+    provider          管理提供商（详见 ccl provider --help）
+    mode              管理当前目录的权限模式（详见 ccl mode --help）
+
+选项:
+    -h, --help        显示本帮助并退出
+
+想看具体怎么配置 deepseek / MiniMax / 智谱 / 阿里云？
+    ccl provider --template        # 列出全部 7 种支持的模板
+    ccl provider --template deepseek   # 看 deepseek 的 JSON 模板`
+
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintf(os.Stderr, "错误: %s\n", err.Error())
@@ -21,6 +36,15 @@ func main() {
 }
 
 func run(args []string) error {
+	// 顶层 --help：只在 args[0] 是 help 旗标时触发（避免误吞 `ccl provider --help`）。
+	if len(args) > 0 {
+		switch args[0] {
+		case "-h", "--help", "help":
+			fmt.Println(topHelp)
+			return nil
+		}
+	}
+
 	stateBaseDir, err := state.DefaultBaseDir()
 	if err != nil {
 		return fmt.Errorf("无法获取 home 目录: %w", err)
