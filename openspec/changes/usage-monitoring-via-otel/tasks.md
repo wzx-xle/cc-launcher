@@ -29,7 +29,10 @@
 - [ ] 4.4 `cmd/cc-launcher/main.go`：每次 `ccl` 启动前探活 `:4318`（200ms timeout）
 - [ ] 4.5 main.go：探活失败时 fork `ccl serve`，**`SysProcAttr.Setpgid: true`** 让 daemon 在新进程组，stdin/stdout/stderr = nil，disown；等端口就绪（≤ 3s）
 - [ ] 4.6 main.go：fork 超时 / daemon 退出 → **降级（仍 exec Claude Code，OTel 静默失败）**
-- [ ] 4.7 新增 `ccl stop` 子命令：读 pidfile → SIGTERM to daemon PGID → 等 ≤ 5s → SIGKILL
+- [ ] 4.7 新增 `ccl stop` 子命令：读 pidfile → SIGTERM → 等 ≤ 5s → SIGKILL
+- [ ] 4.8 `ccl serve` 收到 SIGTERM 时按顺序执行：(1) HTTP `/v1/metrics` 返回 503；(2) 等 async queue 清空；(3) SQLite WAL checkpoint + Close；(4) 删 pidfile；(5) exit 0；全程 ≤ 5s
+- [ ] 4.9 跨平台 stop：新建 `cmd/cc-launcher/stop_unix.go` 用 `syscall.Kill(-pid, SIGTERM)`（PGID）；新建 `cmd/cc-launcher/stop_windows.go` 用 `syscall.Kill(pid, SIGTERM)`（直接 PID）
+- [ ] 4.10 daemon 单元测试：SIGTERM 期间 in-flight 请求完成、新请求 503、queue 清空、pidfile 删、exit 0
 
 ## 5. Claude Code env 配置
 

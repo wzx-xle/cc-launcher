@@ -27,14 +27,18 @@ On every `ccl` invocation, before exec'ing Claude Code, ccl MUST probe `localhos
 - **THEN** the SIGTERM goes only to the daemon PGID (not Claude Code's); Claude Code keeps running
 
 ### Requirement: ccl stop sends SIGTERM to daemon
-`ccl stop` MUST find the running daemon (via pidfile at `~/.cc-launcher/daemon.pid`) and send SIGTERM to the daemon's PGID. After SIGTERM, ccl MUST wait up to 5s for the process to exit; if still alive, send SIGKILL.
+`ccl stop` MUST find the running daemon (via pidfile at `~/.cc-launcher/daemon.pid`) and send SIGTERM. **On Unix**, the signal MUST be sent to the daemon's PGID (negative PID) so it does not accidentally signal Claude Code or its child processes. After SIGTERM, ccl MUST wait up to 5s for the process to exit; if still alive, send SIGKILL.
 
-#### Scenario: stop kills daemon gracefully
-- **WHEN** user runs `ccl stop` and daemon PID is in `daemon.pid`
-- **THEN** SIGTERM is sent to the daemon PGID; daemon flushes SQLite within 5s and exits; ccl prints "daemon stopped"
+#### Scenario: stop kills daemon gracefully (Unix)
+- **WHEN** user runs `ccl stop` on Unix and daemon PID is in `daemon.pid`
+- **THEN** SIGTERM is sent to the daemon PGID (`kill -PID`); daemon flushes SQLite within 5s and exits; ccl prints "daemon stopped"
+
+#### Scenario: stop kills daemon gracefully (Windows)
+- **WHEN** user runs `ccl stop` on Windows and daemon PID is in `daemon.pid`
+- **THEN** SIGTERM-equivalent (Windows process termination) is sent directly to the daemon PID (Windows has no PGID concept); daemon exits
 
 #### Scenario: stop SIGKILLs hung daemon
-- **WHEN** daemon does not exit within 5s after SIGTERM
+- **WHEN** daemon does not exit within 5s after SIGTERM (or Windows equivalent)
 - **THEN** ccl sends SIGKILL; daemon dies; pidfile removed
 
 #### Scenario: stop when no daemon
@@ -66,6 +70,30 @@ On startup `ccl serve` MUST write its PID to `~/.cc-launcher/daemon.pid` atomica
 #### Scenario: port free
 - **WHEN** `ccl serve` starts and `:4318` is free
 - **THEN** bind succeeds and the daemon accepts OTLP traffic
+
+### Requirement: daemon handles SIGTERM with graceful shutdown
+On SIGTERM (or platform equivalent), the daemon MUST run a graceful shutdown sequence: stop accepting new OTLP requests, drain the async write queue, close the SQLite handle, remove the pidfile, then exit 0. Total wall time MUST be ≤ 5s; if exceeded, `ccl stop` sends SIGKILL.
+
+#### Scenario: SIGTERM stops accepting then drains
+- **WHEN** daemon receives SIGTERM with 100 events in the async write queue
+- **THEN** within 5s the daemon:
+  - HTTP handler returns 503 Service Unavailable for new requests (signaling "going away")
+  - All 100 queued events are written to SQLite
+  - SQLite handle is closed (WAL checkpointed)
+  - pidfile is removed
+  - process exits 0
+
+#### Scenario: SIGTERM with empty queue is fast
+- **WHEN** daemon receives SIGTERM with empty write queue
+- **THEN** within 200ms the daemon exits 0 cleanly (no waiting on queue)
+
+#### Scenario: in-flight HTTP request is not interrupted
+- **WHEN** daemon receives SIGTERM while a POST to /v1/metrics is mid-write
+- **THEN** the in-flight request completes normally; new requests get 503; shutdown proceeds after the in-flight request finishes
+
+#### Scenario: SIGKILL during graceful shutdown loses only the queue tail
+- **WHEN** `ccl stop` escalates to SIGKILL after 5s
+- **THEN** any events still in the in-memory queue are lost; events already committed to SQLite survive (SQLite WAL); pidfile may or may not be removed (best-effort cleanup)
 
 ### Requirement: fork failure does NOT block ccl's core function
 The daemon is an OPTIONAL enhancement for usage statistics. If the daemon fails to start (port taken, fork fails, bind error, etc.), ccl MUST still proceed to exec Claude Code. The user loses usage stats for that session but the core flow continues.

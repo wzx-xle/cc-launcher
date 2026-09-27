@@ -139,6 +139,53 @@ fork / 端口就绪超时 → ccl 仍 exec Claude Code。Claude Code 会**静默
 
 **spec 明确这一行为**，避免未来维护者误以为 daemon 是 hard dep。
 
+### 11. daemon 永不自动退出（**永远跑直到显式 `ccl stop`**）
+
+daemon 没有 idle timeout / 自动退出机制。它跑起来后**永远在**：
+
+- 直到 `ccl stop` SIGTERM 关闭
+- 直到 SIGKILL / 系统关机
+- 直到 panic / crash（用户需 `ccl stop` 后手动 fork 恢复）
+
+**为什么不加自动退出**：
+- 个人用户真实模式：跑 session → 读输出（可能 30 分钟）→ 继续交互 → 走开 → 回来
+- 任何 "空闲 X 分钟退出" 都会**在某次 pause 期间误杀 daemon**
+- 误杀后：Claude Code 仍跑 → OTel 推送失败 → **session stats 永久丢失**（直到下次 `ccl`）
+- 永不断 daemon：占内存 + 端口，但 stats 永远完整
+
+**接受 trade-off**：daemon 长期占用 localhost:4318 + ~10MB 内存 → 个人 CLI 工具的合理成本。
+
+**用户主动管理**：`ccl stop` 随时可关。
+
+### 12. SIGTERM 优雅退出序列（**5 秒硬上限**）
+
+daemon 收到 SIGTERM 时按顺序执行：
+
+```
+1. HTTP handler: `/v1/metrics` 立即返回 503
+   （让 in-flight 请求完成，新请求被拒）
+2. 等 async write queue 清空
+   （极端情况下 10k events × flush time）
+3. SQLite WAL checkpoint + Close
+4. 删 pidfile
+5. exit 0
+```
+
+**5 秒硬上限**：超时则 ccl stop 发 SIGKILL，剩余 queue 数据丢失。
+
+**理由**：5 秒够 10k events 入库（WAL fsync 也够），超时就该用 SIGKILL。
+
+### 13. Windows 没有 PGID 概念
+
+Windows 上 `syscall.Kill(-pid, SIGTERM)` 不可用（没有 PGID）。`ccl stop` 在 Windows 上**直接按 PID kill**，不传负数。
+
+**实现方式**：
+- `cmd/cc-launcher/stop_unix.go`：`syscall.Kill(-pid, syscall.SIGTERM)`（PGID kill）
+- `cmd/cc-launcher/stop_windows.go`：`syscall.Kill(pid, syscall.SIGTERM)`（PID kill；Windows 上 syscall.Kill 实际走 TerminateProcess）
+- build tag 区分
+
+**避免**跨平台 hard dep：`golang.org/x/term` 之类仅 Unix 的包不进 Windows 构建。
+
 ## Risks / Trade-offs
 
 - [体积 +2-3 MB] HTTP + protobuf + sqlite pure-go → 接受；个人工具可接受
@@ -148,6 +195,7 @@ fork / 端口就绪超时 → ccl 仍 exec Claude Code。Claude Code 会**静默
 - [SQLite 文件增长无界] 缓解：task 加定期 VACUUM / 保留 N 天
 - [daemon fork 失败] 数据丢本次 session，下次 ccl 重试 → 缓解：spec 写明降级语义
 - [OTel 推送失败静默] 用户不知情 → 缓解：`ccl stats` 报错"daemon 未运行"
+- [daemon 永驻内存] ~10MB 占用 + 占 localhost:4318 → 个人 CLI 工具可接受；想关掉 `ccl stop`
 
 ## Migration Plan
 
@@ -161,3 +209,4 @@ fork / 端口就绪超时 → ccl 仍 exec Claude Code。Claude Code 会**静默
 - TUI 实时面板（`ccl stats --tui`）做不做？决定：留后续
 - 多 Claude Code 实例并发时（罕见）daemon 怎么处理？决定：daemon 单实例；第二个 ccl 会因为 daemon 已起而跳过 fork
 - 是否暴露 `ccl stats --export csv`？决定：留后续
+- 是否加用户可配的 idle-timeout？决定：**不做**（决策 11；用户想 stats 完整就别动）
