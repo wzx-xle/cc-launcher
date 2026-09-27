@@ -186,6 +186,88 @@ Windows 上 `syscall.Kill(-pid, SIGTERM)` 不可用（没有 PGID）。`ccl stop
 
 **避免**跨平台 hard dep：`golang.org/x/term` 之类仅 Unix 的包不进 Windows 构建。
 
+### 14. 自动检测 + 转发（**OTel collector 模式**）
+
+daemon **同时是 OTel server（收 Claude Code）和 OTel client（推远程）**。本地 + 远程两不误。
+
+**触发条件**：daemon 启动时检查自己的 env：
+- 若 `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT` 非空且非 localhost → 启用 forwarder
+- 否则 → 不启用
+
+**forwarder 行为**：
+- 每个 metric 入库后**异步** POST 到 backup 端点
+- HTTP client 复用 daemon 已建立的连接池
+- **失败策略**：log stderr 一行 + drop（**不重试、不排队**——决策 18）
+- 转发**只 metrics**（与本地决策一致；不转发 logs/traces）
+
+**转发路径**：
+```
+Claude Code → POST localhost:4318 (OTEL_EXPORTER_OTLP_ENDPOINT)
+  → daemon /v1/metrics handler
+    → 写本地 SQLite (sync)
+    → goroutine POST to CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT (async, fire-and-forget)
+```
+
+### 15. 备份所有 OTel 相关 key（**`CC_ORIG_<KEY>`**）
+
+ccl 启动时**对所有 5 个 OTel key** 做"备份 + 修改"两步：
+
+| 原 key | ccl 处理 |
+|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | 备份到 `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT`，**改写为 `http://localhost:4318`** |
+| `OTEL_LOGS_EXPORTER` | 备份到 `CC_ORIG_OTEL_LOGS_EXPORTER`，**强制覆盖为 `none`**（隐私硬约束） |
+| `OTEL_METRICS_EXPORTER` | 备份到 `CC_ORIG_OTEL_METRICS_EXPORTER`，**保留原值** |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | 备份到 `CC_ORIG_OTEL_EXPORTER_OTLP_PROTOCOL`，**保留原值** |
+| `CLAUDE_CODE_ENABLE_TELEMETRY` | 备份到 `CC_ORIG_CLAUDE_CODE_ENABLE_TELEMETRY`，**保留原值** |
+
+**新增 key**（用户原本没有）→ 不备份，直接写入默认值。
+
+**`CC_ORIG_*` 是 ccl 的命名空间**——用户不会主动写这些 key。如果用户已经写过（手贱），ccl 不动它（避免覆盖用户备份）。
+
+**实现位置**：`cmd/cc-launcher/envconfig.go`（独立函数 `backupAndInjectOTel(env map[string]string)`）。
+
+### 16. `ccl restore` 子命令（**默认存在**）
+
+读 `~/.claude/settings.json` 的 env 字段：
+- 对每个 `CC_ORIG_*` 键：把值写回对应原 key；删除 `CC_ORIG_*` 键
+- 对 `CLAUDE_CODE_ENABLE_TELEMETRY=1`（ccl 加的）：若用户没原值，**也删**
+- 对 `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318`：若用户没原值，**也删**
+
+**默认行为是"全清"**。要保留部分 ccl 注入时，加 `--keep-injected` flag（后续）。
+
+**理由**：用户的"恢复"语义是"回到 ccl 之前"，所以默认最干净。
+
+### 17. Forwarder auth 走 env（**`CC_FORWARD_AUTH_HEADER`**）
+
+daemon 启动时检查 `CC_FORWARD_AUTH_HEADER`：
+- 非空 → 加到 forwarder 的每个 POST 请求头
+- 空 → 不加 auth header
+
+用户自己设 auth，例：
+```
+CC_FORWARD_AUTH_HEADER="Authorization=Bearer my-company-token"
+```
+
+daemon **不复用 `ANTHROPIC_AUTH_TOKEN`**——那是 provider 的 key（用于 Anthropic Messages API），不是 collector 的 key（用于 OTel 推送）。
+
+### 18. Forwarder 失败 = log + drop（**不重试不排队**）
+
+失败路径：
+1. net/http POST 返回非 2xx OR 超时（5s）
+2. daemon 在 stderr 打印一行（带 target URL 和 status code，但**不打印 auth**）
+3. metric 已落本地 SQLite，**本地 stats 完整**
+
+**理由**：
+- 个人工具，重试逻辑不值
+- 本地已持久化，remote 偶发丢失可接受
+- 简单 → 易测
+
+### 19. Forwarder 不递归（**避免 loop**）
+
+若 `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT` 是 localhost 或 127.0.0.1 → daemon **拒绝启用 forwarder**（避免 daemon 自己 POST 自己）。
+
+**理由**：哪怕用户写错，写错的结果应该是"明显坏"（本地 stats 仍然完整），不是"静默丢数据"。
+
 ## Risks / Trade-offs
 
 - [体积 +2-3 MB] HTTP + protobuf + sqlite pure-go → 接受；个人工具可接受
@@ -196,6 +278,9 @@ Windows 上 `syscall.Kill(-pid, SIGTERM)` 不可用（没有 PGID）。`ccl stop
 - [daemon fork 失败] 数据丢本次 session，下次 ccl 重试 → 缓解：spec 写明降级语义
 - [OTel 推送失败静默] 用户不知情 → 缓解：`ccl stats` 报错"daemon 未运行"
 - [daemon 永驻内存] ~10MB 占用 + 占 localhost:4318 → 个人 CLI 工具可接受；想关掉 `ccl stop`
+- [Forwarder 失败丢数据] remote collector 挂了 → 转发失败的数据丢；本地 SQLite 仍完整 → 用户**只看本地 stats 就够**
+- [Forwarder 阻塞 daemon] 决策 18 异步 + drop，daemon 不阻塞
+- [Forwarder loop] 决策 19 防 localhost 循环
 
 ## Migration Plan
 

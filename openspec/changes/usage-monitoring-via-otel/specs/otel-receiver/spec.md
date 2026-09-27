@@ -1,11 +1,15 @@
 ## ADDED Requirements
 
-### Requirement: ccl-launcher accepts OTLP HTTP metrics on :4318
-A `ccl serve` mode MUST start an HTTP server on `localhost:4318` (standard OTLP HTTP port) that accepts the OTLP `/v1/metrics` protobuf endpoint. Logs (`/v1/logs`) and traces (`/v1/traces`) MUST return HTTP 405/404 — they are explicitly out of scope. The server MUST NOT block on individual slow writes; a slow consumer MUST NOT cause the HTTP server to stall.
+### Requirement: ccl-launcher accepts OTLP HTTP metrics on :4318 and optionally forwards
+A `ccl serve` mode MUST start an HTTP server on `localhost:4318` (standard OTLP HTTP port) that accepts the OTLP `/v1/metrics` protobuf endpoint. If `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT` env is set (and not localhost), the daemon MUST also forward each received metric to that URL after persisting locally. Logs (`/v1/logs`) and traces (`/v1/traces`) MUST return HTTP 405/404 — they are explicitly out of scope. The server MUST NOT block on individual slow writes or forward calls.
 
 #### Scenario: claude code pushes metrics successfully
 - **WHEN** Claude Code (with `CLAUDE_CODE_ENABLE_TELEMETRY=1` and `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318`) sends an OTLP metrics ExportRequest
 - **THEN** the daemon receives the export, parses the protobuf, persists each metric to SQLite, and returns HTTP 200 to Claude Code
+
+#### Scenario: metric is forwarded to remote collector
+- **WHEN** daemon has `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT=https://company-otel:4317` and `CC_FORWARD_AUTH_HEADER="Authorization=Bearer t"`
+- **THEN** for each parsed metric, daemon POSTs the original protobuf bytes (or re-encoded metric payload) to the remote URL with the auth header; failures are logged and dropped
 
 #### Scenario: server binds when port is free
 - **WHEN** `ccl serve` starts and `:4318` is not in use
@@ -28,7 +32,7 @@ A `ccl serve` mode MUST start an HTTP server on `localhost:4318` (standard OTLP 
 - **THEN** the daemon returns HTTP 404 (or 405) without persisting anything
 
 ### Requirement: parser maps OTLP protobuf metrics to domain objects
-The OTLP parser MUST extract for each metric: name, value, labels (resource + scope + data-point attributes), timestamp. Log and trace payloads are not parsed (see scenario above).
+The OTLP parser MUST extract for each metric: name, value, labels (resource + scope + data-point attributes), timestamp. Log and trace payloads are not parsed.
 
 #### Scenario: claude_code.session.count metric is extracted
 - **WHEN** an OTLP export includes `claude_code.session.count` with label `provider=deepseek`

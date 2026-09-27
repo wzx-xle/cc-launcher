@@ -34,12 +34,14 @@
 - [ ] 4.9 跨平台 stop：新建 `cmd/cc-launcher/stop_unix.go` 用 `syscall.Kill(-pid, SIGTERM)`（PGID）；新建 `cmd/cc-launcher/stop_windows.go` 用 `syscall.Kill(pid, SIGTERM)`（直接 PID）
 - [ ] 4.10 daemon 单元测试：SIGTERM 期间 in-flight 请求完成、新请求 503、queue 清空、pidfile 删、exit 0
 
-## 5. Claude Code env 配置
+## 5. Claude Code env 配置（含备份与转发）
 
 - [ ] 5.1 `cmd/cc-launcher/main.go`：在 exec Claude Code 前检查 `~/.claude/settings.json`
-- [ ] 5.2 缺 5 个 key（`CLAUDE_CODE_ENABLE_TELEMETRY` / `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_METRICS_EXPORTER` / `OTEL_LOGS_EXPORTER=none` / `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf`）→ 自动写
-- [ ] 5.3 已有键不动；用 `internal/config/ordered.go` 保持 JSON 字段顺序
-- [ ] 5.4 若 `OTEL_EXPORTER_OTLP_ENDPOINT` 是非 localhost（如远程 collector），不拉起本地 daemon
+- [ ] 5.2 新增 `cmd/cc-launcher/envconfig.go`：`backupAndInjectOTel(env map[string]string) (newEnv map[string]string)` 函数——按 spec 表对 5 个 key 做"备份 + 修改"
+- [ ] 5.3 `OTEL_LOGS_EXPORTER=none` 强制覆盖；其它 4 个 key 尊重用户原值（保留或仅在缺失时填默认）
+- [ ] 5.4 用 `internal/config/ordered.go` 保持 JSON 字段顺序
+- [ ] 5.5 单元测试 envconfig.go：每种 key 组合（含未设 / 已设 / CC_ORIG 已存在）正确产出
+- [ ] 5.6 若 `OTEL_EXPORTER_OTLP_ENDPOINT` 是非 localhost（如远程 collector），不拉起本地 daemon
 
 ## 6. CLI 命令
 
@@ -48,28 +50,40 @@
 - [ ] 6.3 `ccl stop` 子命令（task 4.7 已列）
 - [ ] 6.4 SQLite 文件不存在时 `ccl stats` 报错并提示"run ccl to start one"
 - [ ] 6.5 `ccl stats` 单元测试：用 t.TempDir() 准备 db，验证表格 / JSON 输出格式
+- [ ] 6.6 **新增 `ccl restore` 子命令**：扫 `CC_ORIG_*` 还原 + 删 ccl 注入的默认 key；不可逆（spec 写明）
 
-## 7. 集成与依赖
+## 7. Forwarder（OTel client 角色）
 
-- [ ] 7.1 `go.mod` 加 `go.opentelemetry.io/proto/otlp/collector/metrics/v1` + `modernc.org/sqlite`（**无 gRPC 依赖**）
-- [ ] 7.2 验证 `GOOS=windows go build ./...` 通过（HTTP / sqlite 跨平台）
-- [ ] 7.3 README 加 "用量监控" 小节：如何启 daemon / 如何查 stats / 如何关 / 隐私默认
+- [ ] 7.1 `internal/collector/forwarder.go`：从 daemon env 读 `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT` 和 `CC_FORWARD_AUTH_HEADER`；决定是否启用
+- [ ] 7.2 拒 localhost 循环：endpoint 含 `localhost` 或 `127.0.0.1` → 不启用 + log warning
+- [ ] 7.3 在 HTTP handler 中：metric 写完 SQLite 后 `go func()` 异步 POST 原始 protobuf bytes（不重编码）
+- [ ] 7.4 失败策略：5s timeout / 非 2xx → log stderr 单行（不打印 auth）+ drop
+- [ ] 7.5 单元测试 forwarder.go：用 `httptest.Server` mock 200 / 5xx / timeout；验证 log 行为
 
-## 8. 验证
+## 8. 集成与依赖
 
-- [ ] 8.1 `go test ./...` 全绿
-- [ ] 8.2 `GOOS=windows go build ./...` 通过
-- [ ] 8.3 手动：`ccl` → daemon 起来 → 跑 Claude Code session → `ccl stats` 看到当次 session
-- [ ] 8.4 手动：故意占 `:4318` → `ccl serve` 报错退出，**但 `ccl` 仍 exec Claude Code**
-- [ ] 8.5 手动：`ccl stop` → daemon 优雅关
-- [ ] 8.6 手动：调 `POST :4318/v1/logs` → 404，不写盘
-- [ ] 8.7 跑 24h 累积测试：sessions 数 / metrics 数 / db 文件大小
+- [ ] 8.1 `go.mod` 加 `go.opentelemetry.io/proto/otlp/collector/metrics/v1` + `modernc.org/sqlite`（**无 gRPC 依赖**）
+- [ ] 8.2 验证 `GOOS=windows go build ./...` 通过（HTTP / sqlite 跨平台）
+- [ ] 8.3 README 加 "用量监控" 小节：如何启 daemon / 如何查 stats / 如何关 / 隐私默认 / `ccl restore` 用法
 
-## 9. 提交
+## 9. 验证
 
-- [ ] 9.1 commit: feat(collector): HTTP :4318 OTel metrics receiver + parser + WAL store
-- [ ] 9.2 commit: feat(stats): ccl stats 直接读 SQLite + 表格 / JSON 输出
-- [ ] 9.3 commit: feat(daemon): ccl serve + Setpgid fork + ccl stop
-- [ ] 9.4 commit: feat(cli): ccl auto-starts daemon; ccl stats / ccl stop + 降级语义
-- [ ] 9.5 commit: feat(env): 注入 5 个 OTEL env 键到 settings.json（logs=none）
-- [ ] 9.6 commit: docs: README 用量监控小节（隐私默认 + 端口覆盖）
+- [ ] 9.1 `go test ./...` 全绿
+- [ ] 9.2 `GOOS=windows go build ./...` 通过
+- [ ] 9.3 手动：`ccl` → daemon 起来 → 跑 Claude Code session → `ccl stats` 看到当次 session
+- [ ] 9.4 手动：故意占 `:4318` → `ccl serve` 报错退出，**但 `ccl` 仍 exec Claude Code**
+- [ ] 9.5 手动：`ccl stop` → daemon 优雅关
+- [ ] 9.6 手动：调 `POST :4318/v1/logs` → 404，不写盘
+- [ ] 9.7 手动：用户 settings.json 有 `OTEL_EXPORTER_OTLP_ENDPOINT=remote.com` → ccl 自动备份 + daemon 自动转发；`ccl stats` 本地有数据
+- [ ] 9.8 手动：`ccl restore` → settings.json 恢复原状（`CC_ORIG_*` 删、原值写回）
+- [ ] 9.9 跑 24h 累积测试：sessions 数 / metrics 数 / db 文件大小
+
+## 10. 提交
+
+- [ ] 10.1 commit: feat(collector): HTTP :4318 OTel metrics receiver + parser + WAL store
+- [ ] 10.2 commit: feat(stats): ccl stats 直接读 SQLite + 表格 / JSON 输出
+- [ ] 10.3 commit: feat(daemon): ccl serve + Setpgid fork + ccl stop + graceful SIGTERM
+- [ ] 10.4 commit: feat(cli): ccl auto-starts daemon; ccl stats / ccl stop / ccl restore + 降级语义
+- [ ] 10.5 commit: feat(env): 备份 + 注入 5 个 OTEL env 键到 settings.json（logs=none）
+- [ ] 10.6 commit: feat(forwarder): 自动检测 + 转发到 CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT
+- [ ] 10.7 commit: docs: README 用量监控小节（隐私默认 + 端口覆盖 + ccl restore + 转发）
