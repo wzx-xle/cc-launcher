@@ -104,7 +104,7 @@ func (c *CLI) runProvider(args []string) error {
 
 	switch args[0] {
 	case "-h", "--help":
-		fmt.Print(providerHelp)
+		fmt.Println(providerHelp)
 		return nil
 	case "--list":
 		return c.listProviders()
@@ -177,7 +177,7 @@ func (c *CLI) runMode(args []string) error {
 
 	switch args[0] {
 	case "-h", "--help":
-		fmt.Print(modeHelp)
+		fmt.Println(modeHelp)
 		return nil
 	}
 
