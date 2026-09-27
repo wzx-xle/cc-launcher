@@ -47,6 +47,11 @@ ccl-launcher 之前只能"启动 Claude Code"，对**用量**和**余额**完全
 OTel push (本地)            provider API (远程)
 SQLite 持久                  不持久
 按需查询                     按需查询
+
+> **2026-09-27 补充**：fetch 原页后发现 **MiniMax 没有公开余额 API**
+> （Token Plan 完全走 web console，配额条无 REST endpoint）。
+> 用户决定**整个砍掉** change 2 `provider-quota-check`。
+> 未来若用户明确需要某个 provider 的余额查询，单独开 change 验证 API 是否存在。
 ```
 
 两者不是替代，是互补。拆为两个 spec 避免相互污染。
@@ -78,17 +83,16 @@ SQLite 持久                  不持久
 | 文档 | 路径 |
 |---|---|
 | 本讨论文档 | `docs/discussions/2026-09-27-telemetry-and-quota.md` |
-| Change 1 proposal | `openspec/changes/usage-monitoring-via-otel/` |
-| Change 2 proposal | `openspec/changes/provider-quota-check/` |
+| Change 1 proposal | `openspec/changes/usage-monitoring-via-otel/`（活跃） |
+| ~~Change 2 proposal~~ | ~~`openspec/changes/provider-quota-check/`~~ (**2026-09-27 已删除**，MiniMax 无公开 API) |
 | 参考链接 | https://code.claude.com/docs/en/monitoring-usage |
 
 ## 下一步
 
-1. 退出 explore 模式
-2. `openspec new change usage-monitoring-via-otel`
-3. `openspec new change provider-quota-check`
-4. 各自填 proposal / design / specs / tasks
-5. 各自 `/opsx:apply`
+1. ~~退出 explore 模式~~（已完成）
+2. ~~`openspec new change usage-monitoring-via-otel`~~（已完成）
+3. ~~`openspec new change provider-quota-check`~~（已完成 — 后续 fetch 验证发现 MiniMax 无 API，整个砍掉）
+4. `/opsx:apply usage-monitoring-via-otel` —— 只剩一个 change，进入实现阶段
 
 ---
 
