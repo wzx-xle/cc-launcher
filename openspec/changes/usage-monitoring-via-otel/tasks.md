@@ -38,7 +38,7 @@
 
 - [ ] 5.1 `cmd/cc-launcher/main.go`：在 exec Claude Code 前检查 `~/.claude/settings.json`
 - [ ] 5.2 新增 `cmd/cc-launcher/envconfig.go`：`backupAndInjectOTel(env map[string]string) (newEnv map[string]string)` 函数——按 spec 表对 5 个 key 做"备份 + 修改"
-- [ ] 5.3 `OTEL_LOGS_EXPORTER=none` 强制覆盖；其它 4 个 key 尊重用户原值（保留或仅在缺失时填默认）
+- [ ] 5.3 5 个 key 全尊重用户原值（备份即可）；**不强制覆盖 `OTEL_LOGS_EXPORTER`**——本地隐私靠 daemon 不解析 logs 保证
 - [ ] 5.4 用 `internal/config/ordered.go` 保持 JSON 字段顺序
 - [ ] 5.5 单元测试 envconfig.go：每种 key 组合（含未设 / 已设 / CC_ORIG 已存在）正确产出
 - [ ] 5.6 若 `OTEL_EXPORTER_OTLP_ENDPOINT` 是非 localhost（如远程 collector），不拉起本地 daemon
@@ -56,7 +56,10 @@
 
 - [ ] 7.1 `internal/collector/forwarder.go`：从 daemon env 读 `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT` 和 `CC_FORWARD_AUTH_HEADER`；决定是否启用
 - [ ] 7.2 拒 localhost 循环：endpoint 含 `localhost` 或 `127.0.0.1` → 不启用 + log warning
-- [ ] 7.3 在 HTTP handler 中：metric 写完 SQLite 后 `go func()` 异步 POST 原始 protobuf bytes（不重编码）
+- [ ] 7.3 在三个 HTTP handler 中：
+  - `/v1/metrics`：parse + 写 SQLite + `go func()` 异步 POST 原始 protobuf bytes
+  - `/v1/logs`：**不解析**，仅异步 POST 原始 bytes（不写 SQLite，保留用户 logs 功能）
+  - `/v1/traces`：**不解析**，仅异步 POST 原始 bytes
 - [ ] 7.4 失败策略：5s timeout / 非 2xx → log stderr 单行（不打印 auth）+ drop
 - [ ] 7.5 单元测试 forwarder.go：用 `httptest.Server` mock 200 / 5xx / timeout；验证 log 行为
 

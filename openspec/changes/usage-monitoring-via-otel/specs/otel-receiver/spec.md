@@ -1,7 +1,14 @@
 ## ADDED Requirements
 
-### Requirement: ccl-launcher accepts OTLP HTTP metrics on :4318 and optionally forwards
-A `ccl serve` mode MUST start an HTTP server on `localhost:4318` (standard OTLP HTTP port) that accepts the OTLP `/v1/metrics` protobuf endpoint. If `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT` env is set (and not localhost), the daemon MUST also forward each received metric to that URL after persisting locally. Logs (`/v1/logs`) and traces (`/v1/traces`) MUST return HTTP 405/404 — they are explicitly out of scope. The server MUST NOT block on individual slow writes or forward calls.
+### Requirement: ccl-launcher accepts OTLP HTTP on :4318; metrics persist, logs/traces only forward
+A `ccl serve` mode MUST start an HTTP server on `localhost:4318` (standard OTLP HTTP port) that accepts three OTel endpoints:
+- `POST /v1/metrics` — MUST parse protobuf and persist to local SQLite; MUST also forward to remote collector (if enabled)
+- `POST /v1/logs` — MUST NOT parse or persist content; MUST forward to remote collector (if enabled) so user's original logs functionality is preserved
+- `POST /v1/traces` — same as logs: forward-only, no persistence
+
+If `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT` env is set (and not localhost), the daemon MUST forward all three signal types to that URL. Local SQLite NEVER contains log or trace content — privacy is preserved by the daemon's architecture (don't parse/persist logs/traces), not by overriding Claude Code's exporter config.
+
+The server MUST NOT block on individual slow writes or forward calls.
 
 #### Scenario: claude code pushes metrics successfully
 - **WHEN** Claude Code (with `CLAUDE_CODE_ENABLE_TELEMETRY=1` and `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318`) sends an OTLP metrics ExportRequest
@@ -10,6 +17,14 @@ A `ccl serve` mode MUST start an HTTP server on `localhost:4318` (standard OTLP 
 #### Scenario: metric is forwarded to remote collector
 - **WHEN** daemon has `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT=https://company-otel:4317` and `CC_FORWARD_AUTH_HEADER="Authorization=Bearer t"`
 - **THEN** for each parsed metric, daemon POSTs the original protobuf bytes (or re-encoded metric payload) to the remote URL with the auth header; failures are logged and dropped
+
+#### Scenario: claude code pushes logs; daemon forwards but does not persist
+- **WHEN** Claude Code sends an OTLP logs ExportRequest to `:4318/v1/logs` (because user's settings.json has `OTEL_LOGS_EXPORTER=otlp` and `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318`)
+- **THEN** daemon accepts the request (HTTP 200) and forwards the original bytes to the backup endpoint; SQLite has NO new log entries
+
+#### Scenario: claude code pushes traces; daemon forwards but does not persist
+- **WHEN** Claude Code sends an OTLP traces ExportRequest to `:4318/v1/traces`
+- **THEN** daemon accepts the request (HTTP 200) and forwards the original bytes to the backup endpoint; SQLite has NO new trace entries
 
 #### Scenario: server binds when port is free
 - **WHEN** `ccl serve` starts and `:4318` is not in use
@@ -23,13 +38,9 @@ A `ccl serve` mode MUST start an HTTP server on `localhost:4318` (standard OTLP 
 - **WHEN** the first `ccl` invocation forks `ccl serve`, the user runs `ccl` again 30 minutes later
 - **THEN** the second invocation sees the daemon already alive and skips fork; both sessions' metrics land in the same SQLite file
 
-#### Scenario: server rejects logs endpoint
-- **WHEN** Claude Code (or anyone) sends an OTLP logs ExportRequest to `:4318/v1/logs`
-- **THEN** the daemon returns HTTP 404 (or 405) without persisting anything; this prevents prompt content from accidentally landing in local SQLite
-
-#### Scenario: server rejects traces endpoint
-- **WHEN** Claude Code (or anyone) sends an OTLP traces ExportRequest to `:4318/v1/traces`
-- **THEN** the daemon returns HTTP 404 (or 405) without persisting anything
+#### Scenario: user has no forwarder configured
+- **WHEN** daemon has no `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT` env
+- **THEN** metrics are persisted to SQLite; logs/traces POSTs get HTTP 200 but no forwarding happens; user's logs/traces still go to whatever their original settings.json pointed to (which is now localhost:4318, so they go to the daemon but get no further action)
 
 ### Requirement: parser maps OTLP protobuf metrics to domain objects
 The OTLP parser MUST extract for each metric: name, value, labels (resource + scope + data-point attributes), timestamp. Log and trace payloads are not parsed.

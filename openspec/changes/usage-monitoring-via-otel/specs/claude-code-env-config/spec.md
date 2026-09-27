@@ -8,10 +8,12 @@ The 5 keys and actions:
 | Key | If user has value | If missing |
 |---|---|---|
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | backup to `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT`; override to `http://localhost:4318` | add `http://localhost:4318` |
-| `OTEL_LOGS_EXPORTER` | backup to `CC_ORIG_OTEL_LOGS_EXPORTER`; **force-override to `none`** | add `none` |
+| `OTEL_LOGS_EXPORTER` | backup to `CC_ORIG_OTEL_LOGS_EXPORTER`; **respect user's value** | add `otlp` (default; user can edit) |
 | `OTEL_METRICS_EXPORTER` | backup to `CC_ORIG_OTEL_METRICS_EXPORTER`; respect user's value | add `otlp` |
 | `OTEL_EXPORTER_OTLP_PROTOCOL` | backup to `CC_ORIG_OTEL_EXPORTER_OTLP_PROTOCOL`; respect user's value | add `http/protobuf` |
 | `CLAUDE_CODE_ENABLE_TELEMETRY` | backup to `CC_ORIG_CLAUDE_CODE_ENABLE_TELEMETRY`; respect user's value | add `1` |
+
+**Note**: ccl does NOT force-override `OTEL_LOGS_EXPORTER`. The local-privacy guarantee (no prompts in SQLite) comes from the daemon's architecture (it accepts /v1/logs but only forwards, never persists). User's original `OTEL_LOGS_EXPORTER=otlp` continues to work — logs reach the remote collector via forwarding.
 
 #### Scenario: settings.json has only OTel endpoint (typical user)
 - **WHEN** `~/.claude/settings.json` has only `OTEL_EXPORTER_OTLP_ENDPOINT=https://company-otel:4317`
@@ -31,9 +33,9 @@ The 5 keys and actions:
 - **WHEN** user runs `ccl` again and `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT` already exists
 - **THEN** ccl does NOT overwrite the backup (preserves the original saved value); only adds missing keys
 
-#### Scenario: ccl force-overrides OTEL_LOGS_EXPORTER regardless
-- **WHEN** user has `OTEL_LOGS_EXPORTER=otlp` (logs enabled)
-- **THEN** ccl saves `CC_ORIG_OTEL_LOGS_EXPORTER=otlp` and sets `OTEL_LOGS_EXPORTER=none`; daemon's spec already forbids persisting log content, this enforces it at the Claude Code level
+#### Scenario: user has OTEL_LOGS_EXPORTER=otlp (logs enabled) — ccl respects
+- **WHEN** user has `OTEL_LOGS_EXPORTER=otlp`
+- **THEN** ccl saves `CC_ORIG_OTEL_LOGS_EXPORTER=otlp` and **respects the value** (does NOT force to `none`); Claude Code pushes logs to wherever its OTEL_EXPORTER_OTLP_ENDPOINT points; if forwarding is configured, daemon forwards logs to backup endpoint
 
 #### Scenario: user sets OTEL_METRICS_EXPORTER to a non-otlp value (e.g. prometheus)
 - **WHEN** user has `OTEL_METRICS_EXPORTER=prometheus`

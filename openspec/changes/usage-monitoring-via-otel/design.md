@@ -69,21 +69,27 @@ ccl 启动时若 `~/.claude/settings.json` 的 `env` 字段缺以下键，自动
 - `CLAUDE_CODE_ENABLE_TELEMETRY=1`
 - `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318`
 - `OTEL_METRICS_EXPORTER=otlp`
-- `OTEL_LOGS_EXPORTER=none`（**显式禁用 logs，避免误启 prompt logging**）
 - `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf`
 
-**理由**：Claude Code 优先读 settings.json env；持久；显式禁用 logs 是隐私默认。
+**注意**：**不强制写** `OTEL_LOGS_EXPORTER`。如果用户已配 logs 相关设置，ccl 保留原值——daemon 的架构（不解析 logs）已经保护本地隐私，不需要通过配置禁 logs。
+
+**理由**：Claude Code 优先读 settings.json env；持久；用户原配置功能完整。
 
 **备选 shell env 变量**：临时，shell 重启即失效。**否决**。
 
-### 5. 只接 metrics，logs/traces 不入 daemon
+### 5. metrics 入 SQLite；logs/traces 仅转发不入库
 
-daemon **只实现 OTLP `/v1/metrics` HTTP endpoint**。Logs/Traces 即使被推也丢弃（HTTP 404）。
+daemon 实现三个 HTTP endpoint：
+- `POST /v1/metrics` → 解析 protobuf → 写 SQLite → 转发（如果 forwarder 启用）
+- `POST /v1/logs` → **不解析**，仅转发（如果 forwarder 启用）
+- `POST /v1/traces` → **不解析**，仅转发（如果 forwarder 启用）
 
-**理由**：
-- 体积小：HTTP server 路由只一条
-- 隐私强：本地 SQLite 永远不会有 prompt 内容
-- 简单：测试只需要构造 metric ExportRequest
+**为何接受 logs/traces 而不丢弃**：
+- 用户的原配置 `OTEL_LOGS_EXPORTER=otlp` / `OTEL_EXPORTER_OTLP_TRACES` 是有意义的——他们想看
+- 如果 daemon 对 `/v1/logs` 返回 404，Claude Code 会重试几次后丢弃 → 用户**失去 logs 功能**
+- 接受并转发保留了用户原始功能；本地隐私靠"不解析"维持（不写盘）
+
+**本地隐私的真正保证**：daemon **永远不解析 logs/traces、不写 SQLite**——只把原始 bytes 转发出去。
 
 ### 6. 两张 SQLite 表 + WAL
 
@@ -115,11 +121,13 @@ WAL 模式保证读不阻塞写：`ccl stats` 与 daemon 并发安全。
 
 **未来扩展**：TUI / web dashboard 可直接打开同一 SQLite 文件，无需 daemon。
 
-### 8. claude-code 的 prompt / response 内容**永不**入库
+### 8. claude-code 的 prompt / response 内容**永不**入库（**仅 metrics 入库**）
 
-`OTEL_LOGS_EXPORTER=none` 写死在 settings.json（决策 4）。即便 Claude Code 默认行为变了，ccl 用户也不会本地持久化 prompt 文本。
+daemon **不解析 logs/traces 的内容**——只把原始 bytes 转发出去。SQLite 永远没有 prompt 文本。
 
-**理由**：本地 SQLite 是非加密数据库；万一被其它进程读取，prompt 是隐私敏感。**默认禁用 prompt logging 是不可绕过的硬约束**。
+**理由**：本地 SQLite 是非加密数据库；万一被其它进程读取，prompt 是隐私敏感。**本地不存 logs/traces 是不可绕过的硬约束**。
+
+**用户原配置不受影响**：用户配 `OTEL_LOGS_EXPORTER=otlp` 仍能让 logs 推到他的远程 collector——只是不经过 ccl 的本地 SQLite。
 
 ### 9. 端口冲突报错退出（不共享）
 
@@ -195,17 +203,18 @@ daemon **同时是 OTel server（收 Claude Code）和 OTel client（推远程�
 - 否则 → 不启用
 
 **forwarder 行为**：
-- 每个 metric 入库后**异步** POST 到 backup 端点
-- HTTP client 复用 daemon 已建立的连接池
+- 收 metrics：**写本地 SQLite** + **异步转发**（如果启用）
+- 收 logs：**不写本地** + **异步转发**（如果启用）——保留用户 logs 功能
+- 收 traces：**不写本地** + **异步转发**（如果启用）
+- 三个 endpoint 都复用 daemon 的 HTTP client 连接池
 - **失败策略**：log stderr 一行 + drop（**不重试、不排队**——决策 18）
-- 转发**只 metrics**（与本地决策一致；不转发 logs/traces）
 
 **转发路径**：
 ```
-Claude Code → POST localhost:4318 (OTEL_EXPORTER_OTLP_ENDPOINT)
-  → daemon /v1/metrics handler
-    → 写本地 SQLite (sync)
-    → goroutine POST to CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT (async, fire-and-forget)
+Claude Code → POST localhost:4318 (ccl 改写的 endpoint)
+  ├─→ /v1/metrics → 解析 → 写 SQLite → POST to backup (async)
+  ├─→ /v1/logs → (no parse) → POST to backup (async)
+  └─→ /v1/traces → (no parse) → POST to backup (async)
 ```
 
 ### 15. 备份所有 OTel 相关 key（**`CC_ORIG_<KEY>`**）
@@ -215,7 +224,7 @@ ccl 启动时**对所有 5 个 OTel key** 做"备份 + 修改"两步：
 | 原 key | ccl 处理 |
 |---|---|
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | 备份到 `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT`，**改写为 `http://localhost:4318`** |
-| `OTEL_LOGS_EXPORTER` | 备份到 `CC_ORIG_OTEL_LOGS_EXPORTER`，**强制覆盖为 `none`**（隐私硬约束） |
+| `OTEL_LOGS_EXPORTER` | 备份到 `CC_ORIG_OTEL_LOGS_EXPORTER`，**保留原值**（用户配 `otlp` 就转发 logs 到 backup） |
 | `OTEL_METRICS_EXPORTER` | 备份到 `CC_ORIG_OTEL_METRICS_EXPORTER`，**保留原值** |
 | `OTEL_EXPORTER_OTLP_PROTOCOL` | 备份到 `CC_ORIG_OTEL_EXPORTER_OTLP_PROTOCOL`，**保留原值** |
 | `CLAUDE_CODE_ENABLE_TELEMETRY` | 备份到 `CC_ORIG_CLAUDE_CODE_ENABLE_TELEMETRY`，**保留原值** |
