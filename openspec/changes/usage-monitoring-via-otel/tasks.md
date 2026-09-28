@@ -73,13 +73,13 @@
 
 - [x] 9.1 `go test ./...` 全绿
 - [x] 9.2 `GOOS=windows go build ./...` 通过
-- [x] 9.3 手动：`ccl` → daemon 起来 → 跑 Claude Code session → `ccl stats` 看到当次 session
-- [x] 9.4 手动：故意占 `:4318` → `ccl serve` 报错退出，**但 `ccl` 仍 exec Claude Code**
-- [x] 9.5 手动：`ccl stop` → daemon 优雅关
-- [x] 9.6 手动：调 `POST :4318/v1/logs` → 404，不写盘
-- [x] 9.7 手动：用户 settings.json 有 `OTEL_EXPORTER_OTLP_ENDPOINT=remote.com` → ccl 自动备份 + daemon 自动转发；`ccl stats` 本地有数据
-- [x] 9.8 手动：`ccl restore` → settings.json 恢复原状（`CC_ORIG_*` 删、原值写回）
-- [x] 9.9 跑 24h 累积测试：sessions 数 / metrics 数 / db 文件大小
+- [ ] 9.3 手动：`ccl` → daemon 起来 → 跑 Claude Code session → `ccl stats` 看到当次 session
+- [ ] 9.4 手动：故意占 `:4318` → `ccl serve` 报错退出，**但 `ccl` 仍 exec Claude Code**
+- [ ] 9.5 手动：`ccl stop` → daemon 优雅关
+- [x] 9.6 手动：调 `POST :4318/v1/logs` → 200 + 转发（如启用 forwarder），不写盘
+- [ ] 9.7 手动：用户 settings.json 有 `OTEL_EXPORTER_OTLP_ENDPOINT=remote.com` → ccl 自动备份 + daemon 自动转发；`ccl stats` 本地有数据
+- [ ] 9.8 手动：`ccl restore` → settings.json 恢复原状（`CC_ORIG_*` 删、原值写回）
+- [ ] 9.9 跑 24h 累积测试：sessions 数 / metrics 数 / db 文件大小
 
 ## 10. 提交
 
