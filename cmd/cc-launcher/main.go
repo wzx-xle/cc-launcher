@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"cc-launcher/internal/cli"
 	"cc-launcher/internal/config"
@@ -156,7 +157,8 @@ func runTUI(pm *provider.Manager, sm *state.Manager, cm *config.Manager) error {
 	return launcher.Launch(opts)
 }
 
-// injectOTelEnv 在 exec Claude Code 前把 OTel env 注入 ~/.claude/settings.json。
+// injectOTelEnv 在 exec Claude Code 前把 OTel env 注入 ~/.claude/settings.json，
+// 同时把 CC_ORIG_* 导出到当前进程 env（fork ccl serve 时子进程继承 → 触发 forwarder）。
 //
 // 失败仅警告，不阻断 ccl 主流程（决策 10：daemon 是 optional）。
 func injectOTelEnv(cm *config.Manager) error {
@@ -183,10 +185,23 @@ func injectOTelEnv(cm *config.Manager) error {
 			}
 		}
 	}
-	if !changed {
-		return nil // 无变更，不写盘
+	if changed {
+		settings["env"] = updated
+		if err := cm.SaveSettings(settings); err != nil {
+			return err
+		}
 	}
 
-	settings["env"] = updated
-	return cm.SaveSettings(settings)
+	// 把 CC_ORIG_* 同步到当前进程 env → fork ccl serve 时子进程继承。
+	// 设计 14：daemon 读自己 env 的 CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT 决定是否启用 forwarder。
+	for k, v := range updated {
+		if strings.HasPrefix(k, "CC_ORIG_") {
+			_ = os.Setenv(k, v)
+		}
+	}
+	if auth := os.Getenv("CC_FORWARD_AUTH_HEADER"); auth != "" {
+		_ = os.Setenv("CC_FORWARD_AUTH_HEADER", auth)
+	}
+
+	return nil
 }

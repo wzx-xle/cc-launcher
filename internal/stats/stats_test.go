@@ -35,18 +35,18 @@ func setupTestDB(t *testing.T) string {
 		t.Fatal(err)
 	}
 
-	// s1: input=200, output=80, cache_cre=10, cache_read=20, cost=0.01
+	// s1: input=200, output=80, cacheCreation=10, cacheRead=20, cost=0.01
 	// s2: input=500, output=200, cost=0.05
 	for _, m := range []collector.Metric{
 		{SessionID: "s1", Name: "claude_code.token.usage", Value: 100, Labels: map[string]string{"type": "input"}, CapturedAt: now},
 		{SessionID: "s1", Name: "claude_code.token.usage", Value: 100, Labels: map[string]string{"type": "input"}, CapturedAt: now},
 		{SessionID: "s1", Name: "claude_code.token.usage", Value: 80, Labels: map[string]string{"type": "output"}, CapturedAt: now},
-		{SessionID: "s1", Name: "claude_code.token.usage", Value: 10, Labels: map[string]string{"type": "cache_creation"}, CapturedAt: now},
-		{SessionID: "s1", Name: "claude_code.token.usage", Value: 20, Labels: map[string]string{"type": "cache_read"}, CapturedAt: now},
-		{SessionID: "s1", Name: "claude_code.cost.usd", Value: 0.01, CapturedAt: now},
+		{SessionID: "s1", Name: "claude_code.token.usage", Value: 10, Labels: map[string]string{"type": "cacheCreation"}, CapturedAt: now},
+		{SessionID: "s1", Name: "claude_code.token.usage", Value: 20, Labels: map[string]string{"type": "cacheRead"}, CapturedAt: now},
+		{SessionID: "s1", Name: "claude_code.cost.usage", Value: 0.01, CapturedAt: now},
 		{SessionID: "s2", Name: "claude_code.token.usage", Value: 500, Labels: map[string]string{"type": "input"}, CapturedAt: now},
 		{SessionID: "s2", Name: "claude_code.token.usage", Value: 200, Labels: map[string]string{"type": "output"}, CapturedAt: now},
-		{SessionID: "s2", Name: "claude_code.cost.usd", Value: 0.05, CapturedAt: now},
+		{SessionID: "s2", Name: "claude_code.cost.usage", Value: 0.05, CapturedAt: now},
 	} {
 		if err := store.WriteMetric(m); err != nil {
 			t.Fatal(err)

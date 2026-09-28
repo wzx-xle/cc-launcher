@@ -101,10 +101,10 @@ func QueryStats(dbPath string, q Query) (*Result, error) {
 	result := &Result{Since: since, GroupBy: groupBy}
 	for rows.Next() {
 		var ss SessionStats
-		var cwd, provRaw, labelsJSON string
+		var cwd, provRaw, model, labelsJSON string
 		var startedAtMs int64
 		if err := rows.Scan(
-			&ss.SessionID, &startedAtMs, &provRaw, &cwd,
+			&ss.SessionID, &startedAtMs, &provRaw, &cwd, &model,
 			&ss.InputTokens, &ss.OutputTokens, &ss.CacheCreate, &ss.CacheRead, &ss.CostUSD,
 			&labelsJSON,
 		); err != nil {
@@ -113,6 +113,7 @@ func QueryStats(dbPath string, q Query) (*Result, error) {
 		ss.StartedAt = time.UnixMilli(startedAtMs)
 		ss.Project = projectName(cwd)
 		ss.Provider = providerName(provRaw, labelsJSON)
+		ss.Model = model
 		if labelsJSON != "" && labelsJSON != "{}" {
 			_ = json.Unmarshal([]byte(labelsJSON), &ss.ExtraLabels)
 		}
@@ -132,14 +133,17 @@ func QueryStats(dbPath string, q Query) (*Result, error) {
 
 // buildSessionStatsSQL 按 group 维度动态拼 SQL，返回 (sql, args)。
 //
-// 关键 metric name（来自 Claude Code OTel）：
-//   claude_code.token.usage       labels.type ∈ {input, output, cache_creation, cache_read}
-//   claude_code.cost.usd
+// 关键 metric name（Claude Code v2.1.x 实测）：
+//   claude_code.token.usage       labels.type ∈ {input, output, cacheRead, cacheCreation}
+//   claude_code.cost.usage
 // 其它 name 在聚合里被忽略（不算 tokens/cost）。
 //
 // SQLite 用 CAST(... AS INTEGER) 把 token SUM 转 int64；cost 保留 REAL。
+//
+// 注意：Claude Code 不在 OTel payload 里推 provider / cwd；sessions 表这两列恒为空。
+// 因此 --by-provider 实际退化为按 sessions 表的 provider 列（恒空）；功能仅对未来扩展有效。
+// 真实场景下用 --by-project 等替代。
 func buildSessionStatsSQL(groupBy, projectFilter string, since time.Time) (string, []any) {
-	// 维度选择
 	var groupExpr, groupClause string
 	args := []any{since.UnixMilli()}
 
@@ -164,20 +168,18 @@ func buildSessionStatsSQL(groupBy, projectFilter string, since time.Time) (strin
 		args = append(args, "%"+strings.ReplaceAll(projectFilter, "%", `\%`)+"%")
 	}
 
-	// 聚合查询：每个 group 一行。
-	// token 列 CAST(... AS INTEGER)：SUM 返回 REAL，需要截断为整数。
-	// cost 列保持 REAL。
 	sql := fmt.Sprintf(`
 SELECT
     %s AS session_id,
     MIN(s.started_at) AS started_at,
     COALESCE(s.provider, '') AS provider,
     s.cwd AS cwd,
-    CAST(COALESCE(SUM(CASE WHEN m.name = 'claude_code.token.usage' AND JSON_EXTRACT(m.labels, '$.type') = 'input'           THEN m.value END), 0) AS INTEGER) AS input_tokens,
-    CAST(COALESCE(SUM(CASE WHEN m.name = 'claude_code.token.usage' AND JSON_EXTRACT(m.labels, '$.type') = 'output'          THEN m.value END), 0) AS INTEGER) AS output_tokens,
-    CAST(COALESCE(SUM(CASE WHEN m.name = 'claude_code.token.usage' AND JSON_EXTRACT(m.labels, '$.type') = 'cache_creation' THEN m.value END), 0) AS INTEGER) AS cache_create,
-    CAST(COALESCE(SUM(CASE WHEN m.name = 'claude_code.token.usage' AND JSON_EXTRACT(m.labels, '$.type') = 'cache_read'     THEN m.value END), 0) AS INTEGER) AS cache_read,
-    COALESCE(SUM(CASE WHEN m.name = 'claude_code.cost.usd' THEN m.value END), 0.0) AS cost_usd,
+    COALESCE(s.model, '') AS model,
+    CAST(COALESCE(SUM(CASE WHEN m.name = 'claude_code.token.usage' AND JSON_EXTRACT(m.labels, '$.type') = 'input'          THEN m.value END), 0) AS INTEGER) AS input_tokens,
+    CAST(COALESCE(SUM(CASE WHEN m.name = 'claude_code.token.usage' AND JSON_EXTRACT(m.labels, '$.type') = 'output'         THEN m.value END), 0) AS INTEGER) AS output_tokens,
+    CAST(COALESCE(SUM(CASE WHEN m.name = 'claude_code.token.usage' AND JSON_EXTRACT(m.labels, '$.type') = 'cacheCreation' THEN m.value END), 0) AS INTEGER) AS cache_create,
+    CAST(COALESCE(SUM(CASE WHEN m.name = 'claude_code.token.usage' AND JSON_EXTRACT(m.labels, '$.type') = 'cacheRead'     THEN m.value END), 0) AS INTEGER) AS cache_read,
+    COALESCE(SUM(CASE WHEN m.name = 'claude_code.cost.usage' THEN m.value END), 0.0) AS cost_usd,
     COALESCE(
         (SELECT m2.labels FROM metrics m2
          WHERE m2.session_id = %s

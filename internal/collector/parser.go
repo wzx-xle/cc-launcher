@@ -19,7 +19,6 @@ type ParseError struct{ Reason string }
 func (e *ParseError) Error() string { return "parse: " + e.Reason }
 
 // ParseResult 是单个 OTLP 导出请求的解析输出。
-// 包含本次请求中识别出的 session 元数据 + 所有 data points。
 type ParseResult struct {
 	Sessions []Session // 唯一化的 session 列表（按 ID 去重）
 	Metrics  []Metric  // 所有 number data points
@@ -27,16 +26,23 @@ type ParseResult struct {
 
 // ParseMetricsRequest 解析 ExportMetricsServiceRequest protobuf bytes。
 //
+// Claude Code 实际 payload 形态（v2.1.x 验证）：
+//   - resource attrs: host.arch / os.type / os.version / service.name / service.version / terminal.type / user.id
+//   - datapoint attrs: session.id / model / type (input|output|cacheRead|cacheCreation) / start_type / query_source
+//   - session.id 出现在 datapoint attrs（不是 resource attrs）
+//   - provider / cwd Claude Code 推送中 **不存在**
+//   - 已知 metric names: claude_code.session.count / claude_code.token.usage /
+//     claude_code.cost.usage / claude_code.active_time.total
+//
 // 设计要点：
-//   - 只处理 Sum / Gauge 的 NumberDataPoint；Histogram / Summary / ExponentialHistogram 跳过
-//     （Claude Code 当前只发 Sum/Gauge；未来若发 Histogram 再补）
-//   - Resource attributes 提取 session.id / provider / cwd / model
-//   - Scope attributes + data point attributes 合并为 labels
+//   - 只处理 Sum / Gauge 的 NumberDataPoint；Histogram / Summary 跳过
+//   - session.id 从 datapoint attrs 取（per-datapoint 覆盖 → 同一 resource 里多个 session 也能区分）
+//   - model 从 datapoint attrs 取
 //   - 不抛 panic：malformed protobuf → ParseError
 func ParseMetricsRequest(body []byte) (*ParseResult, error) {
 	var req collectormetrics.ExportMetricsServiceRequest
 	if len(body) == 0 {
-		return &ParseResult{}, nil // 空 body 视为空 export，返回 200
+		return &ParseResult{}, nil
 	}
 	if err := proto.Unmarshal(body, &req); err != nil {
 		return nil, &ParseError{Reason: "protobuf 解析失败: " + err.Error()}
@@ -44,21 +50,13 @@ func ParseMetricsRequest(body []byte) (*ParseResult, error) {
 
 	result := &ParseResult{}
 	sessionSeen := make(map[string]bool)
+	sessionModels := make(map[string]string) // session.id → model（首个非空值留下）
 
 	for _, rm := range req.GetResourceMetrics() {
 		if rm == nil {
 			continue
 		}
 		resAttrs := attrsToMap(rm.GetResource().GetAttributes())
-
-		// 从 resource attrs 提取 session 候选。
-		// Claude Code 推送时通常带 session.id；其它字段从 label 反推。
-		sessID := resAttrs["session.id"]
-		if sessID == "" {
-			// 没有 session.id 的 resource 不创建 session 行；metric 仍可记录。
-			// 简化起见：用 resource 本身的某种"指纹"做 ID（这里直接用 service.name + 时间），
-			// 但为了避免无意义 session 噪音，直接跳过 session 创建。
-		}
 
 		for _, sm := range rm.GetScopeMetrics() {
 			if sm == nil {
@@ -70,67 +68,95 @@ func ParseMetricsRequest(body []byte) (*ParseResult, error) {
 				if m == nil {
 					continue
 				}
-				extractFromMetric(m, resAttrs, scopeAttrs, sessID, result)
+				extractFromMetric(m, resAttrs, scopeAttrs, sessionModels, result)
 			}
 		}
+	}
 
-		// session 记录（按 resource 维度去重）。
-		if sessID != "" && !sessionSeen[sessID] {
-			result.Sessions = append(result.Sessions, buildSession(sessID, resAttrs))
-			sessionSeen[sessID] = true
+	// 基于累计的 sessionModels 创建 session 行
+	for sid, model := range sessionModels {
+		if sid == "" || sessionSeen[sid] {
+			continue
 		}
+		result.Sessions = append(result.Sessions, Session{
+			ID:        sid,
+			StartedAt: time.Now(),
+			Provider:  "", // Claude Code 不推送 provider；ccl 留空
+			Cwd:       "", // Claude Code 不推送 cwd
+			Model:     model,
+		})
+		sessionSeen[sid] = true
 	}
 
 	return result, nil
 }
 
 // extractFromMetric 处理单个 Metric（Sum / Gauge / 其他类型）。
+//
+// sessionModels 由 caller 持有（跨 metric 累积）：首个非空 model 值留下。
 func extractFromMetric(
 	m *metricpb.Metric,
 	resAttrs, scopeAttrs map[string]string,
-	sessID string,
+	sessionModels map[string]string,
 	out *ParseResult,
 ) {
 	name := m.GetName()
 
+	trackModel := func(dp *metricpb.NumberDataPoint) {
+		dpAttrs := mapToAttrs(dp.GetAttributes())
+		mp := dataPointToMetric(dp, name, resAttrs, scopeAttrs, dpAttrs)
+		if sid := mp.SessionID; sid != "" {
+			if cur, ok := sessionModels[sid]; !ok || cur == "" {
+				sessionModels[sid] = mp.Labels["model"]
+			}
+		}
+		out.Metrics = append(out.Metrics, mp)
+	}
+
 	switch v := m.Data.(type) {
 	case *metricpb.Metric_Sum:
 		for _, dp := range v.Sum.GetDataPoints() {
-			out.Metrics = append(out.Metrics, dataPointToMetric(dp, name, resAttrs, scopeAttrs, sessID))
+			trackModel(dp)
 		}
 	case *metricpb.Metric_Gauge:
 		for _, dp := range v.Gauge.GetDataPoints() {
-			out.Metrics = append(out.Metrics, dataPointToMetric(dp, name, resAttrs, scopeAttrs, sessID))
+			trackModel(dp)
 		}
 	default:
 		// Histogram / Summary / ExponentialHistogram 暂不处理。
-		// claude_code 当前只发 Sum/Gauge，未来若发 Histogram 再补。
 	}
 }
 
+// mapToAttrs 是 []KeyValue → map[string]string 的便捷包装。
+func mapToAttrs(attrs []*commonpb.KeyValue) map[string]string {
+	if len(attrs) == 0 {
+		return nil
+	}
+	return attrsToMap(attrs)
+}
+
 // dataPointToMetric 把单个 NumberDataPoint 转成 Metric。
+//
+// labels 包含：
+//   - resource attrs（除 session.id）
+//   - scope attrs
+//   - datapoint attrs
+//
+// session.id 单独提取到 Metric.SessionID（不进入 labels，避免冗余）。
 func dataPointToMetric(
 	dp *metricpb.NumberDataPoint,
 	metricName string,
-	resAttrs, scopeAttrs map[string]string,
-	sessID string,
+	resAttrs, scopeAttrs, dpAttrs map[string]string,
 ) Metric {
-	labels := make(map[string]string, len(resAttrs)+len(scopeAttrs)+8)
+	labels := make(map[string]string, len(resAttrs)+len(scopeAttrs)+len(dpAttrs))
 
-	// resource attrs：service.name / service.version 等
-	for k, v := range resAttrs {
-		// session.id 已经在 sessions 行；不在 metric labels 里重复
-		if k == "session.id" {
-			continue
-		}
-		labels[k] = v
-	}
-	// scope attrs
+	maps.Copy(labels, resAttrs)
 	maps.Copy(labels, scopeAttrs)
-	// data point attrs（model / provider / session.id / cwd 都在这里）
-	for _, kv := range dp.GetAttributes() {
-		labels[kv.GetKey()] = anyValueToString(kv.GetValue())
-	}
+	maps.Copy(labels, dpAttrs)
+
+	// session.id 不放进 labels；从 dpAttrs 提取到顶层字段
+	sessionID := labels["session.id"]
+	delete(labels, "session.id")
 
 	ts := time.Unix(0, int64(dp.GetTimeUnixNano()))
 	if dp.GetTimeUnixNano() == 0 {
@@ -146,23 +172,11 @@ func dataPointToMetric(
 	}
 
 	return Metric{
-		SessionID:  sessID,
+		SessionID:  sessionID,
 		Name:       metricName,
 		Value:      value,
 		Labels:     labels,
 		CapturedAt: ts,
-	}
-}
-
-// buildSession 从 resource attrs 构建 Session 行。
-func buildSession(sessID string, resAttrs map[string]string) Session {
-	return Session{
-		ID:        sessID,
-		StartedAt: time.Now(), // 由 caller 收到多个 resource 时保持唯一；
-		// 精确 started_at 由 metrics 第一帧覆盖（store 层 UPDATE 处理）。
-		Provider: resAttrs["provider"],
-		Cwd:      resAttrs["cwd"],
-		Model:    resAttrs["model"],
 	}
 }
 
