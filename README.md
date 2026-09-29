@@ -123,6 +123,8 @@ ccl provider --new --type deepseek my-deepseek
 
 不会被删除的：不在快照中的字段（用户手动加的）、值与快照不同的字段（用户改过的）。
 
+> **备份触发语义**（详见"用量监控" → "自动备份时机"）：除切换提供商外，每次 `ccl` 启动时也会**条件性**触发备份——仅在检测到 settings.json 不再处于 ccl 控制下时（如首次启动、第三方工具覆盖 OTel 端点后）。常态启动（仍在 ccl 控制下）不产生新备份。
+
 ## 目录结构
 
 ```
@@ -206,6 +208,22 @@ ccl stats --json                # JSON 输出（pipeable to jq）
 ```
 
 `ccl stats` **不依赖 daemon 正在跑**——它直接打开 `~/.cc-launcher/telemetry.db` 读。db 文件用 SQLite WAL，所以 daemon 写和 ccl stats 读并发安全。
+
+### 自动备份时机
+
+ccl 会把每次 `settings.json` 写入前的快照存到 `~/.cc-launcher/backups/settings-<时间戳>.json`，保留最近 10 个。三种触发时机：
+
+1. **手动 `ccl restore`** — 还原操作前做一份（操作本身的回滚锚点）
+2. **切换 provider（`Manager.Merge`）** — 合并前做一份
+3. **每次 `ccl` 启动的 `injectOTelEnv`** — **仅在控制权交接边界**触发：
+   - ✅ 首次 ccl 启动（settings.json 没被 ccl 写过）
+   - ✅ 第三方工具/手动编辑覆盖 OTel 端点（ccl 检测到端点不指向 `localhost:4318`）
+   - ✅ settings.json 不含 `env` 字段（用户从未用 OTel）
+   - ❌ 常态启动（端点已是 ccl 默认值）—— **不**触发，避免 10 个轮转被瞬态版本耗光
+
+判断条件："OTEL 端点仍指向 ccl 默认值（兜底 `http://localhost:4318` 或 per-signal `http://localhost:4318/v1/metrics`）"则视为控制中，否则视为交接边界。
+
+`backups/` 里现在会有三类快照：恢复点、provider 切换点、控制权交接点——按时间戳排序即可选择回滚目标。
 
 ### 端口冲突怎么办
 

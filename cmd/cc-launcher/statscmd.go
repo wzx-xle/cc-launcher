@@ -146,7 +146,13 @@ const restoreHelp = `用法: ccl restore
 
 不可逆：清掉后下次 ccl 启动会重新注入。
 
-操作前会先备份当前 settings.json 到 ~/.cc-launcher/backups/settings-<时间戳>.json。`
+操作前会先备份当前 settings.json 到 ~/.cc-launcher/backups/settings-<时间戳>.json。
+
+补充：backups/ 还包含 ccl 自动产出的\"控制权交接快照\"——
+每次 ccl 启动检测到 settings.json 不再处于 ccl 控制下时（如首次启动、
+第三方工具覆盖 OTel 端点后），会额外备份一份作为健康基线，便于
+回滚到\"接管前\"状态。常量启动（仍在 ccl 控制下）不产生新备份，
+避免轮转（保留最近 10 个）被瞬态版本耗光。`
 
 // runRestore 是 `ccl restore` 入口。
 func runRestore(args []string) error {
