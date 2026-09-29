@@ -43,4 +43,4 @@
 - [x] 7.4 smoke test — 控制中跳过 backup：跑 `ccl` 第二次 → 验证 `backups/` 文件数**不**变（endpoint 已为 localhost）
 - [x] 7.5 smoke test — 第三方覆盖 backup：手动改 endpoint 为非 localhost（如 `http://other-tool:4318`）→ 跑 `ccl` → 验证 `backups/` 新增"三方覆盖态"快照
 - [x] 7.6 smoke test — restore 不受影响：跑 `ccl restore` → 验证仍按原逻辑还原 CC_ORIG_* + 删 ccl 默认值，settings.json 等价于"首次 ccl 注入前 + restore 已清 backup"
-- [ ] 7.7 所有 task 完成 + 上述 smoke test 通过后跑 `opsx:archive backup-on-control-handover` 归档
+- [x] 7.7 所有 task 完成 + 上述 smoke test 通过后跑 `opsx:archive backup-on-control-handover` 归档
