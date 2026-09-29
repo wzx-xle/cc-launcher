@@ -19,6 +19,14 @@ func TestLoadSettings_NoFile(t *testing.T) {
 	}
 }
 
+// TestDefaultMaxBackups 锁定备份轮转默认值。改这个值要同步改 README + statscmd 帮助文案，
+// 所以加测试显式锚定。merge-on-rotate：调高原因见 config.go DefaultMaxBackups 注释。
+func TestDefaultMaxBackups(t *testing.T) {
+	if DefaultMaxBackups != 30 {
+		t.Errorf("DefaultMaxBackups = %d, want 30 (merge-on-rotate rationale)", DefaultMaxBackups)
+	}
+}
+
 func TestSaveAndLoadSettings(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
 	m := NewManager(path, t.TempDir(), 10)

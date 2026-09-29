@@ -116,7 +116,7 @@ ccl provider --new --type deepseek my-deepseek
 
 切换提供商时，框架执行以下步骤：
 
-1. **备份** — 当前 settings.json 写入 `~/.cc-launcher/backups/`（保留最近 10 个）
+1. **备份** — 当前 settings.json 写入 `~/.cc-launcher/backups/`（保留最近 30 个）
 2. **清理旧配置** — 按快照比对，删除未被用户修改的旧提供商字段
 3. **注入新配置** — 写入新提供商的所有字段
 4. **更新快照** — 记录本次注入的字段，供下次切换时比对
@@ -211,7 +211,7 @@ ccl stats --json                # JSON 输出（pipeable to jq）
 
 ### 自动备份时机
 
-ccl 会把每次 `settings.json` 写入前的快照存到 `~/.cc-launcher/backups/settings-<时间戳>.json`，保留最近 10 个。三种触发时机：
+ccl 会把每次 `settings.json` 写入前的快照存到 `~/.cc-launcher/backups/settings-<时间戳>.json`，保留最近 30 个。三种触发时机：
 
 1. **手动 `ccl restore`** — 还原操作前做一份（操作本身的回滚锚点）
 2. **切换 provider（`Manager.Merge`）** — 合并前做一份
@@ -219,7 +219,7 @@ ccl 会把每次 `settings.json` 写入前的快照存到 `~/.cc-launcher/backup
    - ✅ 首次 ccl 启动（settings.json 没被 ccl 写过）
    - ✅ 第三方工具/手动编辑覆盖 OTel 端点（ccl 检测到端点不指向 `localhost:4318`）
    - ✅ settings.json 不含 `env` 字段（用户从未用 OTel）
-   - ❌ 常态启动（端点已是 ccl 默认值）—— **不**触发，避免 10 个轮转被瞬态版本耗光
+   - ❌ 常态启动（端点已是 ccl 默认值）—— **不**触发，避免 30 个轮转被瞬态版本耗光
 
 判断条件："OTEL 端点仍指向 ccl 默认值（兜底 `http://localhost:4318` 或 per-signal `http://localhost:4318/v1/metrics`）"则视为控制中，否则视为交接边界。
 
@@ -332,4 +332,4 @@ ccl restore     # 还原 settings.json 到 ccl 之前的状态（删 CC_ORIG_* +
 | `~/.cc-launcher/telemetry.db-wal` / `-shm` | WAL 配套文件，sqlite 自动管理 |
 | `~/.cc-launcher/daemon.pid` | daemon 运行时 PID 文件 |
 | `~/.cc-launcher/state.json` | ccl 自身状态（active provider / permission mode） |
-| `~/.cc-launcher/backups/` | settings.json 自动备份轮转（最近 10 个） |
+| `~/.cc-launcher/backups/` | settings.json 自动备份轮转（最近 30 个） |

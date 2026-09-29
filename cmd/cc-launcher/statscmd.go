@@ -152,7 +152,7 @@ const restoreHelp = `用法: ccl restore
 每次 ccl 启动检测到 settings.json 不再处于 ccl 控制下时（如首次启动、
 第三方工具覆盖 OTel 端点后），会额外备份一份作为健康基线，便于
 回滚到\"接管前\"状态。常量启动（仍在 ccl 控制下）不产生新备份，
-避免轮转（保留最近 10 个）被瞬态版本耗光。`
+避免轮转（保留最近 30 个）被瞬态版本耗光。`
 
 // runRestore 是 `ccl restore` 入口。
 func runRestore(args []string) error {
@@ -176,7 +176,7 @@ func runRestore(args []string) error {
 	if err != nil {
 		return err
 	}
-	cfg := config.NewManager(settingsPath, backupDir, 10)
+	cfg := config.NewManager(settingsPath, backupDir, config.DefaultMaxBackups)
 
 	settings, err := cfg.LoadSettings()
 	if err != nil {

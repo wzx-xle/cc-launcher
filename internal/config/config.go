@@ -18,6 +18,15 @@ type Manager struct {
 	maxBackups   int
 }
 
+// DefaultMaxBackups 是 backups/ 目录保留的最大备份数（轮转阈值）。
+//
+// 调高原因：merge-on-rotate 频繁切 provider 的用户每次 Merge 都会触发 Backup，
+// 旧值 10 在高频切换下会让"健康基线"快照很快被轮转挤掉；
+// 30 = 3× 增长，足以覆盖"每天切 ~10 次"的边缘场景，且单目录 30 个文件肉眼浏览仍友好。
+//
+// 调高代价：磁盘占用线性增长（settings.json 典型 ~50KB × 30 ≈ 1.5MB），可忽略。
+const DefaultMaxBackups = 30
+
 // NewManager 创建 Manager。
 func NewManager(settingsPath, backupDir string, maxBackups int) *Manager {
 	return &Manager{

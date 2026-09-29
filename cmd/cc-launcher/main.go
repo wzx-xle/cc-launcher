@@ -81,7 +81,7 @@ func run(args []string) error {
 	if err != nil {
 		return fmt.Errorf("无法获取备份目录路径: %w", err)
 	}
-	configMgr := config.NewManager(settingsPath, backupDir, 10)
+	configMgr := config.NewManager(settingsPath, backupDir, config.DefaultMaxBackups)
 
 	if len(args) == 0 {
 		return runTUI(providerMgr, stateMgr, configMgr)
