@@ -158,7 +158,8 @@ func runTUI(pm *provider.Manager, sm *state.Manager, cm *config.Manager) error {
 }
 
 // injectOTelEnv 在 exec Claude Code 前把 OTel env 注入 ~/.claude/settings.json，
-// 同时把 CC_ORIG_* 导出到当前进程 env（fork ccl serve 时子进程继承 → 触发 forwarder）。
+// 同时把备份键（CC_ORIG_* 与 FORWORD_* 两类）导出到当前进程 env（fork ccl serve 时子进程继承 →
+// 触发 forwarder）。FORWORD_* 是 telemetry-config-compat 引入的 per-signal metrics 备份命名空间。
 //
 // 失败仅警告，不阻断 ccl 主流程（决策 10：daemon 是 optional）。
 func injectOTelEnv(cm *config.Manager) error {
@@ -192,10 +193,11 @@ func injectOTelEnv(cm *config.Manager) error {
 		}
 	}
 
-	// 把 CC_ORIG_* 同步到当前进程 env → fork ccl serve 时子进程继承。
+	// 把备份键同步到当前进程 env → fork ccl serve 时子进程继承。
 	// 设计 14：daemon 读自己 env 的 CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT 决定是否启用 forwarder。
+	// telemetry-config-compat §4：daemon 也读 FORWORD_OTEL_EXPORTER_OTLP_METRICS_ENDPOINT（per-signal 优先）。
 	for k, v := range updated {
-		if strings.HasPrefix(k, "CC_ORIG_") {
+		if strings.HasPrefix(k, "CC_ORIG_") || strings.HasPrefix(k, "FORWORD_") {
 			_ = os.Setenv(k, v)
 		}
 	}
