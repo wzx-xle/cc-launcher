@@ -123,3 +123,85 @@ func TestAuthMask(t *testing.T) {
 		}
 	}
 }
+
+// telemetry-config-compat §2.7
+
+func TestNewForwarderFromEnv_PerSignalPriority(t *testing.T) {
+	// 明确 unset FORWORD_ 后再 set，避免测试间干扰
+	t.Setenv("FORWORD_OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "https://primary:4318/v1/metrics")
+	t.Setenv("CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT", "https://fallback:4318")
+	f := NewForwarderFromEnv()
+	if !f.Enabled() {
+		t.Fatal("forwarder should be enabled")
+	}
+	if got := f.Target(); got != "https://primary:4318/v1/metrics" {
+		t.Errorf("FORWORD_ should win over CC_ORIG_: got target=%q", got)
+	}
+}
+
+// telemetry-config-compat §2.8
+
+func TestNewForwarderFromEnv_FallbackPath(t *testing.T) {
+	// unset FORWORD_，只设 CC_ORIG_ → forwarder 仍启用，target 用 CC_ORIG_ URL
+	t.Setenv("FORWORD_OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "")
+	t.Setenv("CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT", "https://legacy:4318")
+	f := NewForwarderFromEnv()
+	if !f.Enabled() {
+		t.Fatal("forwarder should be enabled via CC_ORIG_ fallback")
+	}
+	if got := f.Target(); got != "https://legacy:4318/v1/metrics" {
+		t.Errorf("fallback should append /v1/metrics: got target=%q", got)
+	}
+}
+
+// telemetry-config-compat §2.9
+
+func TestNewForwarderFromEnv_LocalhostSkip(t *testing.T) {
+	// FORWORD_ 与 CC_ORIG_ 都指向 localhost → forwarder 禁用（防 loop）
+	t.Setenv("FORWORD_OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "http://localhost:4318/v1/metrics")
+	t.Setenv("CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4318")
+	f := NewForwarderFromEnv()
+	if f.Enabled() {
+		t.Errorf("forwarder should be disabled when both env point to localhost")
+	}
+}
+
+// telemetry-config-compat §2.10
+
+func TestForwarder_EdgeCases(t *testing.T) {
+	t.Run("FORWORD_ empty → disabled", func(t *testing.T) {
+		t.Setenv("FORWORD_OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "")
+		t.Setenv("CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT", "")
+		if NewForwarderFromEnv().Enabled() {
+			t.Errorf("empty env should disable forwarder")
+		}
+	})
+
+	t.Run("baseURL already has /v1/metrics → not duplicated", func(t *testing.T) {
+		f := NewForwarder("http://remote:4318/v1/metrics", "")
+		if got := f.Target(); got != "http://remote:4318/v1/metrics" {
+			t.Errorf("target should not double-suffix: got %q", got)
+		}
+	})
+
+	t.Run("baseURL has trailing slash → no double slash", func(t *testing.T) {
+		f := NewForwarder("http://remote:4318/", "")
+		if got := f.Target(); got != "http://remote:4318/v1/metrics" {
+			t.Errorf("trailing slash should be trimmed: got %q", got)
+		}
+	})
+
+	t.Run("baseURL missing scheme → passed through unchanged", func(t *testing.T) {
+		f := NewForwarder("remote:4318", "")
+		if got := f.Target(); got != "remote:4318/v1/metrics" {
+			t.Errorf("scheme-less URL should be passed through: got %q", got)
+		}
+	})
+
+	t.Run("baseURL with /v1/metrics/ trailing slash → trimmed, no duplicate", func(t *testing.T) {
+		f := NewForwarder("http://remote:4318/v1/metrics/", "")
+		if got := f.Target(); got != "http://remote:4318/v1/metrics" {
+			t.Errorf("trailing slash after /v1/metrics should be trimmed: got %q", got)
+		}
+	})
+}

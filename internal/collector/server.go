@@ -17,11 +17,15 @@ import (
 
 // Server 监听 :4318，提供 OTel HTTP endpoint。
 //
-// 路由：
-//   POST /v1/metrics  → 解析 + 持久化 + 转发
-//   POST /v1/logs     → 不解析 + 仅转发（HTTP 200）
-//   POST /v1/traces   → 不解析 + 仅转发（HTTP 200）
+// 路由（telemetry-config-compat）：
+//   POST /v1/metrics  → 解析 + 持久化 + 转发（如启用）
+//   POST /v1/logs     → 不解析 + 仅回 200（HTTP 200，不持久不转发）
+//   POST /v1/traces   → 不解析 + 仅回 200（HTTP 200，不持久不转发）
 //   其它路径          → 404
+//
+// logs/traces 现在只是"应答"——用户的上游（per-signal endpoint 或 fallback 路径推到本地 daemon
+// 的兜底场景）已直达远程 collector，daemon 不再 forward、不再 persist。本地 SQLite 永远不会有
+// logs/traces 内容（隐私靠 daemon 架构，不靠覆盖 Claude Code exporter 配置）。
 //
 // 优雅关：调用 SetShuttingDown() 后 /v1/metrics 返回 503（避免新数据；in-flight 仍能完成）。
 type Server struct {
@@ -37,7 +41,7 @@ type Server struct {
 type ServerOptions struct {
 	Addr     string // 监听地址，默认 ":4318"
 	Store    *Store
-	Forward  *Forwarder // 可为 nil（禁用 forwarder）
+	Forward  *Forwarder // 可为 nil（禁用 forwarder）。metrics-only：logs/traces 不再走 forwarder
 }
 
 // NewServer 构造 HTTP server，但不启动。调 Start() 才真正 listen。
@@ -53,8 +57,8 @@ func NewServer(opts ServerOptions) *Server {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/metrics", s.handleMetrics)
-	mux.HandleFunc("/v1/logs", s.handleForwardOnly("logs"))
-	mux.HandleFunc("/v1/traces", s.handleForwardOnly("traces"))
+	mux.HandleFunc("/v1/logs", s.handleAckOnly())
+	mux.HandleFunc("/v1/traces", s.handleAckOnly())
 	s.srv = &http.Server{
 		Addr:              addr,
 		Handler:           mux,
@@ -172,22 +176,21 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(respBytes)
 }
 
-// handleForwardOnly 处理 logs/traces：不解析，仅转发；返回 OTel OK（200）。
-func (s *Server) handleForwardOnly(signal string) http.HandlerFunc {
+// handleAckOnly 处理 logs/traces：仅回 200，不解析、不持久、不转发。
+//
+// telemetry-config-compat：logs/traces 由 Claude Code 直达远程 collector（per-signal endpoint），
+// 兜底路径（fallback endpoint 被 ccl 改写到 localhost）偶发的 logs/traces 到达本地 daemon 时，
+// 也只回 200 即可——forwarder 现为 metrics-only，logs/traces 不再经过 daemon。
+func (s *Server) handleAckOnly() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		body, err := io.ReadAll(io.LimitReader(r.Body, 16<<20))
-		if err != nil {
-			http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		if s.fwd != nil {
-			s.fwd.Forward(signal, body)
-		}
-		// 不解析、不写盘；返回 200 表示收到。
+		// 不解析 body（兜底场景下 body 可能是合法 protobuf 也可能不是）；drain 即可
+		// 让连接可复用。
+		_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, 16<<20))
+		// 返回 200 表示收到。
 		w.WriteHeader(http.StatusOK)
 	}
 }
