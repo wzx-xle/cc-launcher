@@ -170,17 +170,21 @@ ccl 在后台启一个轻量 OTel daemon，自动收集每次 Claude Code sessio
 
 ### 数据来源
 
-Claude Code v2.1.x 原生支持 OTel 推送（`CLAUDE_CODE_ENABLE_TELEMETRY=1`）。ccl 检测到 settings.json 里没配 OTel 时，会自动写入 5 个 key：
+Claude Code v2.1.x 原生支持 OTel 推送（`CLAUDE_CODE_ENABLE_TELEMETRY=1`）。ccl 检测到 settings.json 里没配 OTel 时，会自动写入 5 个 key + 视情况接管 1 个 per-signal metrics 端点：
 
 | Key | 默认值 | ccl 是否改写 |
 |-----|--------|------------|
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4318` | **是**（让 Claude Code 推到本地 daemon） |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | `http://localhost:4318/v1/metrics` | **仅当用户已设该 key**（备份为 `FORWORD_*`，覆盖为 localhost） |
 | `OTEL_METRICS_EXPORTER` | `otlp` | 否（备份用户原值） |
 | `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/protobuf` | 否 |
 | `CLAUDE_CODE_ENABLE_TELEMETRY` | `1` | 否 |
 | `OTEL_LOGS_EXPORTER` | _不主动注入_ | 否 |
 
-**改写机制**：ccl 写入前会先把原值备份到 `CC_ORIG_<KEY>`，然后只对 `OTEL_EXPORTER_OTLP_ENDPOINT` 改写为本地 daemon 地址；其它 4 个 key 保留用户原值。
+**改写机制**：
+- 5 个 fallback key 备份到 `CC_ORIG_<KEY>` 后只对 `OTEL_EXPORTER_OTLP_ENDPOINT` 改写为本地 daemon 地址；其它 4 个 key 保留用户原值。
+- per-signal metrics 端点用 **新的 `FORWORD_<KEY>` 命名空间**（不沿用 `CC_ORIG_`）——用户原话要求"备份 key 也不要用 cc_orig，改叫 forword"。详见下面"per-signal endpoint 兼容"段落。
+- `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` / `_TRACES_ENDPOINT` 不动（ccl 不接管 logs/traces 的端点）。
 
 ### 自动启动 daemon
 
@@ -218,11 +222,62 @@ ccl  # 此时 ccl 不会 fork daemon（决策：远程 endpoint 不拉本地 dae
 
 ### 隐私默认
 
-- daemon **不解析 logs / traces 的内容**——只把原始 bytes 转发出去
+- daemon **不解析 logs / traces 的内容**——`/v1/logs` `/v1/traces` 仅回 HTTP 200，不持久也不转发
 - 本地 SQLite **永远不会**有 prompt / response 文本
 - 仅 metrics（含 token / cost / session 数）入库
 
-如果你希望 logs 也推到本地 SQLite——ccl 不做，**永远不做**。日志走 forwarding（见下）。
+如果你希望 logs 也推到本地 SQLite——ccl 不做，**永远不做**。日志走 fallback 路径时 daemon 也只回 200，不会持久化。
+
+### per-signal endpoint 兼容
+
+Claude Code v2.1.x 的 OTel SDK 按"先分类型端点 → 没有才用兜底"的顺序选 endpoint。如果用户在 settings.json 里**写齐了**分类型端点（典型公司远程 collector 配置），Claude Code 会优先用分类型端点把 metrics 直接推到远程 collector，`ccl stats` 看不到任何数据。
+
+为接管这一场景，ccl 在检测到用户**已设** `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` 时会：
+
+1. 备份原值到 `FORWORD_OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`（**新命名空间**，不复用 `CC_ORIG_`）
+2. 把该 key 改写为 `http://localhost:4318/v1/metrics`，让 Claude Code 把 metrics 推到本地 daemon
+3. daemon 把 metrics 异步转发到 `FORWORD_OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`（用户原值）
+
+**为什么是 `FORWORD_` 不是 `CC_ORIG_`**：用户原话要求"备份 key 也不要用 cc_orig，改叫 forword"。`CC_ORIG_<KEY>` 命名空间保留给 5 个 fallback key，避免双重历史（用户已有 `CC_ORIG_*` 不被重命名造成混乱）。
+
+**为什么只接管 metrics，不接管 logs/traces**：logs/traces 用户本来就写好了去自己的远程 collector，已经直达了；ccl 再插一脚只是浪费流量 + 多一个可能挂的点。`ccl stats` 只需要 metrics 就够了。
+
+**典型公司远程 collector 配置**（场景 A）：
+
+```jsonc
+// ~/.claude/settings.json 注入前
+{
+    "env": {
+        "OTEL_EXPORTER_OTLP_ENDPOINT":            "http://remote:4318",
+        "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT":    "http://remote:4318/v1/metrics",
+        "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT":       "http://remote:4318/v1/logs",
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT":     "http://remote:4318/v1/traces"
+    }
+}
+```
+
+注入后：
+
+```jsonc
+{
+    "env": {
+        // ccl 改写
+        "OTEL_EXPORTER_OTLP_ENDPOINT":                "http://localhost:4318",            // 改写
+        "CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT":        "http://remote:4318",               // 备份
+        "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT":        "http://localhost:4318/v1/metrics", // 改写
+        "FORWORD_OTEL_EXPORTER_OTLP_METRICS_ENDPOINT":"http://remote:4318/v1/metrics",    // 备份
+
+        // 用户原值（ccl 不动）
+        "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT":           "http://remote:4318/v1/logs",
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT":         "http://remote:4318/v1/traces",
+
+        // 其余 4 个 fallback key 照常备份 + 注入默认
+        "OTEL_METRICS_EXPORTER":                      "otlp",
+        "OTEL_EXPORTER_OTLP_PROTOCOL":                "http/protobuf",
+        "CLAUDE_CODE_ENABLE_TELEMETRY":               "1"
+    }
+}
+```
 
 ### 转发到远程 collector
 
@@ -230,7 +285,9 @@ ccl  # 此时 ccl 不会 fork daemon（决策：远程 endpoint 不拉本地 dae
 
 1. 把你的 `OTEL_EXPORTER_OTLP_ENDPOINT` 备份到 `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT`
 2. 把 endpoint 改写到 `http://localhost:4318`（本地 daemon）
-3. daemon 把所有 metrics / logs / traces **异步**转发到 `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT`
+3. daemon 把 metrics **异步**转发到 `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT`（或 `FORWORD_OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`，按优先级）
+
+> **telemetry-config-compat 变更**：daemon 现为 metrics-only forwarder。logs/traces 不再经 daemon 转发——`/v1/logs` `/v1/traces` 收到请求只回 200，bytes 不落本地也不外发。
 
 如需鉴权：
 ```bash
@@ -244,7 +301,7 @@ ccl  # daemon 自动加上 auth 头
 
 ```bash
 ccl stop        # 优雅停 daemon（5s 内 graceful shutdown）
-ccl restore     # 还原 settings.json 到 ccl 之前的状态（删 CC_ORIG_* + ccl 注入的默认）
+ccl restore     # 还原 settings.json 到 ccl 之前的状态（删 CC_ORIG_* + FORWORD_* + ccl 注入的默认）
 ```
 
 `ccl restore` 是**不可逆**操作（spec 明确）。会先备份到 `~/.cc-launcher/backups/settings-<时间戳>.json`。
