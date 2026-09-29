@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -162,6 +163,11 @@ func runTUI(pm *provider.Manager, sm *state.Manager, cm *config.Manager) error {
 // 触发 forwarder）。FORWORD_* 是 telemetry-config-compat 引入的 per-signal metrics 备份命名空间。
 //
 // 失败仅警告，不阻断 ccl 主流程（决策 10：daemon 是 optional）。
+//
+// 控制权交接语义（backup-on-control-handover change）：如果 settings.json 不在 ccl 当前控制下
+// （即 OTel 端点不指向 ccl 默认值），调 Manager.Backup() 做一次文件级快照到 backups/，
+// 目的：保留一份"ccl 接管前"的健康基线，便于日后回滚。控制中则跳过 Backup，
+// 避免 10 个轮转被同状态瞬态版本耗光。
 func injectOTelEnv(cm *config.Manager) error {
 	settings, err := cm.LoadSettings()
 	if err != nil {
@@ -174,6 +180,16 @@ func injectOTelEnv(cm *config.Manager) error {
 			env[k] = s
 		}
 	}
+
+	// 控制权交接边界：若 settings.json 不在 ccl 当前控制下，备份一次作为健康基线。
+	// 注意：调用发生在 backupAndInjectOTel 之前——此时 settings.json 仍是"接管前"状态，
+	// 备份反映的是第三方/用户当前持有的版本，正是我们想保留的基线。
+	if !isUnderCclControl(envAny) {
+		if err := cm.Backup(); err != nil {
+			log.Printf("injectOTelEnv: 备份 settings.json 失败: %v", err)
+		}
+	}
+
 	updated := backupAndInjectOTel(env)
 
 	// 比较是否真的改了
@@ -206,4 +222,30 @@ func injectOTelEnv(cm *config.Manager) error {
 	}
 
 	return nil
+}
+
+// isUnderCclControl 判断 settings.json 的 env map 是否仍处于 ccl 当前控制下。
+//
+// ccl 当前控制 = env 中至少一个端点字段还指向 ccl 默认地址：
+//   - OTEL_EXPORTER_OTLP_ENDPOINT == "http://localhost:4318"（兜底端点）
+//   - OTEL_EXPORTER_OTLP_METRICS_ENDPOINT == "http://localhost:4318/v1/metrics"（per-signal metrics）
+//
+// 都不指向 → ccl 当前不在控制 settings.json → 视为"控制权交接边界"。
+//
+// 注意：默认地址常量集中在 envconfig.go（keyEndpoint / defaultEndpoint /
+// keyMetricsEndpoint / defaultMetricsEndpoint）。**若未来 ccl 默认值变化（如改端口、
+// 加新端点），需同步更新 envconfig.go 的常量与本判断函数。**
+//
+// 入参 env 可为 nil 或缺字段；本函数只读、容忍 nil 和非 string 值。
+func isUnderCclControl(env map[string]any) bool {
+	if env == nil {
+		return false
+	}
+	if v, ok := env[keyEndpoint].(string); ok && v == defaultEndpoint {
+		return true
+	}
+	if v, ok := env[keyMetricsEndpoint].(string); ok && v == defaultMetricsEndpoint {
+		return true
+	}
+	return false
 }
