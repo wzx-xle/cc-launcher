@@ -32,12 +32,15 @@ type Query struct {
 }
 
 // SessionStats 是单个 session（或聚合行）的指标。
+//
+// StartedAt 改为指针类型：totals 行没有真实时间（time.Time 零值会让 JSON 输出
+// "0001-01-01T00:00:00Z"，误导成数据错误），nil 时 omitempty 跳过。
 type SessionStats struct {
 	SessionID    string            `json:"session_id"`
 	Project      string            `json:"project"`
 	Provider     string            `json:"provider,omitempty"`
 	Model        string            `json:"model,omitempty"`
-	StartedAt    time.Time         `json:"started_at"`
+	StartedAt    *time.Time        `json:"started_at,omitempty"`
 	InputTokens  int64             `json:"input_tokens"`
 	OutputTokens int64             `json:"output_tokens"`
 	CacheCreate  int64             `json:"cache_creation_tokens"`
@@ -110,7 +113,7 @@ func QueryStats(dbPath string, q Query) (*Result, error) {
 		); err != nil {
 			return nil, fmt.Errorf("scan: %w", err)
 		}
-		ss.StartedAt = time.UnixMilli(startedAtMs)
+		ss.StartedAt = func() *time.Time { t := time.UnixMilli(startedAtMs); return &t }()
 		ss.Project = projectName(cwd)
 		ss.Provider = providerName(provRaw, labelsJSON)
 		ss.Model = model
@@ -123,8 +126,20 @@ func QueryStats(dbPath string, q Query) (*Result, error) {
 		return nil, fmt.Errorf("rows: %w", err)
 	}
 
+	// sort: StartedAt 倒序。totals 行 nil 排最后（场景里 totals 不在 sessions 数组里，
+	// 但保险起见 nil-aware）。
 	sort.Slice(result.Sessions, func(i, j int) bool {
-		return result.Sessions[i].StartedAt.After(result.Sessions[j].StartedAt)
+		a, b := result.Sessions[i].StartedAt, result.Sessions[j].StartedAt
+		if a == nil && b == nil {
+			return false
+		}
+		if a == nil {
+			return false
+		}
+		if b == nil {
+			return true
+		}
+		return a.After(*b)
 	})
 	result.Totals = sumSessions(result.Sessions)
 

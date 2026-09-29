@@ -61,8 +61,14 @@ func FormatTable(w io.Writer, r *Result) {
 	default: // "session"
 		writeTable(tw, []string{"STARTED", "PROJECT", "PROVIDER", "MODEL", "IN", "OUT", "CACHE_CRE", "CACHE_READ", "COST_USD"},
 			func(s SessionStats) []string {
+				// TOTAL 行的 StartedAt 是 nil（sumSessions 不设），首列留空；
+				// 真实 session 行 nil 也按空处理（防御性）。
+				started := ""
+				if s.StartedAt != nil {
+					started = s.StartedAt.Format("2006-01-02 15:04")
+				}
 				return []string{
-					s.StartedAt.Format("2006-01-02 15:04"),
+					started,
 					s.Project,
 					s.Provider,
 					s.Model,
