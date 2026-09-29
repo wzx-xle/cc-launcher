@@ -1,4 +1,9 @@
-## ADDED Requirements
+# telemetry-storage Specification
+
+## Purpose
+TBD - created by archiving change usage-monitoring-via-otel. Update Purpose after archive.
+
+## Requirements
 
 ### Requirement: telemetry lives in a single SQLite file with WAL mode
 All persisted metrics / session rows MUST go to a single SQLite file at `~/.cc-launcher/telemetry.db`. The database MUST be created (with schema) lazily on first write. **WAL mode MUST be enabled** (`PRAGMA journal_mode=WAL`) on every connection, so that `ccl stats` reads do not block the daemon's writes.

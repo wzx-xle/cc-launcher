@@ -1,4 +1,9 @@
-## ADDED Requirements
+# claude-code-env-config Specification
+
+## Purpose
+TBD - created by archiving change usage-monitoring-via-otel. Update Purpose after archive.
+
+## Requirements
 
 ### Requirement: ccl injects OTEL env into Claude Code settings with backup
 On every `ccl` invocation (before fork-if-needed and exec Claude Code), ccl MUST inspect `~/.claude/settings.json` and ensure the `env` map contains the 5 OTel keys. For each key that already has a user value, ccl MUST first save a backup to a `CC_ORIG_<KEY>` key, then apply the action below. For missing keys, ccl MUST add the default without a backup.

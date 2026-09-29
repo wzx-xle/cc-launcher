@@ -1,4 +1,9 @@
-## ADDED Requirements
+# daemon-lifecycle Specification
+
+## Purpose
+TBD - created by archiving change usage-monitoring-via-otel. Update Purpose after archive.
+
+## Requirements
 
 ### Requirement: ccl auto-starts the daemon when port is free
 On every `ccl` invocation, before exec'ing Claude Code, ccl MUST probe `localhost:4318` with a 200ms TCP connect timeout. If unreachable AND no daemon record exists, ccl MUST fork `ccl serve` as a detached child process and wait up to 3s for the port to become reachable.

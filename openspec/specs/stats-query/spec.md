@@ -1,4 +1,9 @@
-## ADDED Requirements
+# stats-query Specification
+
+## Purpose
+TBD - created by archiving change usage-monitoring-via-otel. Update Purpose after archive.
+
+## Requirements
 
 ### Requirement: ccl stats prints a table of session usage
 `ccl stats` MUST open `~/.cc-launcher/telemetry.db` directly (no daemon HTTP) and print a human-readable table with one row per session. Default window is the last 7 days. The table MUST include a `PROJECT` column derived from `filepath.Base(session.cwd)`.

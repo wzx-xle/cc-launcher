@@ -1,4 +1,9 @@
-## ADDED Requirements
+# otel-receiver Specification
+
+## Purpose
+TBD - created by archiving change usage-monitoring-via-otel. Update Purpose after archive.
+
+## Requirements
 
 ### Requirement: ccl-launcher accepts OTLP HTTP on :4318; metrics persist, logs/traces only forward
 A `ccl serve` mode MUST start an HTTP server on `localhost:4318` (standard OTLP HTTP port) that accepts three OTel endpoints:
