@@ -249,7 +249,6 @@ func TestServer_AckOnly_EdgeCases(t *testing.T) {
 	})
 }
 
-// §5.1 端到端测试移至 server_integration_test.go（commit 4）
 type respRecorder struct {
 	code int
 	body bytes.Buffer
