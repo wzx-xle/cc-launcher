@@ -152,3 +152,117 @@ func TestBackupKey(t *testing.T) {
 		t.Errorf("got %q", got)
 	}
 }
+
+// telemetry-config-compat §1.6
+
+func TestBackupAndInject_PerSignalMetrics(t *testing.T) {
+	const fwdKey = "FORWORD_" + keyMetricsEndpoint
+
+	t.Run("user has per-signal metrics → backup to FORWORD_ + override", func(t *testing.T) {
+		got := backupAndInjectOTel(map[string]string{
+			keyMetricsEndpoint: "http://remote:4318/v1/metrics",
+		})
+		if got[keyMetricsEndpoint] != defaultMetricsEndpoint {
+			t.Errorf("per-signal metrics should be overridden: got %q", got[keyMetricsEndpoint])
+		}
+		if got[fwdKey] != "http://remote:4318/v1/metrics" {
+			t.Errorf("user value should be backed up to FORWORD_*: got %q", got[fwdKey])
+		}
+	})
+
+	t.Run("user missing per-signal metrics → no injection, no FORWORD_ backup", func(t *testing.T) {
+		got := backupAndInjectOTel(map[string]string{
+			keyEndpoint: "http://remote:4318",
+		})
+		if _, ok := got[keyMetricsEndpoint]; ok {
+			t.Errorf("per-signal metrics should NOT be injected when user missing: got %v", got)
+		}
+		if _, ok := got[fwdKey]; ok {
+			t.Errorf("FORWORD_ backup should NOT exist when user missing: got %v", got)
+		}
+	})
+
+	t.Run("FORWORD_ backup already exists → not overwritten on second run", func(t *testing.T) {
+		got := backupAndInjectOTel(map[string]string{
+			keyMetricsEndpoint:         "http://localhost:4318/v1/metrics", // ccl 上次写的
+			"FORWORD_" + keyMetricsEndpoint: "http://ORIGINAL:9999/v1/metrics", // 首次 ccl 写的 backup
+		})
+		if got["FORWORD_"+keyMetricsEndpoint] != "http://ORIGINAL:9999/v1/metrics" {
+			t.Errorf("FORWORD_ backup must not be overwritten: %v", got)
+		}
+	})
+}
+
+// telemetry-config-compat §1.7
+
+func TestRestoreOTelEnv_FORWORD(t *testing.T) {
+	const fwdKey = "FORWORD_" + keyMetricsEndpoint
+
+	env := map[string]string{
+		keyMetricsEndpoint:        defaultMetricsEndpoint, // ccl 改写后的 localhost
+		fwdKey:                    "http://remote:4318/v1/metrics", // 用户原值
+		keyEndpoint:               defaultEndpoint,
+		"CC_ORIG_" + keyEndpoint:  "http://remote:4318",
+	}
+	got := restoreOTelEnv(env)
+
+	if _, ok := got[fwdKey]; ok {
+		t.Errorf("FORWORD_ backup should be deleted after restore: %v", got)
+	}
+	if got[keyMetricsEndpoint] != "http://remote:4318/v1/metrics" {
+		t.Errorf("user value should be restored: got %q", got[keyMetricsEndpoint])
+	}
+}
+
+// telemetry-config-compat §1.8
+
+func TestPerSignalMetrics_EdgeCases(t *testing.T) {
+	const fwdKey = "FORWORD_" + keyMetricsEndpoint
+
+	t.Run("empty string user value → treated as missing", func(t *testing.T) {
+		got := backupAndInjectOTel(map[string]string{
+			keyMetricsEndpoint: "",
+		})
+		// "" 是用户主动写的（key 存在） → 走"已设"路径：备份 "" + override 为 default
+		// 这是当前 backupAndInjectOTel 的实际行为。空字符串值不视为"缺失"
+		// （因为 maps 的 exists 判断的是 key 存在性，不是值非空）
+		if got[fwdKey] != "" {
+			t.Errorf("empty user value should be backed up verbatim: got %q", got[fwdKey])
+		}
+		if got[keyMetricsEndpoint] != defaultMetricsEndpoint {
+			t.Errorf("empty user value should be overridden: got %q", got[keyMetricsEndpoint])
+		}
+	})
+
+	t.Run("trailing slash user value → backed up verbatim", func(t *testing.T) {
+		got := backupAndInjectOTel(map[string]string{
+			keyMetricsEndpoint: "http://remote:4318/",
+		})
+		if got[fwdKey] != "http://remote:4318/" {
+			t.Errorf("user value with trailing slash should be backed up verbatim: got %q", got[fwdKey])
+		}
+	})
+
+	t.Run("user value missing scheme → backed up verbatim", func(t *testing.T) {
+		got := backupAndInjectOTel(map[string]string{
+			keyMetricsEndpoint: "remote:4318",
+		})
+		if got[fwdKey] != "remote:4318" {
+			t.Errorf("user value without scheme should be backed up verbatim: got %q", got[fwdKey])
+		}
+	})
+
+	t.Run("whitespace-only user value → treated as non-empty (exists in map)", func(t *testing.T) {
+		got := backupAndInjectOTel(map[string]string{
+			keyMetricsEndpoint: "   ",
+		})
+		if got[fwdKey] != "   " {
+			t.Errorf("whitespace user value should be backed up verbatim: got %q", got[fwdKey])
+		}
+		if got[keyMetricsEndpoint] != defaultMetricsEndpoint {
+			t.Errorf("whitespace user value should be overridden: got %q", got[keyMetricsEndpoint])
+		}
+	})
+}
+
+// §5.4 端到端测试移至 envconfig_integration_test.go（commit 4）
