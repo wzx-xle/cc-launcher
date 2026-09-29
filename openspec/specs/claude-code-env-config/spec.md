@@ -52,30 +52,30 @@ The 5 keys and actions:
 - **WHEN** ccl writes new keys to an existing settings.json with keys in order `[env, permissions, enabledPlugins, ...]`
 - **THEN** after write, the file still has the same key order with new keys appended in the env section, not inserted at the top of the file (ccl uses `internal/config/ordered.go` to preserve order)
 
-### Requirement: ccl restore removes all CC_ORIG_* and ccl-injected defaults
-`ccl restore` MUST read `~/.claude/settings.json` env field and:
+### Requirement: ccl serve --restore removes all CC_ORIG_* and ccl-injected defaults
+`ccl serve --restore` MUST read `~/.claude/settings.json` env field and:
 - For each `CC_ORIG_<KEY>` found: write `<KEY>` = `CC_ORIG_<KEY>` value; delete the `CC_ORIG_*` key
 - For each of the 5 OTel keys ccl would have injected as default: delete them if no backup exists (i.e., user never had them — they're purely ccl artifacts)
 - The settings.json file structure MUST be preserved otherwise
 
-#### Scenario: restore recovers original user config
-- **WHEN** user runs `ccl restore` and settings.json has `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT=https://company-otel:4317` (along with ccl's override to localhost:4318)
+#### Scenario: serve --restore recovers original user config
+- **WHEN** user runs `ccl serve --restore` and settings.json has `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT=https://company-otel:4317` (along with ccl's override to localhost:4318)
 - **THEN** settings.json ends up with `OTEL_EXPORTER_OTLP_ENDPOINT=https://company-otel:4317` and no `CC_ORIG_*` keys
 
-#### Scenario: restore removes keys ccl added (no original)
-- **WHEN** user runs `ccl restore` and settings.json has `OTEL_METRICS_EXPORTER=otlp` (ccl added it; user never had a value)
+#### Scenario: serve --restore removes keys ccl added (no original)
+- **WHEN** user runs `ccl serve --restore` and settings.json has `OTEL_METRICS_EXPORTER=otlp` (ccl added it; user never had a value)
 - **THEN** the key is removed (since no `CC_ORIG_OTEL_METRICS_EXPORTER` exists)
 
-#### Scenario: restore is idempotent
-- **WHEN** user runs `ccl restore` twice
+#### Scenario: serve --restore is idempotent
+- **WHEN** user runs `ccl serve --restore` twice
 - **THEN** the second run is a no-op; settings.json is unchanged
 
-#### Scenario: restore keeps user-added non-ccl keys
+#### Scenario: serve --restore keeps user-added non-ccl keys
 - **WHEN** user has `ANTHROPIC_BASE_URL=https://...` (a ccl-doesn't-touch key)
-- **THEN** `ccl restore` does not modify it
+- **THEN** `ccl serve --restore` does not modify it
 
 #### Scenario: settings.json does not exist
-- **WHEN** user runs `ccl restore` and `~/.claude/settings.json` is missing
+- **WHEN** user runs `ccl serve --restore` and `~/.claude/settings.json` is missing
 - **THEN** ccl prints "no settings to restore" and exits 0
 
 ### Requirement: daemon auto-enables forwarder based on CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT
@@ -148,7 +148,7 @@ Forwarder failures (non-2xx response, timeout > 5s, connection error) MUST be lo
 
 #### Scenario: 第三方覆盖 OTel 端点但 CC_ORIG_* 残留，触发 Backup
 - **WHEN** `~/.claude/settings.json` 的 `env` map 含 `OTEL_EXPORTER_OTLP_ENDPOINT=http://other-tool:4318`（第三方工具修改），且 `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT=https://company-otel:4317` 仍残留
-- **THEN** `isUnderCclControl` 返回 false → 触发 Backup 一次；`backups/` 新增一份反映"第三方覆盖后状态"；ccl 重新接管端点但**不**擦除 `CC_ORIG_*`（那是 `ccl restore` 的工作）
+- **THEN** `isUnderCclControl` 返回 false → 触发 Backup 一次；`backups/` 新增一份反映"第三方覆盖后状态"；ccl 重新接管端点但**不**擦除 `CC_ORIG_*`（那是 `ccl serve --restore` 的工作）
 
 #### Scenario: per-signal metrics 接管路径识别为"ccl 控制中"
 - **WHEN** `~/.claude/settings.json` 的 `env` map 含 `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://localhost:4318/v1/metrics`（per-signal 接管），且 `OTEL_EXPORTER_OTLP_ENDPOINT` 是其他非 localhost 值

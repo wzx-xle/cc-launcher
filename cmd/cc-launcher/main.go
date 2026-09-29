@@ -20,10 +20,8 @@ const topHelp = `用法: ccl [子命令] [选项]
 
 子命令:
     (无)              启动 TUI 引导：选提供商 → 选权限模式 → 启动 Claude Code
-    serve             OTel daemon 模式（ccl 自动 fork，通常不需手动跑）
+    serve             OTel daemon 模式（启动 / 停 daemon 或还原 settings.json；详见 ccl serve --help）
     stats             显示 token / cost 聚合（直读 SQLite，无需 daemon 在跑）
-    stop              停掉 OTel daemon
-    restore           还原 settings.json 到 ccl 之前的状态
     provider          管理提供商（详见 ccl provider --help）
     mode              管理当前目录的权限模式（详见 ccl mode --help）
 
@@ -33,7 +31,7 @@ const topHelp = `用法: ccl [子命令] [选项]
 用量监控：
   - ccl 首次跑会拉起 OTel daemon（监听 :4318）
   - 跑过 Claude Code session 后用 ccl stats 查看
-  - 不要 daemon 时跑 ccl stop；要彻底清除注入用 ccl restore
+  - 不要 daemon 时跑 ccl serve --stop；要彻底清除注入用 ccl serve --restore
   - 隐私：daemon 不解析 logs/traces；本地 SQLite 永远没有 prompt 内容
 
 想看具体怎么配置 deepseek / MiniMax / 智谱 / 阿里云？
@@ -58,10 +56,6 @@ func run(args []string) error {
 			return runServe(args[1:])
 		case "stats":
 			return runStats(args[1:])
-		case "stop":
-			return runStop(args[1:])
-		case "restore":
-			return runRestore(args[1:])
 		}
 	}
 

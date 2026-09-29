@@ -111,7 +111,7 @@ func backupAndInjectOTel(env map[string]string) map[string]string {
 
 // restoreOTelEnv 反向操作：从 env map 移除 ccl 的痕迹，恢复原值。
 //
-// 语义（见 design.md §16 + spec "ccl restore" + telemetry-config-compat）：
+// 语义（见 design.md §16 + spec "ccl serve --restore" + telemetry-config-compat）：
 //   - 对每个 backupPrefix_<KEY>：写 <KEY> = backupPrefix_<KEY> 值；删 backupPrefix_<KEY>
 //     （5 个 fallback 用 CC_ORIG_ 前缀；per-signal metrics 用 FORWORD_ 前缀）
 //   - 对 6 个 key 中的"ccl 注入的默认值"（无对应 backup）：删除该 key

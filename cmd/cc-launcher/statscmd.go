@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"cc-launcher/internal/config"
@@ -104,15 +105,20 @@ func groupByLabel(g string) string {
 	return g
 }
 
-// stopHelp 是 `ccl stop --help` 的输出。
-const stopHelp = `用法: ccl stop
+// stopHelp 是 `ccl serve --stop -h` 的输出（runStop 内部化后被 runServe --stop 复用）。
+//
+// 决策（design.md §D2）：原 `ccl stop` 顶层子命令整合为 `ccl serve --stop` 后，
+// 仍允许 `ccl serve --stop -h` 显示本帮助——内容保留 stop 的语义。
+const stopHelp = `用法: ccl serve --stop
 
 发 SIGTERM 给 ~/.cc-launcher/daemon.pid 里的 daemon。
 daemon 收到 SIGTERM 后 5s 内 graceful shutdown（503 metrics + drain queue + 关 db）。
-超时则 ccl stop 发 SIGKILL。`
+超时则 ccl serve --stop 发 SIGKILL。`
 
-// runStop 是 `ccl stop` 入口。
-func runStop(args []string) error {
+// runStopInner 是 `ccl serve --stop` 的实现（原 `ccl stop` 入口改名 unexported）。
+//
+// 决策（design.md §D1-D2）：runStop 改为包内 unexported，函数体一字不动；由 runServe --stop 分支调用。
+func runStopInner(args []string) error {
 	if len(args) > 0 && (args[0] == "-h" || args[0] == "--help") {
 		fmt.Println(stopHelp)
 		return nil
@@ -136,8 +142,11 @@ func runStop(args []string) error {
 	return nil
 }
 
-// restoreHelp 是 `ccl restore --help` 的输出。
-const restoreHelp = `用法: ccl restore
+// restoreHelp 是 `ccl serve --restore -h` 的输出（runRestore 内部化后被 runServe --restore 复用）。
+//
+// 决策（design.md §D2）：原 `ccl restore` 顶层子命令整合为 `ccl serve --restore` 后，
+// 仍允许 `ccl serve --restore -h` 显示本帮助——内容保留 restore 的语义。
+const restoreHelp = `用法: ccl serve --restore
 
 读 ~/.claude/settings.json，还原 ccl 注入的 OTel env：
   - CC_ORIG_<KEY> 还原到 <KEY>，删 CC_ORIG_*
@@ -154,8 +163,10 @@ const restoreHelp = `用法: ccl restore
 回滚到\"接管前\"状态。常量启动（仍在 ccl 控制下）不产生新备份，
 避免轮转（保留最近 30 个）被瞬态版本耗光。`
 
-// runRestore 是 `ccl restore` 入口。
-func runRestore(args []string) error {
+// runRestoreInner 是 `ccl serve --restore` 的实现（原 `ccl restore` 入口改名 unexported）。
+//
+// 决策（design.md §D1-D2）：runRestore 改为包内 unexported，函数体一字不动；由 runServe --restore 分支调用。
+func runRestoreInner(args []string) error {
 	if len(args) > 0 && (args[0] == "-h" || args[0] == "--help") {
 		fmt.Println(restoreHelp)
 		return nil
@@ -216,4 +227,110 @@ func runRestore(args []string) error {
 	fmt.Println("settings.json 已还原到 ccl 之前的状态")
 	fmt.Println("提示：若想继续用 ccl 用量监控，再次跑 `ccl` 即可（会重新注入）。")
 	return nil
+}
+
+// runStatusInner 是 `ccl serve --status` 的实现（flatten-stop-restore-into-serve §9）。
+//
+// 报告 daemon 运行时状态（port reachability + pidfile + db 文件大小 + session 数）。
+// 全部 informational，缺失连接不算 error，exit 0。
+//
+// 状态判断矩阵（design §D8）—— 缩进式分组（label 8 字符宽左对齐 + 子字段缩进 8 空格）：
+//
+//	端口 :4318  pidfile   输出
+//	reachable   存在      daemon  running
+//	                        pid=N
+//	                        port :4318 reachable
+//	reachable   None  daemon  not running
+//	                        port :4318 in use by foreign service (no pidfile)
+//	unreachable 存在      daemon  not running
+//	                        stale pidfile pid=N
+//	                        port :4318 unreachable
+//	unreachable None  daemon  not running
+//	                        port :4318 unreachable
+//
+//	db 行同理：db label + path / size / count 三行缩进；missing 时只一行。
+func runStatusInner() error {
+	stateBaseDir, err := stateDirOrError()
+	if err != nil {
+		return err
+	}
+	pidPath := filepath.Join(stateBaseDir, "daemon.pid")
+	dbPath := filepath.Join(stateBaseDir, "telemetry.db")
+
+	pid := readPidfile(pidPath)
+	portReachable := probeDaemonAddr() == nil
+
+	switch {
+	case portReachable && pid > 0:
+		fmt.Println("daemon  running")
+		fmt.Printf("        pid=%d\n", pid)
+		fmt.Println("        port :4318 reachable")
+	case portReachable:
+		fmt.Println("daemon  not running")
+		fmt.Println("        port :4318 in use by foreign service (no pidfile)")
+	case pid > 0:
+		fmt.Println("daemon  not running")
+		fmt.Printf("        stale pidfile pid=%d\n", pid)
+		fmt.Println("        port :4318 unreachable")
+	default:
+		fmt.Println("daemon  not running")
+		fmt.Println("        port :4318 unreachable")
+	}
+
+	// db 行（缺失不算 error）
+	fi, err := os.Stat(dbPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			fmt.Println("db      missing (no telemetry yet)")
+			return nil
+		}
+		return fmt.Errorf("stat db 失败: %w", err)
+	}
+	fmt.Printf("db      %s\n", shortenHomePath(dbPath))
+	count, err := stats.CountSessions(dbPath)
+	if err != nil {
+		// COUNT 失败不回 error——db 文件本身存在,只是 sqlite 读失败,仍报 size
+		fmt.Printf("        %s\n", humanBytes(fi.Size()))
+		fmt.Printf("        session count unavailable: %v\n", err)
+		return nil
+	}
+	fmt.Printf("        %s\n", humanBytes(fi.Size()))
+	fmt.Printf("        %d sessions\n", count)
+	return nil
+}
+
+// shortenHomePath 把绝对路径缩成 ~/... 形式（仅当 prefix 命中 UserHomeDir 时）。
+//
+// ccl 把所有数据放 $HOME/.cc-launcher/ 下；显示完整 /home/zxwang/... 太长。
+// 仅用于 `ccl serve --status` 输出，不导出。
+func shortenHomePath(p string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return p
+	}
+	if rel, ok := strings.CutPrefix(p, home); ok {
+		return "~" + rel
+	}
+	return p
+}
+
+// humanBytes 把字节数转成 SI 单位字符串（KB/MB/GB, 1 位小数）。
+//
+// 仅用于 `ccl serve --status` 输出，不导出；不处理 locale。
+func humanBytes(size int64) string {
+	const (
+		kb = 1024
+		mb = 1024 * 1024
+		gb = 1024 * 1024 * 1024
+	)
+	switch {
+	case size < kb:
+		return fmt.Sprintf("%d B", size)
+	case size < mb:
+		return fmt.Sprintf("%.1f KB", float64(size)/float64(kb))
+	case size < gb:
+		return fmt.Sprintf("%.1f MB", float64(size)/float64(mb))
+	default:
+		return fmt.Sprintf("%.1f GB", float64(size)/float64(gb))
+	}
 }

@@ -41,7 +41,7 @@ func TestRestoreOTelEnv_ScenarioA_EndToEnd(t *testing.T) {
 		t.Errorf("traces endpoint should NOT be touched: %v", injected)
 	}
 
-	// 2. 还原（模拟 ccl restore）
+	// 2. 还原（模拟 ccl serve --restore）
 	restored := restoreOTelEnv(injected)
 
 	if _, ok := restored["CC_ORIG_"+keyEndpoint]; ok {

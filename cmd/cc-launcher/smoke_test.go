@@ -1,24 +1,38 @@
 //go:build smoke
 
-// backup-on-control-handover §7.3-§7.6 sandbox smoke test。
+// backup-on-control-handover §7.3-§7.6 sandbox smoke test +
+// flatten-stop-restore-into-serve §7.3-§7.7 + §9.6 / §9.8 sandbox smoke test。
 //
-// 在 sandbox tmpdir 上模拟真实 HOME，验证 backup 触发语义：
+// 在 sandbox tmpdir 上模拟真实 HOME，验证 backup 触发语义 + serve flag 行为：
 //   - §7.3 首跑 backup：pristine settings → ccl 启动 → 新增快照含原值
 //   - §7.4 控制中跳过：第二次启动 → backups/ 文件数不变
 //   - §7.5 第三方覆盖 backup：改 endpoint → ccl 启动 → 新增三方覆盖态快照
-//   - §7.6 restore 不受影响：跑 ccl restore 逻辑 → settings.json 还原到接管前
+//   - §7.6 restore 不受影响：跑 restoreOTelEnv（`ccl serve --restore` 内部）→ settings.json 还原到接管前
+//   - 7.3 serve --help 包含 --stop / --restore 两条 flag 说明
+//   - 7.4 serve --stop daemon 不在 → "daemon not running"，exit 0
+//   - 7.5 serve --restore settings.json 不在 → "no settings to restore"，exit 0
+//   - 7.6 serve --stop --restore 互斥 → 非 0 exit
+//   - 7.7 ccl stop / ccl restore 已砍 → 走兜底分支报"未知子命令"，非 0 exit
+//   - 9.6 serve --status daemon 不在 → "daemon: not running" + "port :4318: unreachable"
+//   - 9.8 serve --stop --status 互斥 → 非 0 exit
 //
 // 不通过 ccl 二进制的 TUI（避免交互阻塞），直接调 main 包函数；
-// 端到端路径与 ccl runTUI 调 injectOTelEnv 完全等价。
+// 端到端路径与 ccl runTUI / ccl serve 完全等价。
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"cc-launcher/internal/config"
+	"cc-launcher/internal/stats"
 )
 
 // smokeSandbox 准备 sandbox HOME + ccl 配置目录，返回 settings / backups 路径。
@@ -163,7 +177,7 @@ func TestSmoke_RestoreUnaffected(t *testing.T) {
 		},
 	})
 
-	// §7.6 调 restoreOTelEnv（等价于 `ccl restore` 内部的 settings 重写）
+	// §7.6 调 restoreOTelEnv（等价于 `ccl serve --restore` 内部的 settings 重写）
 	settings, err := cm.LoadSettings()
 	if err != nil {
 		t.Fatal(err)
@@ -190,5 +204,324 @@ func TestSmoke_RestoreUnaffected(t *testing.T) {
 	}
 	if _, ok := finalEnv["CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT"]; ok {
 		t.Errorf("CC_ORIG_ backup must be removed after restore, got %v", finalEnv["CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT"])
+	}
+}
+
+// captureStdout 临时把 os.Stdout 接到 buffer，跑 fn，返回 buffer 内容。
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	orig := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = orig })
+
+	done := make(chan string, 1)
+	go func() {
+		var buf bytes.Buffer
+		_, _ = io.Copy(&buf, r)
+		done <- buf.String()
+	}()
+
+	fn()
+	_ = w.Close()
+	return <-done
+}
+
+// captureStderr 临时把 os.Stderr 接到 buffer，跑 fn，返回 buffer 内容。
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	orig := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stderr = w
+	t.Cleanup(func() { os.Stderr = orig })
+
+	done := make(chan string, 1)
+	go func() {
+		var buf bytes.Buffer
+		_, _ = io.Copy(&buf, r)
+		done <- buf.String()
+	}()
+
+	fn()
+	_ = w.Close()
+	return <-done
+}
+
+// sandboxHome 把 HOME 改到 tmpdir（cclLauncherBaseDir 派生 HOME/.cc-launcher）。
+func sandboxHome(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	return dir
+}
+
+// flatten-stop-restore-into-serve §7.3：`ccl serve --help` 包含 --stop / --restore。
+func TestSmoke_ServeHelpMentionsFlags(t *testing.T) {
+	sandboxHome(t)
+	out := captureStdout(t, func() {
+		if err := runServe([]string{"--help"}); err != nil {
+			t.Fatalf("runServe --help: %v", err)
+		}
+	})
+	if !strings.Contains(out, "--stop") {
+		t.Errorf("ccl serve --help must mention --stop, got:\n%s", out)
+	}
+	if !strings.Contains(out, "--restore") {
+		t.Errorf("ccl serve --help must mention --restore, got:\n%s", out)
+	}
+	if !strings.Contains(out, "--status") {
+		t.Errorf("ccl serve --help must mention --status, got:\n%s", out)
+	}
+}
+
+// §7.4：`ccl serve --stop` 在 daemon 没跑时输出 "daemon not running"，exit 0。
+func TestSmoke_ServeStopNoDaemon(t *testing.T) {
+	sandboxHome(t)
+	var err error
+	out := captureStdout(t, func() {
+		err = runServe([]string{"--stop"})
+	})
+	if err != nil {
+		t.Fatalf("runServe --stop must exit 0 when no daemon, got err: %v", err)
+	}
+	if !strings.Contains(out, "daemon not running") {
+		t.Errorf("output must contain \"daemon not running\", got:\n%s", out)
+	}
+}
+
+// §7.5：`ccl serve --restore` 在 settings.json 不存在时输出 "no settings to restore"，exit 0。
+func TestSmoke_ServeRestoreNoSettings(t *testing.T) {
+	sandboxHome(t)
+	// HOME 改到 sandbox 后 ccl 会去 $HOME/.claude/settings.json——不存在，预期路径。
+	var err error
+	out := captureStdout(t, func() {
+		err = runServe([]string{"--restore"})
+	})
+	if err != nil {
+		t.Fatalf("runServe --restore must exit 0 when settings missing, got err: %v", err)
+	}
+	if !strings.Contains(out, "no settings to restore") {
+		t.Errorf("output must contain \"no settings to restore\", got:\n%s", out)
+	}
+}
+
+// §7.6：`ccl serve --stop --restore` 同时给两 flag → 非 0 exit。
+func TestSmoke_ServeStopRestoreMutex(t *testing.T) {
+	sandboxHome(t)
+	var err error
+	_ = captureStderr(t, func() {
+		err = runServe([]string{"--stop", "--restore"})
+	})
+	if err == nil {
+		t.Fatalf("runServe --stop --restore must return error (mutex violation)")
+	}
+}
+
+// §9.4 / §9.8：`ccl serve --stop --status` 同时给两 flag → 非 0 exit。
+func TestSmoke_ServeStopStatusMutex(t *testing.T) {
+	sandboxHome(t)
+	var err error
+	_ = captureStderr(t, func() {
+		err = runServe([]string{"--stop", "--status"})
+	})
+	if err == nil {
+		t.Fatalf("runServe --stop --status must return error (mutex violation)")
+	}
+}
+
+// §9.4：`ccl serve --restore --status` 同时给两 flag → 非 0 exit。
+func TestSmoke_ServeRestoreStatusMutex(t *testing.T) {
+	sandboxHome(t)
+	var err error
+	_ = captureStderr(t, func() {
+		err = runServe([]string{"--restore", "--status"})
+	})
+	if err == nil {
+		t.Fatalf("runServe --restore --status must return error (mutex violation)")
+	}
+}
+
+// §7.7：`ccl stop` 已砍 → 走 main 路由的 cli.Run 兜底分支报"未知子命令"。
+func TestSmoke_StopSubcommandRemoved(t *testing.T) {
+	sandboxHome(t)
+	// main 路由里没有 "stop" case → 落到 cli.Run → "未知子命令" 错误。
+	if err := run([]string{"stop"}); err == nil {
+		t.Fatalf("ccl stop must now error (subcommand removed)")
+	}
+}
+
+// §7.7：`ccl restore` 已砍 → 同上。
+func TestSmoke_RestoreSubcommandRemoved(t *testing.T) {
+	sandboxHome(t)
+	if err := run([]string{"restore"}); err == nil {
+		t.Fatalf("ccl restore must now error (subcommand removed)")
+	}
+}
+
+// §9.6：`ccl serve --status` 在 daemon 没跑时输出"daemon  not running" + 缩进子行 + db 行。
+//
+// 端口行内容依赖环境：本机 :4318 空 → "port :4318 unreachable"；被其它进程占 →
+// "port :4318 in use by foreign service (no pidfile)"。两者都表示"daemon 没跑"，都是合法输出。
+func TestSmoke_ServeStatusNoDaemon(t *testing.T) {
+	sandboxHome(t)
+	var err error
+	out := captureStdout(t, func() {
+		err = runServe([]string{"--status"})
+	})
+	if err != nil {
+		t.Fatalf("runServe --status must exit 0 even when no daemon, got err: %v", err)
+	}
+	if !strings.Contains(out, "daemon  not running") {
+		t.Errorf("status must show \"daemon  not running\" (8-char label width), got:\n%s", out)
+	}
+	portOK := strings.Contains(out, "port :4318 unreachable") ||
+		strings.Contains(out, "port :4318 in use by foreign service")
+	if !portOK {
+		t.Errorf("status must show an indented port :4318 <state> row, got:\n%s", out)
+	}
+	if !strings.Contains(out, "db      missing") {
+		t.Errorf("status must show \"db      missing\" (indented 8-char label) when telemetry.db absent, got:\n%s", out)
+	}
+}
+
+// §9.1 / §9.2a：humanBytes 单位换算（直接调，避免依赖 daemon 跑）。
+func TestHumanBytes(t *testing.T) {
+	cases := []struct {
+		in   int64
+		want string
+	}{
+		{0, "0 B"},
+		{512, "512 B"},
+		{1024, "1.0 KB"},
+		{1536, "1.5 KB"},
+		{1024 * 1024, "1.0 MB"},
+		{5 * 1024 * 1024, "5.0 MB"},
+		{1024 * 1024 * 1024, "1.0 GB"},
+		{2 * 1024 * 1024 * 1024, "2.0 GB"},
+	}
+	for _, tc := range cases {
+		if got := humanBytes(tc.in); got != tc.want {
+			t.Errorf("humanBytes(%d) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// §9.1：stats.CountSessions 在 db 不存在时返回 0 + nil（status 友好）。
+func TestStats_CountSessions_Missing(t *testing.T) {
+	dir := t.TempDir()
+	n, err := stats.CountSessions(filepath.Join(dir, "nope.db"))
+	if err != nil {
+		t.Fatalf("CountSessions on nonexistent db should be 0+nil, got %v", err)
+	}
+	if n != 0 {
+		t.Errorf("CountSessions should be 0, got %d", n)
+	}
+}
+
+// §9.7：模拟 daemon 在跑（写 pidfile + 占用 :4318），跑 status 应报"running"。
+//
+// 注意：本测试要 bind :4318 模拟端口可达。若本机 :4318 被其它进程占用（罕见但可能），
+// 跳过以避免与并行测试干扰——主路径的 running 判定由 design.md §D8 矩阵决定。
+func TestSmoke_ServeStatusRunning(t *testing.T) {
+	home := sandboxHome(t)
+
+	// 1. 占用 :4318（监听但不发 OTLP；probeDaemonAddr 只需端口可达即可）
+	ln, err := net.Listen("tcp", "127.0.0.1:4318")
+	if err != nil {
+		t.Skipf("skip: cannot bind :4318 (likely occupied by other process): %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	// 2. 写 pidfile（用当前进程 PID——只是 probe 出来的"非零 pid"语义，非真 daemon）
+	pidPath := filepath.Join(home, ".cc-launcher", "daemon.pid")
+	if err := os.MkdirAll(filepath.Dir(pidPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(pidPath) })
+
+	var runErr error
+	out := captureStdout(t, func() {
+		runErr = runServe([]string{"--status"})
+	})
+	if runErr != nil {
+		t.Fatalf("runServe --status must exit 0 when daemon simulated, got err: %v", runErr)
+	}
+	if !strings.Contains(out, "daemon  running") {
+		t.Errorf("status must show \"daemon  running\", got:\n%s", out)
+	}
+	if !strings.Contains(out, "port :4318 reachable") {
+		t.Errorf("status must show \"port :4318 reachable\" (indented), got:\n%s", out)
+	}
+	if !strings.Contains(out, fmt.Sprintf("pid=%d", os.Getpid())) {
+		t.Errorf("status must show \"pid=%d\", got:\n%s", os.Getpid(), out)
+	}
+}
+
+// §D8：端口可达 + 无 pidfile = "not running" + "in use by foreign service"。
+// 跟 §9.7 共用端口（必须先 bind 再不写 pidfile）。
+func TestSmoke_ServeStatusForeignService(t *testing.T) {
+	sandboxHome(t)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:4318")
+	if err != nil {
+		t.Skipf("skip: cannot bind :4318: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	// 故意不写 pidfile → 走 foreign service 分支。
+
+	var runErr error
+	out := captureStdout(t, func() {
+		runErr = runServe([]string{"--status"})
+	})
+	if runErr != nil {
+		t.Fatalf("runServe --status must exit 0, got err: %v", runErr)
+	}
+	if !strings.Contains(out, "daemon  not running") {
+		t.Errorf("status must show \"daemon  not running\", got:\n%s", out)
+	}
+	if !strings.Contains(out, "port :4318 in use by foreign service") {
+		t.Errorf("status must show \"port :4318 in use by foreign service\" (no pidfile), got:\n%s", out)
+	}
+}
+
+// §D8：端口不可达 + 有 pidfile = "not running" + "stale pidfile pid=N" + "port :4318 unreachable"。
+// pidfile 存在但 daemon 已挂。
+func TestSmoke_ServeStatusStalePidfile(t *testing.T) {
+	home := sandboxHome(t)
+
+	// 不 bind 端口（让 probe 失败）。
+	pidPath := filepath.Join(home, ".cc-launcher", "daemon.pid")
+	if err := os.MkdirAll(filepath.Dir(pidPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d\n", 999999)), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(pidPath) })
+
+	var runErr error
+	out := captureStdout(t, func() {
+		runErr = runServe([]string{"--status"})
+	})
+	if runErr != nil {
+		t.Fatalf("runServe --status must exit 0, got err: %v", runErr)
+	}
+	if !strings.Contains(out, "daemon  not running") {
+		t.Errorf("status must show \"daemon  not running\", got:\n%s", out)
+	}
+	if !strings.Contains(out, "stale pidfile pid=999999") {
+		t.Errorf("status must show \"stale pidfile pid=999999\", got:\n%s", out)
+	}
+	if !strings.Contains(out, "port :4318 unreachable") {
+		t.Errorf("status must show \"port :4318 unreachable\" (indented), got:\n%s", out)
 	}
 }

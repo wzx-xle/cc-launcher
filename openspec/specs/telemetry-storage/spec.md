@@ -61,10 +61,10 @@ A slow SQLite write MUST NOT cause the OTLP HTTP server to time out. Writes are 
 - **THEN** the oldest entries are dropped; a `ccl stats --internal` shows the drop count; subsequent exports are still accepted
 
 ### Requirement: daemon flushes SQLite on shutdown
-On `SIGTERM` (from `ccl stop` or system), the daemon MUST finish the current batch of writes within 5s, then close the SQLite handle and exit 0.
+On `SIGTERM` (from `ccl serve --stop` or system), the daemon MUST finish the current batch of writes within 5s, then close the SQLite handle and exit 0.
 
-#### Scenario: graceful shutdown via ccl stop
-- **WHEN** user runs `ccl stop`
+#### Scenario: graceful shutdown via ccl serve --stop
+- **WHEN** user runs `ccl serve --stop`
 - **THEN** daemon receives SIGTERM, finishes pending writes (≤ 5s), closes DB, exits 0; subsequent `ccl stats` reports the daemon as stopped
 
 #### Scenario: SIGKILL loses in-flight writes

@@ -32,6 +32,8 @@
 | `ccl` / `ccl --help` | TUI 启动流程：选提供商 → 选权限模式 → 启动 Claude Code |
 | `ccl provider --help` | provider 子命令帮助 |
 | `ccl mode --help` | mode 子命令帮助 |
+| `ccl serve --help` | OTel daemon 帮助（启动 / `--stop` / `--restore` / `--status`） |
+| `ccl stats --help` | stats 子命令帮助 |
 | `ccl provider --list` | 列出所有提供商，`▶` 标记当前激活的 |
 | `ccl provider <name>` | 切换到指定提供商 |
 | `ccl provider --template` / `-T` | 列出 7 种支持的提供商模板 |
@@ -41,6 +43,9 @@
 | `ccl provider --delete <name>` | 删除提供商（激活的需二次确认） |
 | `ccl mode` | 列出 6 种权限模式，`▶` 标记当前目录默认 |
 | `ccl mode <name>` | 设置当前目录的默认权限模式 |
+| `ccl serve --stop` | 优雅停 OTel daemon（5s 内 graceful shutdown） |
+| `ccl serve --restore` | 还原 `~/.claude/settings.json` 到 ccl 之前的状态 |
+| `ccl serve --status` | 打印 daemon 状态摘要（pid / 端口可达 / db 大小 / session 数） |
 
 ## 提供商配置
 
@@ -213,7 +218,7 @@ ccl stats --json                # JSON 输出（pipeable to jq）
 
 ccl 会把每次 `settings.json` 写入前的快照存到 `~/.cc-launcher/backups/settings-<时间戳>.json`，保留最近 30 个。三种触发时机：
 
-1. **手动 `ccl restore`** — 还原操作前做一份（操作本身的回滚锚点）
+1. **手动 `ccl serve --restore`** — 还原操作前做一份（操作本身的回滚锚点）
 2. **切换 provider（`Manager.Merge`）** — 合并前做一份
 3. **每次 `ccl` 启动的 `injectOTelEnv`** — **仅在控制权交接边界**触发：
    - ✅ 首次 ccl 启动（settings.json 没被 ccl 写过）
@@ -317,12 +322,15 @@ ccl  # daemon 自动加上 auth 头
 
 ### 关闭 / 还原
 
+> **Breaking change (v0.x)**：原顶层子命令 `ccl stop` / `ccl restore` 已整合为 `ccl serve` 的 flag。
+
 ```bash
-ccl stop        # 优雅停 daemon（5s 内 graceful shutdown）
-ccl restore     # 还原 settings.json 到 ccl 之前的状态（删 CC_ORIG_* + FORWORD_* + ccl 注入的默认）
+ccl serve --stop       # 优雅停 daemon（5s 内 graceful shutdown）
+ccl serve --restore    # 还原 settings.json 到 ccl 之前的状态（删 CC_ORIG_* + FORWORD_* + ccl 注入的默认）
+ccl serve --status     # 打印 daemon 状态摘要（pid / 端口可达 / db 文件大小 / session 数）
 ```
 
-`ccl restore` 是**不可逆**操作（spec 明确）。会先备份到 `~/.cc-launcher/backups/settings-<时间戳>.json`。
+`ccl serve --restore` 是**不可逆**操作（spec 明确）。会先备份到 `~/.cc-launcher/backups/settings-<时间戳>.json`。
 
 ### 文件位置
 
