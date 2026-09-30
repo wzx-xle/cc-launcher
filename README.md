@@ -47,6 +47,34 @@
 | `ccl serve --restore` | 还原 `~/.claude/settings.json` 到 ccl 之前的状态 |
 | `ccl serve --status` | 打印 daemon 状态摘要（pid / 端口可达 / db 大小 / session 数） |
 
+## Tab completion
+
+ccl 内置 shell tab completion——按 `<Tab>` 自动补全子命令 / flag / 模板名 / 权限模式名。一次性启用：
+
+**bash**：在 `~/.bashrc` 加一行
+
+```bash
+source <(ccl __init bash)
+```
+
+**zsh**：在 `~/.zshrc` 加一行
+
+```zsh
+source <(ccl __init zsh)
+```
+
+启用后重启 shell 或 `source ~/.bashrc` / `source ~/.zshrc` 即生效。不启用也能用 ccl，只是不补全。`fish` 与 `powershell` 当前不支持。
+
+补全范围：
+
+- 顶层 `ccl <TAB>` → `serve / stats / provider / mode / -h / --help / help`
+- `ccl serve <TAB>` → `--stop / --restore / --status / --restart`（互斥）
+- `ccl stats <TAB>` → `--since / --by-provider / --by-project / --project / --json`
+- `ccl provider --template <TAB>` / `-T <TAB>` → 7 种模板名（`anthropic / deepseek / minimax / glm / aliyun-coding / aliyun-pay / aliyun-token`）
+- `ccl provider --new --type <TAB>` → 同上模板名
+- `ccl mode <TAB>` → 6 种权限模式名
+- 用户私有 provider 文件名由 shell 文件名补全处理（ccl 不补位置参数）
+
 ## 提供商配置
 
 配置文件存放在 `~/.cc-launcher/providers/`，一个文件一个提供商，结构与 Claude Code 的 `settings.json` 一致。

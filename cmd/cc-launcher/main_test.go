@@ -3,10 +3,12 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 
@@ -455,4 +457,337 @@ func TestInjectOTelEnv_BackupFailureOnlyWarns(t *testing.T) {
 	if env["OTEL_EXPORTER_OTLP_ENDPOINT"] != "http://localhost:4318" {
 		t.Errorf("OTel injection must complete despite Backup failure, got endpoint=%v", env["OTEL_EXPORTER_OTLP_ENDPOINT"])
 	}
+}
+
+// =============================================================================
+// cli-shell-completion change: completion unit 测试（§8.1-8.4）
+//
+// 这些测试不依赖 daemon / 文件系统 / SQLite，纯函数（输入 args → 输出 token 流），
+// 走 `go test ./...` 主路径。
+// =============================================================================
+
+// captureStdout 临时把 os.Stdout 接到 buffer，跑 fn，返回 buffer 内容。
+//
+// 注：smoke_test.go（带 build tag "smoke"）也用本 helper——同 package 不能重复声明，
+// 故只在本文件定义一次。
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	orig := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = orig })
+
+	done := make(chan string, 1)
+	go func() {
+		var buf bytes.Buffer
+		_, _ = io.Copy(&buf, r)
+		done <- buf.String()
+	}()
+
+	fn()
+	_ = w.Close()
+	return <-done
+}
+
+// captureStderr 临时把 os.Stderr 接到 buffer，跑 fn，返回 buffer 内容。
+//
+// 注：smoke_test.go（带 build tag "smoke"）也用本 helper——同 package 不能重复声明，
+// 故只在本文件定义一次。
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	orig := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stderr = w
+	t.Cleanup(func() { os.Stderr = orig })
+
+	done := make(chan string, 1)
+	go func() {
+		var buf bytes.Buffer
+		_, _ = io.Copy(&buf, r)
+		done <- buf.String()
+	}()
+
+	fn()
+	_ = w.Close()
+	return <-done
+}
+
+// linesFromOutput 把 stdout 文本拆成行（trim 空行），返回 slice。
+func linesFromOutput(out string) []string {
+	var lines []string
+	for _, l := range strings.Split(out, "\n") {
+		if l == "" {
+			continue
+		}
+		lines = append(lines, l)
+	}
+	return lines
+}
+
+// assertContainsLines 验证 out 包含 expected 所有行（顺序无关。
+func assertContainsLines(t *testing.T, out string, expected []string) {
+	t.Helper()
+	got := linesFromOutput(out)
+	gotSet := map[string]bool{}
+	for _, g := range got {
+		gotSet[g] = true
+	}
+	for _, want := range expected {
+		if !gotSet[want] {
+			t.Errorf("output missing %q\ngot: %v", want, got)
+		}
+	}
+}
+
+// §8.1.a: 顶层候选（ccl __complete ""）
+func TestRunCompletion_TopLevel(t *testing.T) {
+	out := captureStdout(t, func() {
+		if err := runCompletion([]string{""}); err != nil {
+			t.Errorf("runCompletion returned error: %v", err)
+		}
+	})
+	assertContainsLines(t, out, []string{
+		"serve", "stats", "provider", "mode",
+		"-h", "--help", "help",
+	})
+}
+
+// §8.1.b: serve 候选（ccl __complete serve ""）
+func TestRunCompletion_ServeFlags(t *testing.T) {
+	out := captureStdout(t, func() {
+		if err := runCompletion([]string{"serve", ""}); err != nil {
+			t.Errorf("runCompletion returned error: %v", err)
+		}
+	})
+	assertContainsLines(t, out, []string{
+		"--stop", "--restore", "--status", "--restart",
+		"-h", "--help",
+	})
+}
+
+// §8.1.c: serve mutex 防御（ccl __complete serve --stop ""）
+func TestRunCompletion_ServeMutexBlocks(t *testing.T) {
+	out := captureStdout(t, func() {
+		if err := runCompletion([]string{"serve", "--stop", ""}); err != nil {
+			t.Errorf("runCompletion returned error: %v", err)
+		}
+	})
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("mutex: expected empty stdout, got %q", out)
+	}
+}
+
+// §8.1.d: stats 候选（ccl __complete stats ""）
+func TestRunCompletion_StatsFlags(t *testing.T) {
+	out := captureStdout(t, func() {
+		if err := runCompletion([]string{"stats", ""}); err != nil {
+			t.Errorf("runCompletion returned error: %v", err)
+		}
+	})
+	assertContainsLines(t, out, []string{
+		"--since", "--by-provider", "--by-project", "--project", "--json",
+		"-h", "--help",
+	})
+}
+
+// §8.1.e: provider 候选（ccl __complete provider ""）
+// 注意：spec 要求 provider 后位置不补（shell filename 接管）；但这里实际是触发 "无 flag
+// 位置"——extractFlagNames 给出全部 flag（按 spec scenario）。
+func TestRunCompletion_ProviderFlags(t *testing.T) {
+	out := captureStdout(t, func() {
+		if err := runCompletion([]string{"provider", ""}); err != nil {
+			t.Errorf("runCompletion returned error: %v", err)
+		}
+	})
+	assertContainsLines(t, out, []string{
+		"--list", "--new", "--delete", "--template", "-T", "--type", "--help", "-h",
+	})
+}
+
+// §8.1.f: provider --template 位置补 7 个模板名
+func TestRunCompletion_ProviderTemplate(t *testing.T) {
+	out := captureStdout(t, func() {
+		if err := runCompletion([]string{"provider", "--template", ""}); err != nil {
+			t.Errorf("runCompletion returned error: %v", err)
+		}
+	})
+	assertContainsLines(t, out, []string{
+		"anthropic", "deepseek", "minimax", "glm",
+		"aliyun-coding", "aliyun-pay", "aliyun-token",
+	})
+	// 应该不包含 flag
+	for _, bad := range []string{"--list", "--new", "--delete"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("template 位置不应补 flag, found %q in %q", bad, out)
+		}
+	}
+}
+
+// §8.1.g: provider --new --type 位置补 7 个模板名
+func TestRunCompletion_ProviderNewType(t *testing.T) {
+	out := captureStdout(t, func() {
+		if err := runCompletion([]string{"provider", "--new", "--type", ""}); err != nil {
+			t.Errorf("runCompletion returned error: %v", err)
+		}
+	})
+	assertContainsLines(t, out, []string{
+		"anthropic", "deepseek", "minimax", "glm",
+		"aliyun-coding", "aliyun-pay", "aliyun-token",
+	})
+}
+
+// §8.1.h: provider --delete 位置 → 空（spec §3.8）
+func TestRunCompletion_ProviderDeleteEmpty(t *testing.T) {
+	out := captureStdout(t, func() {
+		if err := runCompletion([]string{"provider", "--delete", ""}); err != nil {
+			t.Errorf("runCompletion returned error: %v", err)
+		}
+	})
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("--delete 后位置应为空, got %q", out)
+	}
+}
+
+// §8.1.i: provider --new 后位置补 --type / -T / --template / -h / --help（spec §3.9）
+func TestRunCompletion_ProviderNewEmpty(t *testing.T) {
+	out := captureStdout(t, func() {
+		if err := runCompletion([]string{"provider", "--new", ""}); err != nil {
+			t.Errorf("runCompletion returned error: %v", err)
+		}
+	})
+	assertContainsLines(t, out, []string{
+		"--type", "-T", "--template", "-h", "--help",
+	})
+}
+
+// §8.1.j: provider --list 后位置 → 空（mutex 推广）
+func TestRunCompletion_ProviderListEmpty(t *testing.T) {
+	out := captureStdout(t, func() {
+		if err := runCompletion([]string{"provider", "--list", ""}); err != nil {
+			t.Errorf("runCompletion returned error: %v", err)
+		}
+	})
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("--list 后位置应为空, got %q", out)
+	}
+}
+
+// §8.1.k: mode 候选（ccl __complete mode ""）
+func TestRunCompletion_Mode(t *testing.T) {
+	out := captureStdout(t, func() {
+		if err := runCompletion([]string{"mode", ""}); err != nil {
+			t.Errorf("runCompletion returned error: %v", err)
+		}
+	})
+	assertContainsLines(t, out, []string{
+		"manual", "acceptEdits", "auto", "bypassPermissions", "dontAsk", "plan",
+	})
+}
+
+// §8.1.l: unknown subcommand（如 "help"）→ 空（spec §3.10）
+func TestRunCompletion_UnknownSubcommandEmpty(t *testing.T) {
+	out := captureStdout(t, func() {
+		if err := runCompletion([]string{"help", ""}); err != nil {
+			t.Errorf("runCompletion returned error: %v", err)
+		}
+	})
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("unknown subcommand 应输出空, got %q", out)
+	}
+}
+
+// §8.1.m: bogus subcommand → 空
+func TestRunCompletion_BogusEmpty(t *testing.T) {
+	out := captureStdout(t, func() {
+		if err := runCompletion([]string{"bogus", ""}); err != nil {
+			t.Errorf("runCompletion returned error: %v", err)
+		}
+	})
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("bogus subcommand 应输出空, got %q", out)
+	}
+}
+
+// §8.1.n: 空 args（防御：runCompletion 收到 nil/空 slice）
+func TestRunCompletion_EmptyArgs(t *testing.T) {
+	out := captureStdout(t, func() {
+		if err := runCompletion([]string{}); err != nil {
+			t.Errorf("runCompletion returned error: %v", err)
+		}
+	})
+	assertContainsLines(t, out, []string{"serve", "stats", "provider", "mode"})
+}
+
+// §8.2: bash wrapper 输出含 "complete -F" 关键字
+func TestRunShellInit_Bash(t *testing.T) {
+	out := captureStdout(t, func() {
+		if err := runShellInit("bash"); err != nil {
+			t.Errorf("runShellInit(bash) returned error: %v", err)
+		}
+	})
+	if out == "" {
+		t.Fatal("bash wrapper 输出为空")
+	}
+	if !strings.Contains(out, "complete -F") {
+		t.Errorf("bash wrapper 应含 'complete -F', got: %s", out)
+	}
+}
+
+// §8.3: zsh wrapper 输出含 "compdef" 关键字
+func TestRunShellInit_Zsh(t *testing.T) {
+	out := captureStdout(t, func() {
+		if err := runShellInit("zsh"); err != nil {
+			t.Errorf("runShellInit(zsh) returned error: %v", err)
+		}
+	})
+	if out == "" {
+		t.Fatal("zsh wrapper 输出为空")
+	}
+	if !strings.Contains(out, "compdef") {
+		t.Errorf("zsh wrapper 应含 'compdef', got: %s", out)
+	}
+}
+
+// §8.4: fish (未知 shell) → exit 非 0 + stderr 含 "unknown shell"
+//
+// 测试覆盖 exitFn 为 no-op 避免真退出整个 test 进程；验证 stderr + exitFn 被调用。
+func TestRunShellInit_FishUnknown(t *testing.T) {
+	// 覆盖 exitFn 记录调用
+	exitCode := -1
+	exitCalled := false
+	origExit := exitFn
+	exitFn = func(code int) { exitCalled = true; exitCode = code }
+	t.Cleanup(func() { exitFn = origExit })
+
+	stderr := captureStderr(t, func() {
+		if err := runShellInit("fish"); err != nil {
+			t.Errorf("runShellInit(fish) returned error: %v", err)
+		}
+	})
+
+	if !exitCalled {
+		t.Error("未知 shell 应触发 exitFn")
+	}
+	if exitCode != 1 {
+		t.Errorf("未知 shell exit code 应为 1, got %d", exitCode)
+	}
+	if !strings.Contains(stderr, "unknown shell") {
+		t.Errorf("stderr 应含 'unknown shell', got: %q", stderr)
+	}
+	if !strings.Contains(stderr, "fish") {
+		t.Errorf("stderr 应含 shell 名 'fish', got: %q", stderr)
+	}
+}
+
+// 辅助：sort 一份字符串 slice（用来比较候选集时消除 fs 内部顺序影响）。
+func sortedStrings(s []string) []string {
+	out := append([]string(nil), s...)
+	sort.Strings(out)
+	return out
 }

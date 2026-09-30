@@ -102,8 +102,8 @@ func topHelpForCLI() string {
     -h, --help        显示本帮助并退出`
 }
 
-// registerProviderFlags 把 provider 子命令的 flag 注册到 fs，返回值供 runProvider 与
-// completeAtProvider 共用。
+// RegisterProviderFlags 把 provider 子命令的 flag 注册到 fs，返回值供 runProvider 与
+// cmd/cc-launcher/completion.go::completeAtProvider 共用。
 //
 // 约束（cli-shell-completion 兼容性）：前 4 个返回值（list / new / delete / template）的
 // 位置 / 类型 / 顺序不变。新增 typeFlag / help 追加在末尾，调用方可用 `_, _, _, _, _, _ :=`
@@ -117,7 +117,10 @@ func topHelpForCLI() string {
 // 同时注册 `--type`（不暴露 *bool 给调用方）和 `--help, -h`：让 fs.Parse 通过未知 flag
 // 检查；`--type` 仅在 `--new` 分支被 dispatch 读取，`--help` 由 stdlib 的 flag.ErrHelp
 // 早返回触发（无需看 *helpFlag）。
-func registerProviderFlags(fs *flag.FlagSet) (list, new, delete, template *bool, typeFlag *string, help *bool) {
+//
+// exported 是 cli-shell-completion 的实施前置——cmd/cc-launcher/completion.go（package main）
+// 跨包调不到包内 unexported 符号（2026-09-30 实施前改名）。
+func RegisterProviderFlags(fs *flag.FlagSet) (list, new, delete, template *bool, typeFlag *string, help *bool) {
 	list = fs.Bool("list", false, "列出所有提供商")
 	new = fs.Bool("new", false, "新增提供商（可用 --type 选模板）")
 	delete = fs.Bool("delete", false, "删除提供商（需给 name）")
@@ -147,7 +150,7 @@ func (c *CLI) runProvider(args []string) error {
 	// 下面翻译成"未知选项: -x"返回，重复打印没意义。mutex 报错走 fmt.Fprintln(os.Stderr)
 	// 单独输出，跟 fs.output() 无关。
 	fs.SetOutput(io.Discard)
-	listFlag, newFlag, deleteFlag, templateFlag, typeFlag, helpFlag := registerProviderFlags(fs)
+	listFlag, newFlag, deleteFlag, templateFlag, typeFlag, helpFlag := RegisterProviderFlags(fs)
 
 	if err := fs.Parse(args); err != nil {
 		// Go stdlib 见到 -h / --help 即便注册了也会硬返回 flag.ErrHelp（早于任何 mutex

@@ -28,14 +28,24 @@ const statsHelp = `用法: ccl stats [选项]
     --json                 输出 JSON（pipeable to jq）
     -h, --help             显示本帮助并退出`
 
+// registerStatsFlags 把 stats 子命令的 flag 注册到 fs，返回值供 runStats 与
+// cmd/cc-launcher/completion.go::completeAtStats 共用。
+//
+// cli-shell-completion §D2：flag 改动自动同步——加新 flag 时（仅改本函数）completion
+// 自动跟随；若不抽，`runStats` 加 flag 而 `completeAtStats` 漏改 → 脱节。
+func registerStatsFlags(fs *flag.FlagSet) (sinceStr *string, byProvider, byProject, asJSON *bool, project *string) {
+	sinceStr = fs.String("since", "", "起始日期（YYYY-MM-DD）")
+	byProvider = fs.Bool("by-provider", false, "按 provider 聚合")
+	byProject = fs.Bool("by-project", false, "按 project 聚合")
+	project = fs.String("project", "", "按 cwd 子串过滤")
+	asJSON = fs.Bool("json", false, "输出 JSON")
+	return
+}
+
 // runStats 是 `ccl stats` 入口。
 func runStats(args []string) error {
 	fs := flag.NewFlagSet("stats", flag.ContinueOnError)
-	sinceStr := fs.String("since", "", "起始日期（YYYY-MM-DD）")
-	byProvider := fs.Bool("by-provider", false, "按 provider 聚合")
-	byProject := fs.Bool("by-project", false, "按 project 聚合")
-	project := fs.String("project", "", "按 cwd 子串过滤")
-	asJSON := fs.Bool("json", false, "输出 JSON")
+	sinceStr, byProvider, byProject, asJSON, project := registerStatsFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

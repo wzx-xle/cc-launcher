@@ -44,10 +44,7 @@ func runServe(args []string) error {
 	}
 
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
-	stopFlag := fs.Bool("stop", false, "停 OTel daemon（等价于原 ccl stop）")
-	restoreFlag := fs.Bool("restore", false, "还原 ~/.claude/settings.json 到 ccl 之前的状态")
-	statusFlag := fs.Bool("status", false, "打印 daemon 状态摘要（pid / 端口可达 / db 文件大小 / session 数）")
-	restartFlag := fs.Bool("restart", false, "热重启 daemon（SIGTERM 旧 daemon + fork 新 binary daemon）")
+	stopFlag, restoreFlag, statusFlag, restartFlag := registerServeFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		// flag.ErrHelp 已被上面的 wantsHelpOnly 截走；到这里的 error 是真解析错误。
 		return err
@@ -155,6 +152,23 @@ func runServe(args []string) error {
 
 	log.Printf("ccl serve: 关闭完成")
 	return nil
+}
+
+// registerServeFlags 把 serve 子命令的 flag 注册到 fs，返回值供 runServe 与
+// cmd/cc-launcher/completion.go::completeAtServe 共用。
+//
+// 实施前置（flatten-stop-restore-into-serve change）：4 个 flag（--stop / --restore / --status / --restart）
+// 在 runServe 内做 mutex 检查（互斥），返回的指针即 mutex 检查 / dispatch 用。
+//
+// 为什么必须抽 helper：cli-shell-completion §D2 要求"flag 改动自动同步"——
+// 加新 flag 时（仅改 registerServeFlags）completion 自动跟随；若不抽，
+// `runServe` 加 flag 而 `completeAtServe` 漏改 → runtime 接受 / completion 提示脱节。
+func registerServeFlags(fs *flag.FlagSet) (stop, restore, status, restart *bool) {
+	stop = fs.Bool("stop", false, "停 OTel daemon（等价于原 ccl stop）")
+	restore = fs.Bool("restore", false, "还原 ~/.claude/settings.json 到 ccl 之前的状态")
+	status = fs.Bool("status", false, "打印 daemon 状态摘要（pid / 端口可达 / db 文件大小 / session 数）")
+	restart = fs.Bool("restart", false, "热重启 daemon（SIGTERM 旧 daemon + fork 新 binary daemon）")
+	return
 }
 
 // writePidfile 原子写 pidfile：写 .tmp 再 rename。

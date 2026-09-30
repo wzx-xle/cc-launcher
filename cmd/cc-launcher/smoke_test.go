@@ -21,10 +21,8 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -207,51 +205,7 @@ func TestSmoke_RestoreUnaffected(t *testing.T) {
 	}
 }
 
-// captureStdout 临时把 os.Stdout 接到 buffer，跑 fn，返回 buffer 内容。
-func captureStdout(t *testing.T, fn func()) string {
-	t.Helper()
-	orig := os.Stdout
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("pipe: %v", err)
-	}
-	os.Stdout = w
-	t.Cleanup(func() { os.Stdout = orig })
-
-	done := make(chan string, 1)
-	go func() {
-		var buf bytes.Buffer
-		_, _ = io.Copy(&buf, r)
-		done <- buf.String()
-	}()
-
-	fn()
-	_ = w.Close()
-	return <-done
-}
-
-// captureStderr 临时把 os.Stderr 接到 buffer，跑 fn，返回 buffer 内容。
-func captureStderr(t *testing.T, fn func()) string {
-	t.Helper()
-	orig := os.Stderr
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("pipe: %v", err)
-	}
-	os.Stderr = w
-	t.Cleanup(func() { os.Stderr = orig })
-
-	done := make(chan string, 1)
-	go func() {
-		var buf bytes.Buffer
-		_, _ = io.Copy(&buf, r)
-		done <- buf.String()
-	}()
-
-	fn()
-	_ = w.Close()
-	return <-done
-}
+// captureStdout / captureStderr 在 main_test.go 定义（同 package 共享）。
 
 // sandboxHome 把 HOME 改到 tmpdir（cclLauncherBaseDir 派生 HOME/.cc-launcher）。
 func sandboxHome(t *testing.T) string {
@@ -627,5 +581,73 @@ func TestSmoke_ServeStatusStalePidfile(t *testing.T) {
 	}
 	if !strings.Contains(out, "port :4318 unreachable") {
 		t.Errorf("status must show \"port :4318 unreachable\" (indented), got:\n%s", out)
+	}
+}
+
+// =============================================================================
+// cli-shell-completion change: smoke 测试（§8.5-§8.6）
+//
+// 走 `go test -tags smoke ./cmd/cc-launcher/...` 触发；不依赖 daemon / SQLite，
+// 仅端到端验证 `ccl --help` 不含隐藏子命令 + `ccl __complete ""` 顶层候选正确。
+// =============================================================================
+
+// §8.5: 端到端 `ccl --help` 不暴露 __complete / __init 隐藏子命令（spec scenario "top-level
+// help does not list internal subcommands"）。
+//
+// 范围：仅 "子命令:" 段（spec 原文："subcommand list"）。topHelp 的 "Tab completion"
+// prose 段落里会出现 `ccl __init bash` / `ccl __init zsh` 等引导文本——那是用法提示，
+// 不是列出 subcommand（spec 没要求 prose 不出现）。所以断言限定在子命令段。
+func TestSmoke_HelpDoesNotListHiddenSubcommands(t *testing.T) {
+	out := captureStdout(t, func() {
+		if err := run([]string{"--help"}); err != nil {
+			t.Errorf("run(--help) returned error: %v", err)
+		}
+	})
+	if !strings.Contains(out, "用法: ccl") {
+		t.Errorf("--help 应含 '用法: ccl' header, got:\n%s", out)
+	}
+	subcommandSection := extractHelpSection(out, "子命令:", "选项:")
+	if subcommandSection == "" {
+		t.Fatalf("--help 缺少 '子命令:' 段, got:\n%s", out)
+	}
+	for _, hidden := range []string{"__complete", "__init"} {
+		if strings.Contains(subcommandSection, hidden) {
+			t.Errorf("--help 子命令段不应列隐藏 subcommand %q, got section: %q", hidden, subcommandSection)
+		}
+	}
+	// 正向 sanity：4 个用户面子命令应出现
+	for _, sub := range []string{"serve", "stats", "provider", "mode"} {
+		if !strings.Contains(subcommandSection, sub) {
+			t.Errorf("--help 子命令段应包含子命令 %q, got section: %q", sub, subcommandSection)
+		}
+	}
+}
+
+// extractHelpSection 截取 `out` 中 [start, end) 之间的内容。任一 marker 缺失返回空。
+func extractHelpSection(out, start, end string) string {
+	s := strings.Index(out, start)
+	if s < 0 {
+		return ""
+	}
+	rest := out[s+len(start):]
+	e := strings.Index(rest, end)
+	if e < 0 {
+		return out[s:]
+	}
+	return out[s : s+len(start)+e]
+}
+
+// §8.6: 端到端 `ccl __complete ""` 顶层候选正确（spec scenario "completing the
+// top-level subcommand"）。
+func TestSmoke_CompletionTopLevel(t *testing.T) {
+	out := captureStdout(t, func() {
+		if err := run([]string{"__complete", ""}); err != nil {
+			t.Errorf("run(__complete, '') returned error: %v", err)
+		}
+	})
+	for _, want := range []string{"serve", "stats", "provider", "mode", "-h", "--help", "help"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("顶层候选应含 %q, got:\n%s", want, out)
+		}
 	}
 }

@@ -28,6 +28,11 @@ const topHelp = `用法: ccl [子命令] [选项]
 选项:
     -h, --help        显示本帮助并退出
 
+Tab completion:
+  bash 用户：在 ~/.bashrc 加一行   source <(ccl __init bash)
+  zsh 用户：在 ~/.zshrc 加一行    source <(ccl __init zsh)
+  启用后 <Tab> 自动补全子命令 / flag / 模板名 / 权限模式名。不启用也能用 ccl，只是不补全。
+
 用量监控：
   - ccl 首次跑会拉起 OTel daemon（监听 :4318）
   - 跑过 Claude Code session 后用 ccl stats 查看
@@ -55,6 +60,15 @@ func run(args []string) error {
 		case "-V", "--version", "version":
 			printVersion()
 			return nil
+		case "__complete":
+			// 隐藏子命令：shell completion 协议端点（cli-shell-completion）。
+			// 收到 args[1:] 作为"待补全位置上下文"，输出候选 token（每行一个）。
+			// 不进 topHelp 子命令列表（spec §"hidden subcommands"）——避免干扰 `ccl --help`。
+			return runCompletion(args[1:])
+		case "__init":
+			// 隐藏子命令：输出 shell wrapper script。args[1] 是 shell 名（bash / zsh）。
+			// 未知 shell → stderr + exit 1。
+			return runShellInit(args[1])
 		case "serve":
 			return runServe(args[1:])
 		case "stats":
