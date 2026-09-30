@@ -2,7 +2,10 @@ package cli
 
 import (
 	"bufio"
+	"errors"
+	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -14,6 +17,8 @@ import (
 
 // providerHelp 是 `ccl provider --help` 输出的内容。
 const providerHelp = `用法: ccl provider [选项] [name]
+
+注意: --list / --new / --delete 三者互斥，不可同时给（--template 允许与 --new 共存，等价于仅 --template）
 
 选项:
     --list            列出所有提供商（▶ 标记当前激活的）
@@ -97,51 +102,123 @@ func topHelpForCLI() string {
     -h, --help        显示本帮助并退出`
 }
 
+// registerProviderFlags 把 provider 子命令的 flag 注册到 fs，返回值供 runProvider 与
+// completeAtProvider 共用。
+//
+// 约束（cli-shell-completion 兼容性）：前 4 个返回值（list / new / delete / template）的
+// 位置 / 类型 / 顺序不变。新增 typeFlag / help 追加在末尾，调用方可用 `_, _, _, _, _, _ :=`
+// 显式忽略。
+//
+// 短别名（-T / -h）实现方式：Go 1.21+ stdlib 不再支持 Bool("name1, name2", ...) 的逗号
+// 分隔多名字机制——Bool 会把字面 "name1, name2" 当作单个 flag 注册。所以用 BoolVar 把短别名
+// 显式注册到与主名相同的 *bool：fs.Parse 时 -T 或 --template 任意一个被设都会反映到
+// template 指针。
+//
+// 同时注册 `--type`（不暴露 *bool 给调用方）和 `--help, -h`：让 fs.Parse 通过未知 flag
+// 检查；`--type` 仅在 `--new` 分支被 dispatch 读取，`--help` 由 stdlib 的 flag.ErrHelp
+// 早返回触发（无需看 *helpFlag）。
+func registerProviderFlags(fs *flag.FlagSet) (list, new, delete, template *bool, typeFlag *string, help *bool) {
+	list = fs.Bool("list", false, "列出所有提供商")
+	new = fs.Bool("new", false, "新增提供商（可用 --type 选模板）")
+	delete = fs.Bool("delete", false, "删除提供商（需给 name）")
+
+	// template：--template 与 -T 共享同一 bool
+	var templateVar bool
+	template = &templateVar
+	fs.BoolVar(template, "template", false, "打印提供商配置模板")
+	fs.BoolVar(template, "T", false, "打印提供商配置模板（-T 短别名）")
+
+	typeFlag = fs.String("type", "", "仅在 --new 上下文生效")
+
+	// help：--help 与 -h 共享同一 bool（stdlib 即使注册也会硬返回 flag.ErrHelp，但仍
+	// 保留这个指针以防未来行为变化）
+	var helpVar bool
+	help = &helpVar
+	fs.BoolVar(help, "help", false, "显示本帮助并退出")
+	fs.BoolVar(help, "h", false, "显示本帮助并退出（-h 短别名）")
+
+	return
+}
+
 func (c *CLI) runProvider(args []string) error {
-	if len(args) == 0 {
-		return c.listProviders()
+	// 1. 建 FlagSet 并注册 flag
+	fs := flag.NewFlagSet("provider", flag.ContinueOnError)
+	// 抑制 fs.Parse 默认往 fs.output() 写"flag provided but not defined: -x"——
+	// 下面翻译成"未知选项: -x"返回，重复打印没意义。mutex 报错走 fmt.Fprintln(os.Stderr)
+	// 单独输出，跟 fs.output() 无关。
+	fs.SetOutput(io.Discard)
+	listFlag, newFlag, deleteFlag, templateFlag, typeFlag, helpFlag := registerProviderFlags(fs)
+
+	if err := fs.Parse(args); err != nil {
+		// Go stdlib 见到 -h / --help 即便注册了也会硬返回 flag.ErrHelp（早于任何 mutex
+		// 检查）——`--list --new --help` 仍走 help 分支，自动满足 help 优先级最高契约。
+		if errors.Is(err, flag.ErrHelp) {
+			fmt.Println(providerHelp)
+			return nil
+		}
+		// 把 stdlib "flag provided but not defined: -bogus" 翻译成"未知选项: -bogus"——
+		// 保持 TestProvider_BogusFlagStillErrors 老契约（断言错误含"未知"）。
+		if strings.HasPrefix(err.Error(), "flag provided but not defined:") {
+			bad := strings.TrimPrefix(err.Error(), "flag provided but not defined: ")
+			return fmt.Errorf("未知选项: %s", bad)
+		}
+		return err
 	}
 
-	switch args[0] {
-	case "-h", "--help":
+	// 兜底：若未来 stdlib 不再硬返回 ErrHelp，*helpFlag 仍能反映 help 输入。
+	if *helpFlag {
 		fmt.Println(providerHelp)
 		return nil
-	case "--list":
-		return c.listProviders()
-	case "--template", "-T":
-		return c.printTemplate(args[1:])
-	case "--new":
-		// --new 可以与 --template 共存；如果同时给 --template，进入打印模式而非交互流
-		var typeFlag string
-		var positional string
-		for i := 1; i < len(args); i++ {
-			switch args[i] {
-			case "--template", "-T":
-				// --new --template [type] 等价于 --template [type]
-				return c.printTemplate(args[i+1:])
-			case "--type":
-				if i+1 < len(args) {
-					typeFlag = args[i+1]
-					i++
-				}
-			default:
-				if positional == "" && !strings.HasPrefix(args[i], "-") {
-					positional = args[i]
-				}
-			}
+	}
+
+	// 3. mutex 检查：--list / --new / --delete 互斥。--template 不进 mutex。
+	set := 0
+	for _, f := range []*bool{listFlag, newFlag, deleteFlag} {
+		if *f {
+			set++
 		}
-		return c.newProvider(positional, typeFlag)
-	case "--delete":
-		if len(args) < 2 {
+	}
+	if set > 1 {
+		fmt.Fprintln(os.Stderr, "用法: ccl provider [--list | --new | --delete]（互斥）")
+		fmt.Fprintln(os.Stderr, "详见 `ccl provider --help`")
+		return fmt.Errorf("--list / --new / --delete 互斥；不可同时给")
+	}
+
+	// 4. --type 上下文约束：仅当 --type 是唯一给定 flag 时报错；其它核心 flag 与 --type
+	// 共存时 --type silently ignored（dispatch 不读它）。
+	if *typeFlag != "" && !*listFlag && !*newFlag && !*deleteFlag && !*templateFlag {
+		return fmt.Errorf("--type 只能与 --new 一起使用")
+	}
+
+	// 5. 位置参数
+	positional := fs.Args()
+	var name string
+	if len(positional) > 0 {
+		name = positional[0]
+	}
+
+	// 6. dispatch 顺序：template 优先级最高（保留 --new --template 等价 --template 约定）
+	if *templateFlag {
+		return c.printTemplate(positional)
+	}
+	if *listFlag {
+		return c.listProviders()
+	}
+	if *deleteFlag {
+		if name == "" {
 			return fmt.Errorf("用法: cc provider --delete <name>")
 		}
-		return c.deleteProvider(args[1])
-	default:
-		if strings.HasPrefix(args[0], "-") {
-			return fmt.Errorf("未知选项: %s", args[0])
-		}
-		return c.switchProvider(args[0])
+		return c.deleteProvider(name)
 	}
+	if *newFlag {
+		return c.newProvider(name, *typeFlag)
+	}
+
+	// 7. 兜底：无 flag 时按位置参数走 switch / list
+	if name != "" {
+		return c.switchProvider(name)
+	}
+	return c.listProviders()
 }
 
 // printTemplate 实现 `ccl provider --template [type]`。

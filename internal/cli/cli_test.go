@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"bytes"
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -173,6 +175,38 @@ func captureStdout(t *testing.T) func() string {
 		out = string(data)
 		os.Stdout = old
 		return out
+	}
+}
+
+// captureStderr 临时把 os.Stderr 接到 buffer，跑 fn，返回 buffer 内容。
+// 用法：err := captureStderrRun(t, func() error { return c.Run(args) }) → err + stderr。
+func captureStderr(t *testing.T) func() string {
+	t.Helper()
+	orig := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stderr = w
+	t.Cleanup(func() { os.Stderr = orig })
+
+	done := make(chan string, 1)
+	go func() {
+		var buf bytes.Buffer
+		_, _ = io.Copy(&buf, r)
+		done <- buf.String()
+	}()
+
+	var done2 bool
+	var s string
+	return func() string {
+		if done2 {
+			return s
+		}
+		done2 = true
+		_ = w.Close()
+		s = <-done
+		return s
 	}
 }
 
@@ -506,5 +540,288 @@ func TestGuidedFlow_EOF_CancelsNoWrite(t *testing.T) {
 	}
 	if pm.Exists("will-cancel") {
 		t.Error("EOF 不应写盘")
+	}
+}
+
+// ─── 任务 10：provider-flag-migration 新测试 ───
+//
+// 短形式 / mutex / --type 上下文 / help 优先级 / dispatch 顺序的覆盖。
+// 用 c.Run 走完整 path（跟现有 TestProvider_BogusFlagStillErrors 等一致）。
+
+// 10.1：-list 短形式等价 --list
+func TestProvider_ShortList_EquivLongList(t *testing.T) {
+	c, _, _ := setupCLI(t)
+
+	capL := captureStdout(t)
+	if err := c.Run([]string{"provider", "-list"}); err != nil {
+		t.Fatalf("-list error = %v", err)
+	}
+	short := capL()
+
+	capF := captureStdout(t)
+	if err := c.Run([]string{"provider", "--list"}); err != nil {
+		t.Fatalf("--list error = %v", err)
+	}
+	long := capF()
+
+	if short != long {
+		t.Errorf("-list 输出 != --list 输出\n短: %q\n长: %q", short, long)
+	}
+}
+
+// 10.2：-new 短形式（mock EOF → 等价 --new 行为）
+func TestProvider_ShortNew_EquivLongNew(t *testing.T) {
+	c, _, _ := setupCLI(t)
+	restore := mockStdin([]string{""}) // name = "" → EOF on next → "已取消"
+	defer restore()
+
+	capL := captureStdout(t)
+	errL := c.Run([]string{"provider", "-new"})
+	shortOut := capL()
+
+	restore2 := mockStdin([]string{""})
+	defer restore2()
+	capF := captureStdout(t)
+	errF := c.Run([]string{"provider", "--new"})
+	longOut := capF()
+
+	// 两个都报"已取消"（EOF）→ err 文案应一致；stdout 也一致（打印提示 + "已取消" 错）
+	if (errL == nil) != (errF == nil) {
+		t.Errorf("短 / 长 --new error 状态不一致: %v vs %v", errL, errF)
+	}
+	if shortOut != longOut {
+		t.Errorf("-new 输出 != --new 输出\n短: %q\n长: %q", shortOut, longOut)
+	}
+}
+
+// 10.3：-delete 短形式（temp 存在 → 调 deleteProvider）
+func TestProvider_ShortDelete_EquivLongDelete(t *testing.T) {
+	c, pm, _ := setupCLI(t)
+	pm.CreateWithEnv("temp", map[string]any{"ANTHROPIC_AUTH_TOKEN": "k"})
+
+	if err := c.Run([]string{"provider", "-delete", "temp"}); err != nil {
+		t.Fatalf("-delete temp error = %v", err)
+	}
+	if pm.Exists("temp") {
+		t.Error("-delete temp 应被删除")
+	}
+}
+
+// 10.4：-T 短别名 + 短形式打印 deepseek JSON
+func TestProvider_ShortT_EquivLongTemplate(t *testing.T) {
+	c, _, _ := setupCLI(t)
+
+	cap := captureStdout(t)
+	if err := c.Run([]string{"provider", "-T", "deepseek"}); err != nil {
+		t.Fatalf("-T deepseek error = %v", err)
+	}
+	out := cap()
+	if !strings.Contains(out, `"ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic"`) {
+		t.Errorf("-T deepseek 输出不含 BASE_URL\n%s", out)
+	}
+}
+
+// 10.5：-h 短形式等价 --help
+func TestProvider_ShortH_EquivLongHelp(t *testing.T) {
+	c, _, _ := setupCLI(t)
+
+	cap := captureStdout(t)
+	if err := c.Run([]string{"provider", "-h"}); err != nil {
+		t.Fatalf("-h error = %v", err)
+	}
+	out := cap()
+	if !strings.Contains(out, "--list") || !strings.Contains(out, "--new") {
+		t.Errorf("-h 输出应含 --list / --new\n%s", out)
+	}
+}
+
+// 10.6：mutex 报错——4 个 case
+func TestProvider_Mutex_AllCases(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"list+new", []string{"provider", "--list", "--new"}},
+		{"list+delete", []string{"provider", "--list", "--delete", "foo"}},
+		{"new+delete", []string{"provider", "--new", "--delete", "foo"}},
+		{"list+new+template(3flag)", []string{"provider", "--list", "--new", "--template", "deepseek"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, pm, _ := setupCLI(t)
+			pm.CreateWithEnv("foo", map[string]any{"ANTHROPIC_AUTH_TOKEN": "k"})
+
+			cap := captureStderr(t)
+			err := c.Run(tc.args)
+			stderr := cap()
+
+			if err == nil {
+				t.Fatalf("mutex violation 应报错；args=%v", tc.args)
+			}
+			if !strings.Contains(stderr, "互斥") {
+				t.Errorf("stderr 应含 '互斥'，得到: %q", stderr)
+			}
+			if !strings.Contains(err.Error(), "互斥") {
+				t.Errorf("err 应含 '互斥'，得到: %v", err)
+			}
+			// foo 不应被删除（list+delete case）
+			if tc.name == "list+delete" && !pm.Exists("foo") {
+				t.Error("mutex 报错时 foo 不应被删除")
+			}
+		})
+	}
+}
+
+// 10.7：--new --template deepseek 等价 --template deepseek（不创建 provider 文件）
+func TestProvider_NewTemplateDeepseek_EqualsTemplateDeepseek(t *testing.T) {
+	c, pm, _ := setupCLI(t)
+
+	capL := captureStdout(t)
+	if err := c.Run([]string{"provider", "--new", "--template", "deepseek"}); err != nil {
+		t.Fatalf("--new --template deepseek error = %v", err)
+	}
+	short := capL()
+
+	// 不应创建 provider 文件
+	if pm.Exists("anything") {
+		t.Error("--new --template deepseek 不应创建 provider 文件")
+	}
+
+	capF := captureStdout(t)
+	if err := c.Run([]string{"provider", "--template", "deepseek"}); err != nil {
+		t.Fatalf("--template deepseek error = %v", err)
+	}
+	long := capF()
+
+	if short != long {
+		t.Errorf("--new --template deepseek 输出 != --template deepseek 输出\n%s\nvs\n%s", short, long)
+	}
+}
+
+// 10.8：--new --template（无 type）列全部 7 模板（约定保留）
+func TestProvider_NewTemplateNoArg_ListsAll(t *testing.T) {
+	c, _, _ := setupCLI(t)
+	cap := captureStdout(t)
+
+	if err := c.Run([]string{"provider", "--new", "--template"}); err != nil {
+		t.Fatalf("--new --template error = %v", err)
+	}
+	out := cap()
+	for _, name := range []string{"anthropic", "deepseek", "minimax", "glm", "aliyun-coding", "aliyun-pay", "aliyun-token"} {
+		if !strings.Contains(out, name) {
+			t.Errorf("--new --template 应列 %q\n%s", name, out)
+		}
+	}
+}
+
+// 10.9：--type 单独（无 --new 且无其它 flag）报错
+func TestProvider_TypeAlone_Errors(t *testing.T) {
+	c, _, _ := setupCLI(t)
+	err := c.Run([]string{"provider", "--type", "deepseek"})
+	if err == nil {
+		t.Fatal("--type 单独应报错")
+	}
+	if !strings.Contains(err.Error(), "--type") {
+		t.Errorf("err 应提及 --type，得到: %v", err)
+	}
+}
+
+// 10.10：--delete 无 name 报错用法
+func TestProvider_DeleteNoName_Errors(t *testing.T) {
+	c, _, _ := setupCLI(t)
+	err := c.Run([]string{"provider", "--delete"})
+	if err == nil {
+		t.Fatal("--delete 无 name 应报错")
+	}
+}
+
+// 10.11：兜底——无 args → listProviders；<name> → switchProvider
+func TestProvider_FallbackDispatch(t *testing.T) {
+	c, pm, sm := setupCLI(t)
+	pm.CreateWithEnv("foo", map[string]any{"ANTHROPIC_AUTH_TOKEN": "k"})
+
+	// 无 args → list
+	if err := c.Run([]string{"provider"}); err != nil {
+		t.Fatalf("provider（无 args）error = %v", err)
+	}
+
+	// <name> → switch
+	if err := c.Run([]string{"provider", "foo"}); err != nil {
+		t.Fatalf("provider foo error = %v", err)
+	}
+	if got := sm.GetActiveProvider(); got != "foo" {
+		t.Errorf("active provider = %q, want foo", got)
+	}
+}
+
+// 10.12：-new --type deepseek my-deepseek（短形式 + 位置参数）→ newProvider(name, type)
+func TestProvider_ShortNewTypePositional_PassesThrough(t *testing.T) {
+	c, pm, _ := setupCLI(t)
+
+	restore := mockStdin(guidedLines("deepseek"))
+	defer restore()
+
+	if err := c.Run([]string{"provider", "-new", "--type", "deepseek", "my-deepseek"}); err != nil {
+		t.Fatalf("-new --type deepseek my-deepseek error = %v", err)
+	}
+
+	got, err := pm.Get("my-deepseek")
+	if err != nil {
+		t.Fatalf("Get(my-deepseek) error = %v", err)
+	}
+	env, _ := got["env"].(map[string]any)
+	if env == nil {
+		t.Fatalf("env 字段缺失: %v", got)
+	}
+	if _, has := env["ANTHROPIC_AUTH_TOKEN"]; !has {
+		t.Errorf("env 缺 ANTHROPIC_AUTH_TOKEN: %v", env)
+	}
+}
+
+// 10.13：--list --help → 打 providerHelp，不报 mutex
+func TestProvider_ListHelp_HelpWinsOverMutex(t *testing.T) {
+	c, _, _ := setupCLI(t)
+	cap := captureStdout(t)
+
+	err := c.Run([]string{"provider", "--list", "--help"})
+	if err != nil {
+		t.Fatalf("--list --help error = %v", err)
+	}
+	out := cap()
+	if !strings.Contains(out, "--list") || !strings.Contains(out, "--new") {
+		t.Errorf("--list --help 应打 providerHelp（含 --list / --new），得到:\n%s", out)
+	}
+	// 不应报 mutex（help 优先级最高）—— 检查 mutex 报错特有的用法提示格式，
+	// providerHelp 文案顶部也含"互斥"字眼（提示而非报错），所以不能用单字判断。
+	if strings.Contains(out, "用法: ccl provider [--list | --new | --delete]") {
+		t.Errorf("--list --help 不应打 mutex 报错用法，得到:\n%s", out)
+	}
+}
+
+// 10.14：--list --template deepseek → mutex 通过 + template 优先级 → printTemplate（--list 被忽略）
+func TestProvider_ListTemplate_TemplateWins(t *testing.T) {
+	c, _, _ := setupCLI(t)
+	cap := captureStdout(t)
+
+	if err := c.Run([]string{"provider", "--list", "--template", "deepseek"}); err != nil {
+		t.Fatalf("--list --template deepseek error = %v", err)
+	}
+	out := cap()
+	// 应打印 deepseek JSON，不是 list 输出
+	if !strings.Contains(out, `"ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic"`) {
+		t.Errorf("--list --template deepseek 应打 template JSON，得到:\n%s", out)
+	}
+}
+
+// 10.15：--delete foo --type deepseek → mutex 通过 → deleteProvider("foo")，--type silently ignored
+func TestProvider_DeleteWithType_TypeIgnored(t *testing.T) {
+	c, pm, _ := setupCLI(t)
+	pm.CreateWithEnv("foo", map[string]any{"ANTHROPIC_AUTH_TOKEN": "k"})
+
+	if err := c.Run([]string{"provider", "--delete", "foo", "--type", "deepseek"}); err != nil {
+		t.Fatalf("--delete foo --type deepseek error = %v", err)
+	}
+	if pm.Exists("foo") {
+		t.Error("--delete foo --type deepseek 应删 foo")
 	}
 }

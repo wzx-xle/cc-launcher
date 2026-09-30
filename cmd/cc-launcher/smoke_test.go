@@ -445,6 +445,49 @@ func TestSmoke_ServeStatusNoDaemon(t *testing.T) {
 }
 
 // §9.1 / §9.2a：humanBytes 单位换算（直接调，避免依赖 daemon 跑）。
+
+// provider-flag-migration §11.1.c：smoke 验证短形式 runtime 真的接受（不依赖单元测试）。
+// sandbox HOME → 走 main.run 完整路径 → cli.Run → runProvider → flag.NewFlagSet 接受 -x。
+func TestSmoke_ProviderShortForms_Accepted(t *testing.T) {
+	sandboxHome(t)
+
+	// 验证 -list：等价 --list（空 providers dir → "暂无提供商配置"）
+	var err error
+	out := captureStdout(t, func() {
+		err = run([]string{"provider", "-list"})
+	})
+	if err != nil {
+		t.Fatalf("provider -list must succeed (flag.NewFlagSet accepts short form), got err: %v", err)
+	}
+	if !strings.Contains(out, "暂无提供商配置") {
+		t.Errorf("-list should print '暂无提供商配置' for empty dir, got: %q", out)
+	}
+
+	// 验证 -T：等价 --template（无 type → 列全部 7 模板）
+	out = captureStdout(t, func() {
+		err = run([]string{"provider", "-T"})
+	})
+	if err != nil {
+		t.Fatalf("provider -T must succeed, got err: %v", err)
+	}
+	for _, name := range []string{"anthropic", "deepseek", "minimax"} {
+		if !strings.Contains(out, name) {
+			t.Errorf("-T should list template %q, got: %q", name, out)
+		}
+	}
+
+	// 验证 -h：等价 --help（打 providerHelp）
+	out = captureStdout(t, func() {
+		err = run([]string{"provider", "-h"})
+	})
+	if err != nil {
+		t.Fatalf("provider -h must succeed, got err: %v", err)
+	}
+	if !strings.Contains(out, "--list") || !strings.Contains(out, "--template") {
+		t.Errorf("-h should print providerHelp (含 --list / --template)，got: %q", out)
+	}
+}
+
 func TestHumanBytes(t *testing.T) {
 	cases := []struct {
 		in   int64
