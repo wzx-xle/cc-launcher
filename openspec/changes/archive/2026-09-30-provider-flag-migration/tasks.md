@@ -95,4 +95,4 @@
 - [x] 11.1.a grep 全仓非 archive 路径：现有 `ccl provider --list / --new / --delete / --template` 引用**没误改**（CLI 表面没功能变化，只是输入更宽容）—— README.md / cmd/cc-launcher/main.go 等仍用长形式，runtime 现在两种都接受
 - [x] 11.1.b grep 全仓：mutex 报错文案 `互斥` 在 mutex 实现里出现（spec 锁定）—— internal/cli/cli.go:182, 184
 - [x] 11.1.c grep 全仓：至少一个 smoke test 触发新接受的短形式（`-list / -new / -delete / -T / -h`）—— `TestSmoke_ProviderShortForms_Accepted`（跑 `-list` / `-T` / `-h` 端到端）
-- [ ] 11.2 commit message 用简体中文：`refactor(provider): 把 ccl provider 迁到 flag.NewFlagSet（接受 -x / --x 短形式 + mutex 收紧 + 保留 --new --template 约定）`
+- [x] 11.2 commit message 用简体中文：`refactor(provider): 把 ccl provider 迁到 flag.NewFlagSet（接受 -x / --x 短形式 + mutex 收紧 + 保留 --new --template 约定）` —— 已提交 `c4b579a`
