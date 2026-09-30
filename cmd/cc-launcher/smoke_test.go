@@ -377,16 +377,16 @@ func TestSmoke_ServeStatusNoDaemon(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runServe --status must exit 0 even when no daemon, got err: %v", err)
 	}
-	if !strings.Contains(out, "  daemon  not running") {
-		t.Errorf("status must show \"  daemon  not running\" (right-aligned 8-char label), got:\n%s", out)
+	if !strings.Contains(out, "   daemon: not running") {
+		t.Errorf("status must show \"   daemon: not running\" (10-char right-aligned label with colon), got:\n%s", out)
 	}
 	portOK := strings.Contains(out, "port :4318 unreachable") ||
 		strings.Contains(out, "port :4318 in use by foreign service")
 	if !portOK {
 		t.Errorf("status must show an indented port :4318 <state> row, got:\n%s", out)
 	}
-	if !strings.Contains(out, "      db  missing") {
-		t.Errorf("status must show \"      db  missing\" (right-aligned label) when telemetry.db absent, got:\n%s", out)
+	if !strings.Contains(out, "       db: missing") {
+		t.Errorf("status must show \"       db: missing\" (right-aligned label with colon) when telemetry.db absent, got:\n%s", out)
 	}
 }
 
@@ -412,15 +412,15 @@ func TestHumanBytes(t *testing.T) {
 	}
 }
 
-// §9.1：stats.CountSessions 在 db 不存在时返回 0 + nil（status 友好）。
-func TestStats_CountSessions_Missing(t *testing.T) {
+// §9.1：stats.CountSessionsByWindow 在 db 不存在时返回 (0, 0) + nil（status 友好）。
+func TestStats_CountSessionsByWindow_Missing(t *testing.T) {
 	dir := t.TempDir()
-	n, err := stats.CountSessions(filepath.Join(dir, "nope.db"))
+	total, today, err := stats.CountSessionsByWindow(filepath.Join(dir, "nope.db"), 0)
 	if err != nil {
-		t.Fatalf("CountSessions on nonexistent db should be 0+nil, got %v", err)
+		t.Fatalf("CountSessionsByWindow on nonexistent db should be 0,0,nil, got %v", err)
 	}
-	if n != 0 {
-		t.Errorf("CountSessions should be 0, got %d", n)
+	if total != 0 || today != 0 {
+		t.Errorf("CountSessionsByWindow should be (0,0), got (%d,%d)", total, today)
 	}
 }
 
@@ -455,8 +455,8 @@ func TestSmoke_ServeStatusRunning(t *testing.T) {
 	if runErr != nil {
 		t.Fatalf("runServe --status must exit 0 when daemon simulated, got err: %v", runErr)
 	}
-	if !strings.Contains(out, "  daemon  running") {
-		t.Errorf("status must show \"  daemon  running\" (right-aligned label), got:\n%s", out)
+	if !strings.Contains(out, "   daemon: running") {
+		t.Errorf("status must show \"   daemon: running\" (right-aligned label with colon), got:\n%s", out)
 	}
 	if !strings.Contains(out, "port :4318 reachable") {
 		t.Errorf("status must show \"port :4318 reachable\" (indented), got:\n%s", out)
@@ -485,8 +485,8 @@ func TestSmoke_ServeStatusForeignService(t *testing.T) {
 	if runErr != nil {
 		t.Fatalf("runServe --status must exit 0, got err: %v", runErr)
 	}
-	if !strings.Contains(out, "  daemon  not running") {
-		t.Errorf("status must show \"  daemon  not running\" (right-aligned), got:\n%s", out)
+	if !strings.Contains(out, "   daemon: not running") {
+		t.Errorf("status must show \"   daemon: not running\" (right-aligned with colon), got:\n%s", out)
 	}
 	if !strings.Contains(out, "port :4318 in use by foreign service") {
 		t.Errorf("status must show \"port :4318 in use by foreign service\" (no pidfile), got:\n%s", out)
@@ -495,10 +495,17 @@ func TestSmoke_ServeStatusForeignService(t *testing.T) {
 
 // §D8：端口不可达 + 有 pidfile = "not running" + "stale pidfile pid=N" + "port :4318 unreachable"。
 // pidfile 存在但 daemon 已挂。
+//
+// 环境依赖：需要本机 :4318 不可达才能模拟"daemon 已挂"。若 4318 被其它进程占用，
+// probe 会判断为 reachable → 走 foreign service 分支，无法验证 stale 路径——skip。
 func TestSmoke_ServeStatusStalePidfile(t *testing.T) {
 	home := sandboxHome(t)
 
-	// 不 bind 端口（让 probe 失败）。
+	// 探 4318 是否空；空才继续，否则 skip。
+	if probeDaemonAddr() == nil {
+		t.Skipf("skip: :4318 is reachable (cannot simulate stale pidfile scenario)")
+	}
+
 	pidPath := filepath.Join(home, ".cc-launcher", "daemon.pid")
 	if err := os.MkdirAll(filepath.Dir(pidPath), 0755); err != nil {
 		t.Fatal(err)
@@ -515,8 +522,8 @@ func TestSmoke_ServeStatusStalePidfile(t *testing.T) {
 	if runErr != nil {
 		t.Fatalf("runServe --status must exit 0, got err: %v", runErr)
 	}
-	if !strings.Contains(out, "  daemon  not running") {
-		t.Errorf("status must show \"  daemon  not running\" (right-aligned), got:\n%s", out)
+	if !strings.Contains(out, "   daemon: not running") {
+		t.Errorf("status must show \"   daemon: not running\" (right-aligned with colon), got:\n%s", out)
 	}
 	if !strings.Contains(out, "stale pidfile pid=999999") {
 		t.Errorf("status must show \"stale pidfile pid=999999\", got:\n%s", out)

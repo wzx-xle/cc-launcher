@@ -125,35 +125,36 @@
 
 **状态判断矩阵**：
 
-**输出格式（label 8 字符宽右对齐 + 子字段缩进 10 空格）**：
+**输出格式（label 10 字符宽右对齐 + 冒号 + 子字段缩进 11 空格）**：
 
 ```
-  daemon  running
-          pid=N
-          port :4318 reachable
-      db  ~/.cc-launcher/telemetry.db
-          1.2 MB
-          12 sessions
+   daemon: running
+           pid=N
+           port :4318 reachable
+       db: ~/.cc-launcher/telemetry.db
+           1.2 MB
+           12 sessions (5 today)
 ```
 
 四态 daemon 矩阵：
 
 | 端口 :4318 | pidfile | daemon 行 |
 |---|---|---|
-| reachable | 存在 | `  daemon  running` / `pid=N` / `port :4318 reachable` |
-| reachable | 缺失 | `  daemon  not running` / `port :4318 in use by foreign service (no pidfile)` |
-| unreachable | 存在 | `  daemon  not running` / `stale pidfile pid=N` / `port :4318 unreachable` |
-| unreachable | 缺失 | `  daemon  not running` / `port :4318 unreachable` |
+| reachable | 存在 | `   daemon: running` / `pid=N` / `port :4318 reachable` |
+| reachable | 缺失 | `   daemon: not running` / `port :4318 in use by foreign service (no pidfile)` |
+| unreachable | 存在 | `   daemon: not running` / `stale pidfile pid=N` / `port :4318 unreachable` |
+| unreachable | 缺失 | `   daemon: not running` / `port :4318 unreachable` |
 
 DB 行：
 
-- 存在 → `      db  ~/.cc-launcher/telemetry.db` / `<size>` / `<count> sessions`（三行缩进）
-- 缺失 → `      db  missing (no telemetry yet)`（单行）
+- 存在 → `       db: ~/.cc-launcher/telemetry.db` / `<size>` / `<total> sessions (<today> today)`（三行缩进，"今日"按本地时区 00:00 起算）
+- 缺失 → `       db: missing (no telemetry yet)`（单行）
 
 > 实施期用户反馈：原始提案的 `daemon: ...` 单行格式 + `db: <path> — <size> / <count>` 单行格式
 > label 宽度不齐（`daemon:` 7 字符 / `port :4318:` 12 字符 / `db:` 3 字符），靠空格手填对齐显得凌乱；
-> 绝对路径也太长。改为上述"缩进式分组"——主行 label 固定 8 字符（先左对齐，后改为右对齐），
-> 子字段独立行。
+> 绝对路径也太长。改为"缩进式分组"——主行 label 固定 10 字符（含冒号）右对齐，
+> 子字段独立行不冒号；session count 拆为"总 + 今日"两统计（括号内联）。
+> "今日"按本地时区切分（用户感知的日历日），不是 UTC。
 
 **为什么不新增 `Store.Status()` 方法？**
 - `--status` 不需要连接 daemon（daemon 可能压根没跑），新方法会绑到 Store，跟现有 `OpenStore` 的开 WAL + 启 worker 的副作用冲突

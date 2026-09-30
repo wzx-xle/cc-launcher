@@ -234,19 +234,19 @@ func runRestoreInner(args []string) error {
 // 报告 daemon 运行时状态（port reachability + pidfile + db 文件大小 + session 数）。
 // 全部 informational，缺失连接不算 error，exit 0。
 //
-// 状态判断矩阵（design §D8）—— 缩进式分组（label 8 字符宽右对齐 + 子字段缩进 10 空格）：
+// 状态判断矩阵（design §D8）—— 缩进式分组（label 10 字符宽右对齐 + 冒号 + 子字段缩进 11 空格）：
 //
 //	端口 :4318  pidfile   输出
-//	reachable   存在        daemon  running
-//	                          pid=N
-//	                          port :4318 reachable
-//	reachable   None      daemon  not running
-//	                          port :4318 in use by foreign service (no pidfile)
-//	unreachable 存在        daemon  not running
-//	                          stale pidfile pid=N
-//	                          port :4318 unreachable
-//	unreachable None      daemon  not running
-//	                          port :4318 unreachable
+//	reachable   存在         daemon: running
+//	                           pid=N
+//	                           port :4318 reachable
+//	reachable   None       daemon: not running
+//	                           port :4318 in use by foreign service (no pidfile)
+//	unreachable 存在         daemon: not running
+//	                           stale pidfile pid=N
+//	                           port :4318 unreachable
+//	unreachable None       daemon: not running
+//	                           port :4318 unreachable
 //
 //	db 行同理：db label + path / size / count 三行缩进；missing 时只一行。
 func runStatusInner() error {
@@ -262,41 +262,51 @@ func runStatusInner() error {
 
 	switch {
 	case portReachable && pid > 0:
-		fmt.Println("  daemon  running")
-		fmt.Printf("          pid=%d\n", pid)
-		fmt.Println("          port :4318 reachable")
+		fmt.Println("   daemon: running")
+		fmt.Printf("           pid=%d\n", pid)
+		fmt.Println("           port :4318 reachable")
 	case portReachable:
-		fmt.Println("  daemon  not running")
-		fmt.Println("          port :4318 in use by foreign service (no pidfile)")
+		fmt.Println("   daemon: not running")
+		fmt.Println("           port :4318 in use by foreign service (no pidfile)")
 	case pid > 0:
-		fmt.Println("  daemon  not running")
-		fmt.Printf("          stale pidfile pid=%d\n", pid)
-		fmt.Println("          port :4318 unreachable")
+		fmt.Println("   daemon: not running")
+		fmt.Printf("           stale pidfile pid=%d\n", pid)
+		fmt.Println("           port :4318 unreachable")
 	default:
-		fmt.Println("  daemon  not running")
-		fmt.Println("          port :4318 unreachable")
+		fmt.Println("   daemon: not running")
+		fmt.Println("           port :4318 unreachable")
 	}
 
 	// db 行（缺失不算 error）
 	fi, err := os.Stat(dbPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			fmt.Println("      db  missing (no telemetry yet)")
+			fmt.Println("       db: missing (no telemetry yet)")
 			return nil
 		}
 		return fmt.Errorf("stat db 失败: %w", err)
 	}
-	fmt.Printf("      db  %s\n", shortenHomePath(dbPath))
-	count, err := stats.CountSessions(dbPath)
+	fmt.Printf("       db: %s\n", shortenHomePath(dbPath))
+	total, today, err := stats.CountSessionsByWindow(dbPath, todayStartMillis())
 	if err != nil {
 		// COUNT 失败不回 error——db 文件本身存在,只是 sqlite 读失败,仍报 size
-		fmt.Printf("          %s\n", humanBytes(fi.Size()))
-		fmt.Printf("          session count unavailable: %v\n", err)
+		fmt.Printf("           %s\n", humanBytes(fi.Size()))
+		fmt.Printf("           session count unavailable: %v\n", err)
 		return nil
 	}
-	fmt.Printf("          %s\n", humanBytes(fi.Size()))
-	fmt.Printf("          %d sessions\n", count)
+	fmt.Printf("           %s\n", humanBytes(fi.Size()))
+	fmt.Printf("           %d sessions (%d today)\n", total, today)
 	return nil
+}
+
+// todayStartMillis 返回本地时区今日 00:00 的 UnixMilli。
+//
+// "今日" 按用户感知的本地日历日切分（不是 UTC）；ccl 用户场景下本地时区合理。
+// 仅用于 `ccl serve --status` 输出"今日新增 sessions"统计。
+func todayStartMillis() int64 {
+	now := time.Now()
+	start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	return start.UnixMilli()
 }
 
 // shortenHomePath 把绝对路径缩成 ~/... 形式（仅当 prefix 命中 UserHomeDir 时）。
