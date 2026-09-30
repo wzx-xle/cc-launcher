@@ -11,7 +11,7 @@ Bump the project's git semver tag. **Claude (you) reads commits and infers the b
 - *(no subcommand)* — Claude infers bump type from commits since latest tag, presents reasoning, asks for confirmation, then runs `bin/bump-version.sh bump <type>`
 - `current` — show latest tag
 - `list` — list all tags
-- `bump <major|minor|patch> [--yes]` — force a specific bump type (skip inference)
+- `bump <major|minor|patch> [--yes] [--push]` — force a specific bump type (skip inference). `--push` opt-in: also push commits + tag to origin (atomic). Default = local-only tag, push is manual.
 - `check` — verify working tree is clean
 - `help` — show usage
 
@@ -23,7 +23,7 @@ Bump the project's git semver tag. **Claude (you) reads commits and infers the b
 
 2. **For `current` / `list` / `check` / `help`**: pass through to `bin/bump-version.sh` directly, no inference needed.
 
-3. **For `bump <type> [--yes]`**: pass through to `bin/bump-version.sh bump <type> [--yes]` — the user explicitly chose the type, no inference.
+3. **For `bump <type> [--yes] [--push]`**: pass through to `bin/bump-version.sh bump <type> [--yes] [--push]` — the user explicitly chose the type, no inference. Default is local-only tag (no push); `--push` is an opt-in to atomic push (commits + tag, tag failure rolls back local tag).
 
 4. **For the default (inference) flow**:
 
@@ -77,9 +77,9 @@ Bump the project's git semver tag. **Claude (you) reads commits and infers the b
 
    g. **Run the bump**:
       ```bash
-      ./bin/bump-version.sh bump <chosen-type>
+      ./bin/bump-version.sh bump <chosen-type> [--push]
       ```
-      The script handles its own working-tree check, confirmation, `git tag`, `git push`. Do NOT pass `--yes` here — the user already confirmed via AskUserQuestion, but the script's own confirmation gives an extra chance to abort.
+      The script handles its own working-tree check + confirmation + local tag creation. Default = no push. Add `--push` if the user explicitly chose to push as part of the bump (rare; usually push is done separately via `git push origin <branch> --follow-tags`). Do NOT pass `--yes` here — the user already confirmed via AskUserQuestion, but the script's own confirmation gives an extra chance to abort.
 
    h. **Report** the script's output verbatim (or any error).
 

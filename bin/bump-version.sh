@@ -4,7 +4,9 @@
 # 子命令:
 #   current                     显示当前版本（最近 tag，无 tag 时 v0.0.0）
 #   list                        列已有 tag（按版本号倒序）
-#   bump <major|minor|patch>    bump 并推 origin（交互确认 / --yes 跳过）
+#   bump <major|minor|patch> [--yes] [--push]
+#                                默认只本地打 tag；加 --push 才推 origin
+#                                --push 是 atomic：commits → tag，tag 失败 rollback
 #   check                       验证 working tree 干净（无未提交修改）
 #   help                        用法
 #
@@ -15,7 +17,10 @@
 #   - 版本号唯一源是 git tag——不维护内部 version 文件
 #   - bump 由 archive 完成后人工触发；归档 ≠ bump
 #   - bump 类型推断不放在脚本里（slash command .claude/commands/bump-version.md 让 Claude
-#     自己读 commits 推断）+ 脚本仅负责打 tag + 推
+#     自己读 commits 推断）+ 脚本负责打 tag（默认）+ 可选 push（--push）
+#   - **保守默认**（2026-09-30 改）：脚本不主动 push——push 是对外行为，由人显式决定；
+#     默认只本地打 tag + 打印推送命令（git push origin <branch> <tag> 或 --follow-tags）。
+#     --push 显式 opt-in 时跑 atomic push：commits → tag → tag 失败 rollback
 #   - pre-release (v0.1.0-rc1) 当前不支持——v0.x 阶段默认 stable
 set -eu
 
@@ -25,17 +30,19 @@ usage() {
 用法: $PROG <子命令> [参数]
 
 子命令:
-    current                          显示当前版本
-    list                             列已有 tag
-    bump <major|minor|patch> [--yes] bump 并推 origin
-    check                            验证 working tree 干净
-    help                             显示本帮助
+    current                                  显示当前版本
+    list                                     列已有 tag
+    bump <major|minor|patch> [--yes] [--push]
+                                              默认本地打 tag；--push 同步推 commits + tag
+    check                                    验证 working tree 干净
+    help                                     显示本帮助
 
 示例:
     $PROG current
     $PROG list
-    $PROG bump minor
-    $PROG bump patch --yes
+    $PROG bump minor                          # 仅本地打 tag
+    $PROG bump minor --push                   # 打 tag + atomic push
+    $PROG bump patch --yes --push             # 同上，跳过确认
 EOF
 }
 
@@ -77,10 +84,11 @@ check_clean() {
     echo "✓ working tree 干净"
 }
 
-# bump <type> --<yes>
+# bump <type> [--yes] [--push]
 do_bump() {
     bump_type="$1"
     skip_confirm="${2:-false}"
+    do_push="${3:-false}"
 
     current=$(current_tag)
     if [ -z "$current" ]; then
@@ -120,9 +128,42 @@ do_bump() {
         return 1
     fi
 
+    # 永远先打本地 tag
     git tag "$new_tag"
-    git push origin "$new_tag"
-    echo "✓ 已推 $new_tag 到 origin"
+
+    if [ "$do_push" = "true" ]; then
+        # --push opt-in：atomic push（commits → tag，tag 失败 rollback）
+        branch=$(git branch --show-current 2>/dev/null || echo "")
+        if [ -z "$branch" ]; then
+            echo "✗ 无法获取当前分支——tag 已打本地但 push 中止" >&2
+            echo "  请手动 'git push origin <branch> $new_tag' 完成发布" >&2
+            return 1
+        fi
+
+        if ! git push origin "$branch"; then
+            echo "✗ commits push 失败——tag 已打本地但未推" >&2
+            echo "  请手动 'git push origin $branch $new_tag' 完成发布" >&2
+            return 1
+        fi
+
+        if ! git push origin "$new_tag"; then
+            # rollback 本地 tag——commits 已在 origin，留给用户手动重试推 tag
+            git tag -d "$new_tag" >/dev/null 2>&1
+            echo "✗ tag push 失败——已 rollback 本地 tag $new_tag" >&2
+            echo "  commits 已在 origin，可手动 'git push origin $new_tag' 重试" >&2
+            return 1
+        fi
+
+        echo "✓ 已打 tag $new_tag + 推 commits + tag 到 origin"
+    else
+        # 默认：本地 bump，不推送（保守）
+        branch=$(git branch --show-current 2>/dev/null || echo "<unknown>")
+        echo "✓ 已打本地 tag $new_tag（未推送）"
+        echo "  推送:"
+        echo "    git push origin $branch $new_tag"
+        echo "    或（git ≥1.8.3，自动推 commits + 关联 tag）："
+        echo "    git push origin $branch --follow-tags"
+    fi
 }
 
 # 主入口
@@ -135,10 +176,16 @@ case "$subcmd" in
         type="${1:?需要 major|minor|patch}"
         shift || true
         skip="false"
-        if [ "${1:-}" = "--yes" ]; then
-            skip="true"
-        fi
-        do_bump "$type" "$skip"
+        push="false"
+        while [ "${1:-}" != "" ]; do
+            case "$1" in
+                --yes) skip="true" ;;
+                --push) push="true" ;;
+                *) echo "未知选项: $1" >&2; usage >&2; exit 1 ;;
+            esac
+            shift || true
+        done
+        do_bump "$type" "$skip" "$push"
         ;;
     check) check_clean ;;
     list) list_tags ;;
