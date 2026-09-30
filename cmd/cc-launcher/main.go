@@ -46,11 +46,14 @@ func main() {
 }
 
 func run(args []string) error {
-	// 顶层 --help：只在 args[0] 是 help 旗标时触发（避免误吞 `ccl provider --help`）。
+	// 顶层 --help / --version：只在 args[0] 是 help/version 旗标时触发（避免误吞子命令的同名旗标）。
 	if len(args) > 0 {
 		switch args[0] {
 		case "-h", "--help", "help":
 			fmt.Println(topHelp)
+			return nil
+		case "-V", "--version", "version":
+			printVersion()
 			return nil
 		case "serve":
 			return runServe(args[1:])

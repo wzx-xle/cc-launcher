@@ -23,9 +23,20 @@ EOF
     exit 0
 }
 
+# version_ldflags 输出注入 main.Version / main.Commit / main.BuildTime 的 -ldflags 串。
+# 未在 git 仓库跑（或无 tag）时 fallback 到 dev / unknown——`go build` 直接编译同源。
+version_ldflags() {
+    local version commit build_time
+    version=$(git describe --tags --dirty 2>/dev/null || echo "dev")
+    commit=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+    build_time=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    echo "-s -w -X main.Version=$version -X main.Commit=$commit -X main.BuildTime=$build_time"
+}
+
 build() {
     echo "==> 编译 $BINARY ..."
-    go build -ldflags="-s -w" -o "$BINARY" ./cmd/cc-launcher/
+    # shellcheck disable=SC2046
+    go build -ldflags="$(version_ldflags)" -o "$BINARY" ./cmd/cc-launcher/
     echo "==> 完成: $(pwd)/$BINARY"
 }
 
@@ -58,7 +69,8 @@ cross_build() {
     local out="dist/${BINARY}-${goos}-${goarch}${ext}"
     echo "==> 交叉编译 ${goos}/${goarch} ..."
     mkdir -p dist
-    GOOS="$goos" GOARCH="$goarch" go build -ldflags="-s -w" -o "$out" ./cmd/cc-launcher/
+    # shellcheck disable=SC2046
+    GOOS="$goos" GOARCH="$goarch" go build -ldflags="$(version_ldflags)" -o "$out" ./cmd/cc-launcher/
     echo "==> 完成: $(pwd)/$out"
 }
 
