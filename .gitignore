@@ -1,6 +1,7 @@
 /cc-launcher
 /.claude/
 /dist/
+/dbinspect
 *.swp
 *.swo
 *~
