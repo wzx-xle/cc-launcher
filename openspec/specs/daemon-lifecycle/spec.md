@@ -123,23 +123,23 @@ The daemon is an OPTIONAL enhancement for usage statistics. If the daemon fails 
 
 #### Scenario: status when daemon is running
 - **WHEN** user runs `ccl serve --status` and `daemon.pid` exists with PID N and `:4318` is reachable
-- **THEN** stdout shows a `daemon` row with `pid=N` and `port :4318 reachable` indented under `daemon  running`; plus a `db` row with the db path, size, and session count on three indented sub-lines
+- **THEN** stdout shows a right-aligned 8-char `daemon` label followed by `pid=N` and `port :4318 reachable` indented 10 spaces under `  daemon  running`; plus a right-aligned `db` label with the db path, size, and session count on three indented sub-lines
 
 #### Scenario: status when no daemon but port is held by foreign service
 - **WHEN** user runs `ccl serve --status` and `daemon.pid` does NOT exist but `:4318` is reachable
-- **THEN** stdout shows `daemon  not running` with `port :4318 in use by foreign service (no pidfile)` indented under it; plus a `db` row
+- **THEN** stdout shows `  daemon  not running` with `port :4318 in use by foreign service (no pidfile)` indented under it; plus a `db` row
 
 #### Scenario: status when stale pidfile (crashed daemon)
 - **WHEN** user runs `ccl serve --status` and `daemon.pid` exists but `:4318` is unreachable
-- **THEN** stdout shows `daemon  not running` with `stale pidfile pid=N` and `port :4318 unreachable` indented under it; plus a `db` row
+- **THEN** stdout shows `  daemon  not running` with `stale pidfile pid=N` and `port :4318 unreachable` indented under it; plus a `db` row
 
 #### Scenario: status when nothing is running
 - **WHEN** user runs `ccl serve --status` and `daemon.pid` does NOT exist and `:4318` is unreachable
-- **THEN** stdout shows `daemon  not running` with `port :4318 unreachable` indented under it; plus a `db` row
+- **THEN** stdout shows `  daemon  not running` with `port :4318 unreachable` indented under it; plus a `db` row
 
 #### Scenario: status when db file is missing
 - **WHEN** user runs `ccl serve --status` and `~/.cc-launcher/telemetry.db` does NOT exist
-- **THEN** stdout shows the daemon portion as above and the db row as a single `db      missing (no telemetry yet)` line; exit code is 0
+- **THEN** stdout shows the daemon portion as above and the db row as a single `      db  missing (no telemetry yet)` line; exit code is 0
 
 #### Scenario: status is mutually exclusive with stop and restore
 - **WHEN** user runs `ccl serve --status --stop` (or any combination with --restore)

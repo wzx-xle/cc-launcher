@@ -364,7 +364,7 @@ func TestSmoke_RestoreSubcommandRemoved(t *testing.T) {
 	}
 }
 
-// §9.6：`ccl serve --status` 在 daemon 没跑时输出"daemon  not running" + 缩进子行 + db 行。
+// §9.6：`ccl serve --status` 在 daemon 没跑时输出右对齐 label + 缩进子行 + db 行。
 //
 // 端口行内容依赖环境：本机 :4318 空 → "port :4318 unreachable"；被其它进程占 →
 // "port :4318 in use by foreign service (no pidfile)"。两者都表示"daemon 没跑"，都是合法输出。
@@ -377,16 +377,16 @@ func TestSmoke_ServeStatusNoDaemon(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runServe --status must exit 0 even when no daemon, got err: %v", err)
 	}
-	if !strings.Contains(out, "daemon  not running") {
-		t.Errorf("status must show \"daemon  not running\" (8-char label width), got:\n%s", out)
+	if !strings.Contains(out, "  daemon  not running") {
+		t.Errorf("status must show \"  daemon  not running\" (right-aligned 8-char label), got:\n%s", out)
 	}
 	portOK := strings.Contains(out, "port :4318 unreachable") ||
 		strings.Contains(out, "port :4318 in use by foreign service")
 	if !portOK {
 		t.Errorf("status must show an indented port :4318 <state> row, got:\n%s", out)
 	}
-	if !strings.Contains(out, "db      missing") {
-		t.Errorf("status must show \"db      missing\" (indented 8-char label) when telemetry.db absent, got:\n%s", out)
+	if !strings.Contains(out, "      db  missing") {
+		t.Errorf("status must show \"      db  missing\" (right-aligned label) when telemetry.db absent, got:\n%s", out)
 	}
 }
 
@@ -455,8 +455,8 @@ func TestSmoke_ServeStatusRunning(t *testing.T) {
 	if runErr != nil {
 		t.Fatalf("runServe --status must exit 0 when daemon simulated, got err: %v", runErr)
 	}
-	if !strings.Contains(out, "daemon  running") {
-		t.Errorf("status must show \"daemon  running\", got:\n%s", out)
+	if !strings.Contains(out, "  daemon  running") {
+		t.Errorf("status must show \"  daemon  running\" (right-aligned label), got:\n%s", out)
 	}
 	if !strings.Contains(out, "port :4318 reachable") {
 		t.Errorf("status must show \"port :4318 reachable\" (indented), got:\n%s", out)
@@ -485,8 +485,8 @@ func TestSmoke_ServeStatusForeignService(t *testing.T) {
 	if runErr != nil {
 		t.Fatalf("runServe --status must exit 0, got err: %v", runErr)
 	}
-	if !strings.Contains(out, "daemon  not running") {
-		t.Errorf("status must show \"daemon  not running\", got:\n%s", out)
+	if !strings.Contains(out, "  daemon  not running") {
+		t.Errorf("status must show \"  daemon  not running\" (right-aligned), got:\n%s", out)
 	}
 	if !strings.Contains(out, "port :4318 in use by foreign service") {
 		t.Errorf("status must show \"port :4318 in use by foreign service\" (no pidfile), got:\n%s", out)
@@ -515,8 +515,8 @@ func TestSmoke_ServeStatusStalePidfile(t *testing.T) {
 	if runErr != nil {
 		t.Fatalf("runServe --status must exit 0, got err: %v", runErr)
 	}
-	if !strings.Contains(out, "daemon  not running") {
-		t.Errorf("status must show \"daemon  not running\", got:\n%s", out)
+	if !strings.Contains(out, "  daemon  not running") {
+		t.Errorf("status must show \"  daemon  not running\" (right-aligned), got:\n%s", out)
 	}
 	if !strings.Contains(out, "stale pidfile pid=999999") {
 		t.Errorf("status must show \"stale pidfile pid=999999\", got:\n%s", out)
