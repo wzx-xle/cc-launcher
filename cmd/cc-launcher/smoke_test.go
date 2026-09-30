@@ -347,6 +347,60 @@ func TestSmoke_ServeRestoreStatusMutex(t *testing.T) {
 	}
 }
 
+// §restart flag: --restart 与 --stop / --restore / --status 三个 flag 各自互斥。
+func TestSmoke_ServeRestartStopMutex(t *testing.T) {
+	sandboxHome(t)
+	var err error
+	_ = captureStderr(t, func() {
+		err = runServe([]string{"--restart", "--stop"})
+	})
+	if err == nil {
+		t.Fatalf("runServe --restart --stop must return error (mutex violation)")
+	}
+}
+
+func TestSmoke_ServeRestartRestoreMutex(t *testing.T) {
+	sandboxHome(t)
+	var err error
+	_ = captureStderr(t, func() {
+		err = runServe([]string{"--restart", "--restore"})
+	})
+	if err == nil {
+		t.Fatalf("runServe --restart --restore must return error (mutex violation)")
+	}
+}
+
+func TestSmoke_ServeRestartStatusMutex(t *testing.T) {
+	sandboxHome(t)
+	var err error
+	_ = captureStderr(t, func() {
+		err = runServe([]string{"--restart", "--status"})
+	})
+	if err == nil {
+		t.Fatalf("runServe --restart --status must return error (mutex violation)")
+	}
+}
+
+// §restart flag: --restart 无旧 daemon 时 → 等价于 fork 新 daemon（即使 fork 失败也不应 panic）。
+//
+// 环境依赖：fork 出去的是 fork 函数本身（不依赖：原 runServe 写 pidfile / 探端口）。在 sandbox HOME 下
+// fork 可能因 PATH 等问题失败——只断言至少能调到退出（不 panic），不强求 fork 成功。
+func TestSmoke_ServeRestartNoOldDaemon(t *testing.T) {
+	sandboxHome(t)
+	// 不预创建 pidfile → restartDaemon 应走"no running daemon"分支并尝试 fork。
+	// fork 可能失败（sandbox 环境）→ 期望返回 error，但不应 panic。
+	var err error
+	out := captureStdout(t, func() {
+		err = runServe([]string{"--restart"})
+	})
+	// 至少要看到 "no running daemon" 输出（说明正确进入 restart 分支）
+	if !strings.Contains(out, "no running daemon") && !strings.Contains(out, "old daemon stopped") {
+		t.Errorf("restart output must mention daemon state, got:\n%s", out)
+	}
+	// 无论 fork 成功与否（环境依赖）都不 panic；只验证 exit 行为可控。
+	_ = err // err 可能非 nil（fork 失败）也可接受——sandbox 环境限制
+}
+
 // §7.7：`ccl stop` 已砍 → 走 main 路由的 cli.Run 兜底分支报"未知子命令"。
 func TestSmoke_StopSubcommandRemoved(t *testing.T) {
 	sandboxHome(t)

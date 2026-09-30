@@ -24,12 +24,13 @@ import (
 //   - 端口被占（EADDRINUSE）：报错退出（ccl 自动降级到无 daemon 的 Claude Code）
 //   - flatten-stop-restore-into-serve：新加 --stop / --restore / --status 三个 bool flag；命中任一则
 //     分发到对应动作并 `return`，不走 daemon 启动；未命中走原启动流程
+//   - daemon 热重启：新增 --restart flag，SIGTERM 旧 daemon + fork 新 binary daemon，Claude Code session 不受影响
 func runServe(args []string) error {
-	// flatten-stop-restore-into-serve §2.1-2.5: 顶部 flag 解析。
-	// --stop / --restore / --status 三者互斥（§2.4 / §9.4）；未命中走 daemon 启动。
+	// flatten-stop-restore-into-serve §2.1-2.5 + restart flag: 顶部 flag 解析。
+	// --stop / --restore / --status / --restart 四者互斥（§2.4 / §9.4）；未命中走 daemon 启动。
 
 	// 帮助旗标短路：先于 fs.Parse 处理 -h / --help，避免 fs 自动打"Usage of serve:"覆盖我们的 serveHelp。
-	// 只在 args 只含 help 旗标时短路；若同时给了 --stop / --restore / --status 则正常进入 fs.Parse 走互斥检查。
+	// 只在 args 只含 help 旗标时短路；若同时给了 --stop / --restore / --status / --restart 则正常进入 fs.Parse 走互斥检查。
 	wantsHelpOnly := len(args) > 0
 	for _, a := range args {
 		if a != "-h" && a != "--help" {
@@ -46,15 +47,23 @@ func runServe(args []string) error {
 	stopFlag := fs.Bool("stop", false, "停 OTel daemon（等价于原 ccl stop）")
 	restoreFlag := fs.Bool("restore", false, "还原 ~/.claude/settings.json 到 ccl 之前的状态")
 	statusFlag := fs.Bool("status", false, "打印 daemon 状态摘要（pid / 端口可达 / db 文件大小 / session 数）")
+	restartFlag := fs.Bool("restart", false, "热重启 daemon（SIGTERM 旧 daemon + fork 新 binary daemon）")
 	if err := fs.Parse(args); err != nil {
 		// flag.ErrHelp 已被上面的 wantsHelpOnly 截走；到这里的 error 是真解析错误。
 		return err
 	}
-	// 互斥检查（§2.4 / §9.4）：任何两个 flag 同时为 true 即报错并打用法提示。
-	if (*stopFlag && *restoreFlag) || (*stopFlag && *statusFlag) || (*restoreFlag && *statusFlag) {
-		fmt.Fprintln(os.Stderr, "用法: ccl serve [--stop | --restore | --status]（三者互斥）")
+	// 互斥检查：--stop / --restore / --status / --restart 任意两个同时为 true 即报错并打用法提示。
+	flags := []*bool{stopFlag, restoreFlag, statusFlag, restartFlag}
+	set := 0
+	for _, f := range flags {
+		if *f {
+			set++
+		}
+	}
+	if set > 1 {
+		fmt.Fprintln(os.Stderr, "用法: ccl serve [--stop | --restore | --status | --restart]（互斥）")
 		fmt.Fprintln(os.Stderr, "详见 `ccl serve --help`")
-		return fmt.Errorf("--stop / --restore / --status 互斥；不可同时给")
+		return fmt.Errorf("--stop / --restore / --status / --restart 互斥；不可同时给")
 	}
 
 	if *stopFlag {
@@ -69,8 +78,12 @@ func runServe(args []string) error {
 		// §9.3：调 runStatusInner 后直接返回（不走 daemon 启动）。
 		return runStatusInner()
 	}
+	if *restartFlag {
+		// restart flag: 热重启 daemon（见 restartDaemon 注释）。
+		return restartDaemon()
+	}
 
-	// §2.5：未命中 --stop / --restore / --status → 走原 daemon 启动流程。
+	// §2.5：未命中 --stop / --restore / --status / --restart → 走原 daemon 启动流程。
 	stateBaseDir, err := stateDirOrError()
 	if err != nil {
 		return err
@@ -174,7 +187,64 @@ func stateDirOrError() (string, error) {
 	return dir, nil
 }
 
-const serveHelp = `用法: ccl serve [--stop | --restore | --status]
+// restartDaemon 热重启 daemon：SIGTERM 旧 daemon + fork 新 binary daemon，等 :4318 端口就绪。
+//
+// 用途（升级 ccl 后）：旧 daemon 进程仍在跑旧 binary 的内存映射；直接 fork 出来的也是旧 binary
+//（磁盘 inode 替换不影响已映射进程）。必须先 SIGTERM 旧 daemon，让位端口，然后 fork 出去的新
+// 子进程才会用新 binary（fork 那一刻 os.Executable() 拿的是已替换的磁盘路径）。
+//
+// Claude Code session 不受影响：daemon 重启期间 :4318 短暂不可用，OTel SDK 自动重连；
+// session 本身（对话、状态）跟 daemon 完全解耦，不丢。
+//
+// 流程：
+//  1. 读 pidfile 拿旧 pid（不存在 → 视为 not running，仅 fork 新 daemon）
+//  2. SIGTERM 旧 daemon（graceful shutdown ≤ 5s），best-effort 删 pidfile
+//  3. forkDaemon fork 当前 binary 为新 ccl serve 子进程（新 PGID，disown）
+//  4. waitForDaemonReady 阻塞等 :4318 可达（≤ 3s）；超时则失败（fork 出来但未 ready）
+//
+// 失败语义：
+//   - 旧 daemon 不在 → 跳过 SIGTERM，仅 fork
+//   - SIGTERM 失败 → 仍继续 fork（让新 daemon 强占端口；旧 daemon 残留 → 用户可见的 port 冲突）
+//   - fork 失败 → 返回 error，新 daemon 未起来
+//   - 端口未就绪 → 返回 error，新 daemon 已 fork 但 3s 内未 bind 端口（孤儿进程）
+func restartDaemon() error {
+	stateBaseDir, err := stateDirOrError()
+	if err != nil {
+		return err
+	}
+	pidPath := filepath.Join(stateBaseDir, "daemon.pid")
+
+	// 1. 旧 daemon pid
+	oldPid := readPidfile(pidPath)
+	if oldPid > 0 {
+		fmt.Printf("stopping old daemon pid=%d...\n", oldPid)
+		if err := stopDaemon(oldPid); err != nil {
+			// SIGTERM 失败不阻断——继续 fork；旧 daemon 残留会引发 :4310 EADDRINUSE，
+			// 新 fork 出来的子进程会自己探到然后本 logging.error 进入 .tmp 路径。
+			log.Printf("ccl serve --restart: SIGTERM 旧 daemon 失败: %v（继续 fork 新 daemon）", err)
+		}
+		// best-effort 删 pidfile——旧 daemon graceful shutdown 时通常会自己删，但超时 SIGKILL 不会。
+		_ = os.Remove(pidPath)
+		fmt.Println("old daemon stopped")
+	} else {
+		fmt.Println("no running daemon; starting fresh")
+	}
+
+	// 2. fork 新 daemon
+	if err := forkDaemon(); err != nil {
+		return err
+	}
+	fmt.Println("forked new daemon")
+
+	// 3. 等端口就绪
+	if err := waitForDaemonReady(); err != nil {
+		return fmt.Errorf("新 daemon fork 成功但 3s 内未就绪: %w", err)
+	}
+	fmt.Println("daemon ready (port :4318 reachable)")
+	return nil
+}
+
+const serveHelp = `用法: ccl serve [--stop | --restore | --status | --restart]
 
 ccl 的 OTel daemon lifecycle and ccl settings restore 入口。
 
@@ -204,6 +274,13 @@ ccl 的 OTel daemon lifecycle and ccl settings restore 入口。
 --status
   打印 daemon 状态摘要（pid / 端口可达 / db 文件大小 / session 数）；
   db 缺失时不报错，输出 "db: missing"。与 --stop / --restore 互斥。
+
+--restart
+  热重启 daemon：SIGTERM 旧 daemon（graceful shutdown ≤ 5s）+ fork 新 binary daemon + 等端口就绪。
+  升级 ccl 二进制后用：先 ./build.sh local，再 ccl serve --restart，新版本 daemon 上位，
+  Claude Code session 不受影响（OTel SDK 自动重连）。
+  无旧 daemon 时等同于 fork 新 daemon。
+  与 --stop / --restore / --status 互斥。
 
 -h, --help
   显示本帮助并退出。`

@@ -328,9 +328,19 @@ ccl  # daemon 自动加上 auth 头
 ccl serve --stop       # 优雅停 daemon（5s 内 graceful shutdown）
 ccl serve --restore    # 还原 settings.json 到 ccl 之前的状态（删 CC_ORIG_* + FORWORD_* + ccl 注入的默认）
 ccl serve --status     # 打印 daemon 状态摘要（pid / 端口可达 / db 文件大小 / session 数）
+ccl serve --restart    # 热重启 daemon（升级 ccl 二进制后用，Claude Code session 不受影响）
 ```
 
 `ccl serve --restore` 是**不可逆**操作（spec 明确）。会先备份到 `~/.cc-launcher/backups/settings-<时间戳>.json`。
+
+### 升级 ccl 二进制
+
+```bash
+./build.sh local       # 替换 ~/.local/bin/cc-launcher
+ccl serve --restart    # 旧 daemon graceful shutdown + fork 新 binary daemon 上位
+```
+
+`--restart` 让新版本 daemon 上位而不打断 Claude Code session（OTel SDK 间隙自动重连，session 本身跟 daemon 完全解耦）。
 
 ### 文件位置
 
