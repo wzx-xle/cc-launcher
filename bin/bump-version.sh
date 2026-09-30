@@ -1,82 +1,149 @@
-#!/usr/bin/env bash
-# bump-version.sh — 用 git tag 推进 semver 版本号（v0.x.y 形式）
+#!/bin/sh
+# bump-version.sh — 推进 semver 版本号（v0.x.y）
 #
-# 用法:
-#   bump-version.sh <major|minor|patch>          # 交互确认后推 origin
-#   bump-version.sh --list                       # 列已有 tag（按版本号倒序）
-#   bump-version.sh <type> --yes                 # 跳过交互确认（脚本调用）
+# 子命令:
+#   current                     显示当前版本（最近 tag，无 tag 时 v0.0.0）
+#   list                        列已有 tag（按版本号倒序）
+#   bump <major|minor|patch>    bump 并推 origin（交互确认 / --yes 跳过）
+#   check                       验证 working tree 干净（无未提交修改）
+#   help                        用法
 #
-# 设计意图:
-#   - 版本号唯一源是 git tag——不维护 internal/version.go 等二次源
-#   - bump 由 archive 完成后人工触发；归档 ≠ bump（archive 是 OpenSpec 节奏，bump 是 release 节奏）
-#   - pre-release 标签 (v0.1.0-rc1) 当前不支持——v0.x 阶段默认 stable
-set -euo pipefail
+# 跨 OS 兼容: POSIX sh 写法——macOS / Linux / BSD / Git Bash on Windows 都跑。
+# 不依赖 bash 特性（不用 [[ =~ ]] / read -p / <()）。
+#
+# 设计:
+#   - 版本号唯一源是 git tag——不维护内部 version 文件
+#   - bump 由 archive 完成后人工触发；归档 ≠ bump
+#   - pre-release (v0.1.0-rc1) 当前不支持——v0.x 阶段默认 stable
+set -eu
 
-# 当前最新 tag（按版本号语义排序）；无 tag 时 fallback 到 v0.0.0
-current_tag() {
-    git tag -l 'v*.*.*' --sort=-v:refname | head -1 || true
+PROG=$(basename "$0")
+usage() {
+    cat <<EOF
+用法: $PROG <子命令> [参数]
+
+子命令:
+    current                          显示当前版本
+    list                             列已有 tag
+    bump <major|minor|patch> [--yes] bump 并推 origin
+    check                            验证 working tree 干净
+    help                             显示本帮助
+
+示例:
+    $PROG current
+    $PROG list
+    $PROG bump minor
+    $PROG bump patch --yes
+EOF
 }
 
-# 列已有 tag（debug 用）
+# 列出所有 vX.Y.Z tag（按版本号倒序）
 list_tags() {
     git tag -l 'v*.*.*' --sort=-v:refname
 }
 
-# 解析当前 tag 为 major / minor / patch，输出空格分隔
-parse_current() {
-    local current="${1:-v0.0.0}"
-    # 兜底: 无 tag 时 current 为空，用 v0.0.0
-    if [ -z "$current" ]; then
-        echo "0 0 0"
-        return
-    fi
-    local stripped="${current#v}"
-    # 取前 3 段 (major.minor.patch)，忽略 pre-release / build metadata
-    local mm="${stripped%%-*}"   # 去掉 -rc1 等
-    local mp="${mm%%+*}"          # 去掉 +build
-    echo "${mp//./ }"
+# 当前最新 tag（无 tag 时返回空）
+current_tag() {
+    list_tags | head -1
 }
 
-if [ "${1:-}" = "--list" ]; then
-    list_tags
-    exit 0
-fi
+# 解析当前 tag 为 major minor patch（空格分隔输出，便于 read 切分）
+# 入参: vX.Y.Z 或空（fallback v0.0.0）
+parse_current() {
+    current="${1:-v0.0.0}"
+    if [ -z "$current" ]; then
+        current="v0.0.0"
+    fi
+    # 去掉 v 前缀 + pre-release (-rc1) + build metadata (+meta)
+    stripped="${current#v}"
+    stripped="${stripped%%-*}"   # 去掉 -rc1
+    stripped="${stripped%%+*}"   # 去掉 +meta
+    # 用空格分隔三段（POSIX read 按 IFS 切分）；`tr` 跨 OS 兼容
+    echo "$stripped" | tr '.' ' '
+}
 
-bump="${1:?需要参数: major|minor|patch [--yes]}"
-skip_confirm=false
-[ "${2:-}" = "--yes" ] && skip_confirm=true
+# 验证 working tree 干净——bump 之前不应该有未提交修改（避免 tag 标错状态）
+check_clean() {
+    if ! git diff --quiet HEAD 2>/dev/null; then
+        echo "✗ working tree 有未提交修改，请先 commit 或 stash" >&2
+        return 1
+    fi
+    if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+        echo "✗ working tree 有未跟踪文件，请先清理或 commit" >&2
+        return 1
+    fi
+    echo "✓ working tree 干净"
+}
 
-current=$(current_tag)
-if [ -z "$current" ]; then
-    echo "当前无 tag——假设起点 v0.0.0"
-    current="v0.0.0"
-fi
+# bump <type> --<yes>
+do_bump() {
+    bump_type="$1"
+    skip_confirm="${2:-false}"
 
-# 解析当前版本
-read -r major minor patch < <(parse_current "$current")
+    current=$(current_tag)
+    if [ -z "$current" ]; then
+        echo "当前无 tag——假设起点 v0.0.0"
+        current="v0.0.0"
+    fi
 
-case "$bump" in
-    major) major=$((major+1)); minor=0; patch=0 ;;
-    minor) minor=$((minor+1)); patch=0 ;;
-    patch) patch=$((patch+1)) ;;
+    # 解析当前 major.minor.patch 到临时文件（POSIX 无数组）
+    parse_current "$current" > /tmp/.bump-ver-$$
+    read -r major minor patch < /tmp/.bump-ver-$$
+    rm -f /tmp/.bump-ver-$$
+
+    case "$bump_type" in
+        major) major=$((major + 1)); minor=0; patch=0 ;;
+        minor) minor=$((minor + 1)); patch=0 ;;
+        patch) patch=$((patch + 1)) ;;
+        *)
+            echo "未知 bump 类型: $bump_type（只支持 major|minor|patch）" >&2
+            return 1
+            ;;
+    esac
+
+    new_tag="v${major}.${minor}.${patch}"
+    echo "$current → $new_tag"
+
+    if [ "$skip_confirm" != "true" ]; then
+        printf "%s" "确认打 tag $new_tag? [y/N] "
+        read -r reply
+        case "$reply" in
+            y|Y|yes|YES) ;;
+            *) echo "取消"; return 1 ;;
+        esac
+    fi
+
+    if ! check_clean >/dev/null 2>&1; then
+        echo "✗ working tree 不干净——拒绝 bump（用 git status 看）" >&2
+        return 1
+    fi
+
+    git tag "$new_tag"
+    git push origin "$new_tag"
+    echo "✓ 已推 $new_tag 到 origin"
+}
+
+# 主入口
+subcmd="${1:-help}"
+shift || true
+
+case "$subcmd" in
+    current) current_tag ;;
+    bump)
+        type="${1:?需要 major|minor|patch}"
+        shift || true
+        skip="false"
+        if [ "${1:-}" = "--yes" ]; then
+            skip="true"
+        fi
+        do_bump "$type" "$skip"
+        ;;
+    check) check_clean ;;
+    list) list_tags ;;
+    help|-h|--help) usage ;;
     *)
-        echo "未知 bump 类型: $bump（只支持 major|minor|patch）" >&2
+        echo "未知子命令: $subcmd" >&2
+        usage >&2
         exit 1
         ;;
 esac
-
-new_tag="v${major}.${minor}.${patch}"
-
-echo "$current → $new_tag"
-
-if [ "$skip_confirm" = false ]; then
-    read -rp "确认打 tag $new_tag? [y/N] " reply
-    if [[ ! "$reply" =~ ^[Yy]$ ]]; then
-        echo "取消"
-        exit 1
-    fi
-fi
-
-git tag "$new_tag"
-git push origin "$new_tag"
-echo "✓ 已推 $new_tag 到 origin"

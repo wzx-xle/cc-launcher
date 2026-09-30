@@ -25,11 +25,18 @@ EOF
 
 # version_ldflags 输出注入 main.Version / main.Commit / main.BuildTime 的 -ldflags 串。
 # 未在 git 仓库跑（或无 tag）时 fallback 到 dev / unknown——`go build` 直接编译同源。
+#
+# 跨 OS 兼容:
+#   - date 不加引号（macOS BSD date 把 "%Y" 当字面；GNU date 也接受无引号）
+#   - fallback 用 `git log -1 --format=%cI`（ISO 8601 commit date）—— git 跨 OS 一致
 version_ldflags() {
     local version commit build_time
     version=$(git describe --tags --dirty 2>/dev/null || echo "dev")
     commit=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-    build_time=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    # date 跨 OS 兼容写法：GNU / BSD 都接受无引号 format；git commit date 作 fallback
+    build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+        || git log -1 --format=%cI 2>/dev/null \
+        || echo "unknown")
     echo "-s -w -X main.Version=$version -X main.Commit=$commit -X main.BuildTime=$build_time"
 }
 
