@@ -6,6 +6,9 @@
 #   current                     显示当前版本（最近 tag，无 tag 时 v0.0.0）
 #   list                        列已有 tag（按版本号倒序）
 #   bump <major|minor|patch>    bump 并推 origin（--yes 跳过交互）
+#   auto [--yes]                从 last tag..HEAD 扫 commit subjects，按 conventional commit
+#                                规则推断 bump 类型（feat!:BREAKING → major; feat: → minor;
+#                                其它 → patch）并 bump
 #   check                       验证 working tree 干净
 #   help                        显示本帮助
 #
@@ -34,6 +37,9 @@ function Show-Usage {
     current                          显示当前版本
     list                             列已有 tag
     bump <major|minor|patch> [--yes] bump 并推 origin
+    auto [--yes]                     自动从 last tag..HEAD 推断 bump 类型
+                                     （conventional commit: feat!:BREAKING→major;
+                                      feat:→minor; 其它→patch）并 bump
     check                            验证 working tree 干净
     help                             显示本帮助
 
@@ -41,7 +47,8 @@ function Show-Usage {
     pwsh bin/bump-version.ps1 current
     pwsh bin/bump-version.ps1 list
     pwsh bin/bump-version.ps1 bump minor
-    pwsh bin/bump-version.ps1 bump patch -Yes
+    pwsh bin/bump-version.ps1 auto
+    pwsh bin/bump-version.ps1 auto -Yes
 "@
 }
 
@@ -128,6 +135,58 @@ function Invoke-Bump {
     Write-Host "✓ 已推 $newTag 到 origin" -ForegroundColor Green
 }
 
+# Invoke-AutoBump: 从 latest tag..HEAD 扫 commit subjects，按 conventional commit 规则推断
+# bump 类型——major > minor > patch 取最高优先级。
+#
+# 规则:
+#   - 任意 type!:  (如 feat!: fix!:) → major
+#   - 含 "BREAKING CHANGE:" 字串 → major
+#   - feat: / feat(scope:) → minor
+#   - 其它 (fix / refactor / chore / docs / ...) → patch
+#
+# 注意: BREAKING CHANGE: 必须在 commit message 标出（subject `feat!:` 或 footer
+# `BREAKING CHANGE:`）—— 否则不会触发 major。这是 conventional commit 约定。
+function Invoke-AutoBump {
+    param([bool]$SkipConfirm)
+
+    $current = Get-LatestTag
+    if (-not $current) {
+        Write-Host "当前无 tag——auto 模式假设 v0.0.0"
+        $current = "v0.0.0"
+    }
+
+    if ($current -eq "v0.0.0") {
+        $rangeArg = ""
+    } else {
+        $rangeArg = "$current..HEAD"
+    }
+
+    $subjects = @(git log @rangeArg --pretty=format:'%s' 2>$null)
+    if (-not $subjects -or $subjects.Count -eq 0) {
+        Write-Host "✗ 自 $current 以来无 commit，auto 无法推断" -ForegroundColor Red
+        exit 1
+    }
+
+    # 推断 bump 类型
+    $bump = "patch"
+    foreach ($subject in $subjects) {
+        if ($subject -match '!:') { $bump = "major"; continue }
+        if ($subject -match 'BREAKING CHANGE:') { $bump = "major"; continue }
+        if ($subject -match '^feat:') { $bump = "minor"; continue }
+        if ($subject -match '^feat\(.+\):') { $bump = "minor"; continue }
+        # 其它 type 默认 patch，不动 bump
+    }
+
+    Write-Host "═══ 自 $current 至今的 commits ═══"
+    foreach ($subject in $subjects) {
+        Write-Host "  $subject"
+    }
+    Write-Host ""
+    Write-Host "═══ 推断 bump 类型: $bump ═══"
+
+    Invoke-Bump -BumpType $bump -SkipConfirm $SkipConfirm
+}
+
 switch ($Subcommand) {
     "current" {
         $tag = Get-LatestTag
@@ -140,6 +199,9 @@ switch ($Subcommand) {
             exit 1
         }
         Invoke-Bump -BumpType $Type -SkipConfirm ([bool]$Yes)
+    }
+    "auto" {
+        Invoke-AutoBump -SkipConfirm ([bool]$Yes)
     }
     "check" {
         if (Test-CleanWorkingTree) {
