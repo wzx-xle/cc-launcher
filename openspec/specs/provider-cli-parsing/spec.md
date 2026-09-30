@@ -1,7 +1,8 @@
 # provider-cli-parsing Specification
 
 ## Purpose
-TBD - created by archiving change provider-flag-migration. Update Purpose after archive.
+`ccl provider` 子命令的 CLI flag 解析契约：覆盖短/长形式都接受、`--list / --new / --delete` 互斥、`--help` 优先级最高、`--type` 二级 flag 仅在 `--new` 上下文生效、位置参数 dispatch 表。
+
 ## Requirements
 ### Requirement: ccl provider accepts both short and long flag forms
 
