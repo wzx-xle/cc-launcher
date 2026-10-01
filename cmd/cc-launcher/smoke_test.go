@@ -21,14 +21,19 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+	"unicode/utf8"
 
+	"cc-launcher/internal/collector"
 	"cc-launcher/internal/config"
 	"cc-launcher/internal/stats"
 )
@@ -650,4 +655,451 @@ func TestSmoke_CompletionTopLevel(t *testing.T) {
 			t.Errorf("顶层候选应含 %q, got:\n%s", want, out)
 		}
 	}
+}
+
+// stats-time-buckets §3.2: 端到端 smoke test 覆盖 spec 关键 scenario。
+//
+// 测试结构：
+//   - sandbox HOME → 写 telemetry.db（注入固定时钟 17:30 这一刻）
+//   - 调 runStats(args) + captureStdout / captureStderr
+//   - statsExitFn 覆盖为 no-op（避免真 os.Exit 把 test 进程杀掉）
+//
+// 覆盖 spec scenarios:
+//   (a) --day 7 文本含 7 daily label + TOTAL_TOKENS + TOTAL
+//   (b) --day 1 文本含 24 hourly + partial note + 当前小时 *
+//   (c) --day 缺省 文本不含 TOTAL_TOKENS / BUCKET
+//   (d) --json --day 7 JSON 含 bucket_rows(7 个)+ bucket_totals + bucket_iso
+//   (e) --json 缺省 JSON 无 bucket_rows / bucket_totals
+//   (f) --since 报 "flag provided but not defined: -since"
+//   (g) --day 0 / 91 exit 非 0 + stderr 含 "--day 必须在 1 到 90 之间, got:"
+//   (h) --json --day 1 当前小时桶含 is_current: true
+//   (i) 80-col 终端宽度下柱状图右边界对齐
+func TestStatsTimeBuckets(t *testing.T) {
+	home := sandboxHome(t)
+	baseDir := cclLauncherBaseDir()
+	dbPath := filepath.Join(baseDir, "telemetry.db")
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// 注入固定时钟 2026-09-30 17:30 本地时区
+	now := time.Date(2026, 9, 30, 17, 30, 0, 0, time.Local)
+	store, err := collector.OpenStore(dbPath, collector.WithClock(func() time.Time { return now }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 写 1 个 session @ 17:00（input=100, output=20, cacheRead=5, cost=0.01）
+	if err := store.WriteSession(collector.Session{
+		ID: "smoke1", StartedAt: now.Add(-30 * time.Minute),
+		Provider: "anthropic", Cwd: "/tmp/smoke", Model: "claude-opus",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	metrics := []collector.Metric{
+		{SessionID: "smoke1", Name: "claude_code.token.usage", Value: 100, Labels: map[string]string{"type": "input"}, CapturedAt: now},
+		{SessionID: "smoke1", Name: "claude_code.token.usage", Value: 20, Labels: map[string]string{"type": "output"}, CapturedAt: now},
+		{SessionID: "smoke1", Name: "claude_code.token.usage", Value: 5, Labels: map[string]string{"type": "cacheRead"}, CapturedAt: now},
+		{SessionID: "smoke1", Name: "claude_code.cost.usage", Value: 0.01, CapturedAt: now},
+	}
+	for _, m := range metrics {
+		if err := store.WriteMetric(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	_ = home // 占位以防未来用 home 路径
+
+	// 覆盖 statsExitFn：避免真 os.Exit 杀掉测试进程
+	origExit := statsExitFn
+	t.Cleanup(func() { statsExitFn = origExit })
+	exitCode := -1
+	exitCalled := false
+	statsExitFn = func(code int) { exitCode = code; exitCalled = true }
+
+	t.Run("a_day7_text_has_7_buckets_and_total", func(t *testing.T) {
+		var runErr error
+		out := captureStdout(t, func() {
+			runErr = runStats([]string{"--day", "7"})
+		})
+		if runErr != nil {
+			t.Fatalf("runStats --day 7: %v", runErr)
+		}
+		// 7 daily label (09-24 .. 09-30) 应都出现
+		for _, d := range []string{"09-24", "09-25", "09-26", "09-27", "09-28", "09-29", "09-30"} {
+			if !strings.Contains(out, d) {
+				t.Errorf("--day 7 output 应含 %q, got:\n%s", d, out)
+			}
+		}
+		// TOTAL_TOKENS 列头 + TOTAL 行
+		if !strings.Contains(out, "TOTAL_TOKENS") {
+			t.Errorf("--day 7 应含 TOTAL_TOKENS 列头, got:\n%s", out)
+		}
+		if !strings.Contains(out, "TOTAL") {
+			t.Errorf("--day 7 应含 TOTAL 行, got:\n%s", out)
+		}
+	})
+
+	t.Run("b_day1_text_has_hourly_with_partial_note", func(t *testing.T) {
+		var runErr error
+		out := captureStdout(t, func() {
+			runErr = runStats([]string{"--day", "1"})
+		})
+		if runErr != nil {
+			t.Fatalf("runStats --day 1: %v", runErr)
+		}
+		// 0..currentHour hourly label 都应出现(currentHour 由 time.Now() 决定,smoke test 不注入)
+		currentHour := time.Now().Hour()
+		for h := 0; h <= currentHour; h++ {
+			want := fmt.Sprintf("%02d:00", h)
+			if !strings.Contains(out, want) {
+				t.Errorf("--day 1 应含 hourly label %q, got:\n%s", want, out)
+			}
+		}
+		// partial note
+		if !strings.Contains(out, "(* = 当前小时,数据仍在累计)") {
+			t.Errorf("--day 1 应含 partial note, got:\n%s", out)
+		}
+		// 当前小时带 *
+		currentLabel := fmt.Sprintf("%02d:00*", currentHour)
+		if !strings.Contains(out, currentLabel) {
+			t.Errorf("--day 1 当前小时 label 应为 %q, got:\n%s", currentLabel, out)
+		}
+	})
+
+	t.Run("c_no_day_text_has_no_bucket_table", func(t *testing.T) {
+		var runErr error
+		out := captureStdout(t, func() {
+			runErr = runStats([]string{})
+		})
+		if runErr != nil {
+			t.Fatalf("runStats (no --day): %v", runErr)
+		}
+		if strings.Contains(out, "TOTAL_TOKENS") || strings.Contains(out, "BUCKET") {
+			t.Errorf("缺省 --day 时不应含 BUCKET/TOTAL_TOKENS 列头, got:\n%s", out)
+		}
+	})
+
+	t.Run("d_json_day7_has_bucket_rows_and_totals", func(t *testing.T) {
+		var runErr error
+		out := captureStdout(t, func() {
+			runErr = runStats([]string{"--json", "--day", "7"})
+		})
+		if runErr != nil {
+			t.Fatalf("runStats --json --day 7: %v", runErr)
+		}
+		var r stats.Result
+		if err := json.Unmarshal([]byte(out), &r); err != nil {
+			t.Fatalf("invalid JSON: %v\n%s", err, out)
+		}
+		if len(r.BucketRows) != 7 {
+			t.Errorf("bucket_rows want 7, got %d", len(r.BucketRows))
+		}
+		if r.BucketTotals == nil {
+			t.Error("bucket_totals should not be nil")
+		}
+		for i, br := range r.BucketRows {
+			if br.BucketISO == "" {
+				t.Errorf("bucket_rows[%d] missing bucket_iso", i)
+			}
+			if br.BucketUnixMs == 0 {
+				t.Errorf("bucket_rows[%d] missing bucket_unix_ms", i)
+			}
+			if br.Label == "" {
+				t.Errorf("bucket_rows[%d] missing bucket label (spec scenario 4)", i)
+			}
+		}
+	})
+
+	t.Run("e_json_no_day_omits_bucket_fields", func(t *testing.T) {
+		var runErr error
+		out := captureStdout(t, func() {
+			runErr = runStats([]string{"--json"})
+		})
+		if runErr != nil {
+			t.Fatalf("runStats --json (no --day): %v", runErr)
+		}
+		var r stats.Result
+		if err := json.Unmarshal([]byte(out), &r); err != nil {
+			t.Fatalf("invalid JSON: %v\n%s", err, out)
+		}
+		if len(r.BucketRows) != 0 {
+			t.Errorf("--json 缺省 --day 应无 bucket_rows, got %d rows", len(r.BucketRows))
+		}
+		if r.BucketTotals != nil {
+			t.Error("--json 缺省 --day 应无 bucket_totals")
+		}
+		// 同时校验 raw JSON 文本无 "bucket_rows" / "bucket_totals" / "bucket" key
+		// (omitempty 严格保证 JSON 字节级一致)
+		if strings.Contains(out, "bucket_rows") {
+			t.Errorf("--json 缺省 --day 输出不应含 'bucket_rows' 字串, got:\n%s", out)
+		}
+		if strings.Contains(out, "bucket_totals") {
+			t.Errorf("--json 缺省 --day 输出不应含 'bucket_totals' 字串, got:\n%s", out)
+		}
+	})
+
+	t.Run("f_since_removed", func(t *testing.T) {
+		var runErr error
+		stderr := captureStderr(t, func() {
+			runErr = runStats([]string{"--since", "2026-09-20"})
+		})
+		// Go flag package 会返回 fs.Parse 错误 → runStats return err
+		if runErr == nil {
+			t.Error("--since 应报错, got nil")
+		}
+		if !strings.Contains(stderr, "flag provided but not defined") && !strings.Contains(runErr.Error(), "flag provided but not defined") {
+			t.Errorf("--since 应报 'flag provided but not defined', got stderr=%q err=%v", stderr, runErr)
+		}
+	})
+
+	t.Run("g_day_out_of_range", func(t *testing.T) {
+		// --day 0
+		exitCode = -1
+		exitCalled = false
+		stderr0 := captureStderr(t, func() {
+			_ = runStats([]string{"--day", "0"})
+		})
+		if !exitCalled {
+			t.Error("--day 0 应触发 statsExitFn")
+		}
+		if exitCode != 2 {
+			t.Errorf("--day 0 exit code 应为 2, got %d", exitCode)
+		}
+		if !strings.Contains(stderr0, "--day 必须在 1 到 90 之间, got: 0") {
+			t.Errorf("--day 0 stderr 应含校验消息, got: %q", stderr0)
+		}
+
+		// --day 91
+		exitCode = -1
+		exitCalled = false
+		stderr91 := captureStderr(t, func() {
+			_ = runStats([]string{"--day", "91"})
+		})
+		if !exitCalled {
+			t.Error("--day 91 应触发 statsExitFn")
+		}
+		if exitCode != 2 {
+			t.Errorf("--day 91 exit code 应为 2, got %d", exitCode)
+		}
+		if !strings.Contains(stderr91, "--day 必须在 1 到 90 之间, got: 91") {
+			t.Errorf("--day 91 stderr 应含校验消息, got: %q", stderr91)
+		}
+	})
+
+	t.Run("h_json_day1_marks_current_hour", func(t *testing.T) {
+		var runErr error
+		out := captureStdout(t, func() {
+			runErr = runStats([]string{"--json", "--day", "1"})
+		})
+		if runErr != nil {
+			t.Fatalf("runStats --json --day 1: %v", runErr)
+		}
+		var r stats.Result
+		if err := json.Unmarshal([]byte(out), &r); err != nil {
+			t.Fatalf("invalid JSON: %v\n%s", err, out)
+		}
+		currentHour := time.Now().Hour()
+		wantRows := currentHour + 1
+		if len(r.BucketRows) != wantRows {
+			t.Fatalf("--day 1 应 %d rows (00..%d), got %d", wantRows, currentHour, len(r.BucketRows))
+		}
+		foundCurrent := false
+		for _, br := range r.BucketRows {
+			if br.IsCurrent {
+				foundCurrent = true
+				// Label 字段 json:"-" 不进 JSON;通过 BucketUnixMs 推 hour 验证
+				hour := time.UnixMilli(br.BucketUnixMs).Hour()
+				if hour != currentHour {
+					t.Errorf("IsCurrent bucket hour: want %d, got %d (unix_ms=%d)",
+						currentHour, hour, br.BucketUnixMs)
+				}
+			}
+		}
+		if !foundCurrent {
+			t.Error("--json --day 1 应有 IsCurrent=true 桶")
+		}
+	})
+
+	t.Run("i_80col_alignment", func(t *testing.T) {
+		// spec: TOTAL_TOKENS bar 右边界(柱末 + ⏳ / · / 半块 / 整块 / 横线后缀)在
+		// 跨行 ±1 column tolerance 内对齐。本测试只对 header / data / TOTAL 行做
+		// 容差检查(hourly note 是独立行,不在 column layout 内)。
+		rows := []stats.BucketRow{
+			{Label: "00:00", Sessions: 1, InputTokens: 100, OutputTokens: 20, CacheRead: 5, CostUSD: 0.01},
+			{Label: "11:00*", IsCurrent: true, Sessions: 2, InputTokens: 1000, OutputTokens: 500, CacheCreate: 50, CacheRead: 200, CostUSD: 1.5},
+		}
+		totals := &stats.BucketRow{Sessions: 3, InputTokens: 1100, OutputTokens: 520, CacheCreate: 50, CacheRead: 205, CostUSD: 1.51}
+		var sb strings.Builder
+		stats.FormatBucketTable(&sb, rows, totals)
+		// spec: TOTAL_TOKENS bar right edges (柱末 + ⏳ / · / 半块 / 整块)在 data 行
+		// 间 ±1 column tolerance 对齐。TOTAL 行 separator 是 20 ─ + " (total)" = 28
+		// chars(spec design,标识"超 length");hourly note 行在 tabwriter 之外;header
+		// 行 column 8 是文本"TOTAL_TOKENS"短于 bar。这 3 种不参与 bar alignment 比较。
+		lines := strings.Split(strings.TrimRight(sb.String(), "\n"), "\n")
+		var dataWidths []int
+		for _, line := range lines {
+			trim := strings.TrimSpace(line)
+			if strings.HasPrefix(trim, "(*") || strings.HasPrefix(trim, "BUCKET") || strings.HasPrefix(trim, "TOTAL") {
+				continue
+			}
+			dataWidths = append(dataWidths, utf8.RuneCountInString(line))
+		}
+		var maxW int
+		for _, w := range dataWidths {
+			if w > maxW {
+				maxW = w
+			}
+		}
+		// 硬上限:spec 强调 "no wider than 80 columns" — 任何 data 行宽度 > 80 即 fail
+		if maxW > 80 {
+			t.Errorf("data 行宽度 %d 超过 80-col 上限:\n%s", maxW, sb.String())
+		}
+		// 容差 ±1 column:所有 data 行右边缘应一致(tabwriter 偶有 padding 差异)
+		for i, w := range dataWidths {
+			if abs(w-maxW) > 1 {
+				t.Errorf("data 行 %d 宽度 %d 偏离 max %d 超过 1 容差:\n%s", i, w, maxW, sb.String())
+			}
+		}
+	})
+
+	// j_text_and_json_consistency 覆盖 spec scenario 4 末尾:
+	// "bucket_rows numeric fields match the human-readable table" —
+	// 对同一 db 跑 text + JSON,逐桶断言 numeric 字段相等。
+	//
+	// 注意:db 已在 TestStatsTimeBuckets 顶层建好,这里只需各跑一次 + 解析比对。
+	t.Run("j_text_and_json_consistency", func(t *testing.T) {
+		// 跑 text 拿 stdout
+		var textOut string
+		captureStdout(t, func() {
+			if err := runStats([]string{"--day", "7"}); err != nil {
+				t.Fatalf("runStats --day 7: %v", err)
+			}
+		})
+		// captureStdout 不能直接取返回值,改用 io.Writer 写 file
+		// 简化:用 captureStdoutNoCheck 风格
+		_ = textOut
+
+		// 直接用临时 buffer 重跑
+		textOut = runStatsCapture(t, []string{"--day", "7"})
+		jsonOut := runStatsCapture(t, []string{"--json", "--day", "7"})
+
+		// parse text:提取每桶 sessions / input_tokens / output_tokens / cache_create / cache_read / cost_usd
+		type textBucket struct {
+			label    string
+			sessions int64
+			in, out, cre, read int64
+			cost     float64
+		}
+		var textBuckets []textBucket
+		for _, line := range strings.Split(textOut, "\n") {
+			// 跳过 header / note / TOTAL 行 / 窗口 header / 空行
+			trim := strings.TrimSpace(line)
+			if trim == "" || strings.HasPrefix(trim, "BUCKET") || strings.HasPrefix(trim, "(*") ||
+				strings.HasPrefix(trim, "TOTAL") || strings.HasPrefix(trim, "Window") ||
+				strings.HasPrefix(trim, "(no data") || strings.HasPrefix(trim, "STARTED") {
+				continue
+			}
+			// 数据行:tab-separated,字段顺序:BUCKET SESSIONS IN OUT CACHE_CRE CACHE_READ COST_USD TOTAL_TOKENS
+			fields := strings.Fields(line)
+			if len(fields) < 7 {
+				continue
+			}
+			// fields[0] = "MM-DD"
+			var sess, in, out, cre, read int64
+			var cost float64
+			if _, err := fmt.Sscanf(fields[1], "%d", &sess); err != nil {
+				continue
+			}
+			if _, err := fmt.Sscanf(fields[2], "%d", &in); err != nil {
+				continue
+			}
+			if _, err := fmt.Sscanf(fields[3], "%d", &out); err != nil {
+				continue
+			}
+			if _, err := fmt.Sscanf(fields[4], "%d", &cre); err != nil {
+				continue
+			}
+			if _, err := fmt.Sscanf(fields[5], "%d", &read); err != nil {
+				continue
+			}
+			if _, err := fmt.Sscanf(fields[6], "%f", &cost); err != nil {
+				continue
+			}
+			textBuckets = append(textBuckets, textBucket{
+				label: fields[0], sessions: sess, in: in, out: out, cre: cre, read: read, cost: cost,
+			})
+		}
+
+		// parse JSON
+		var r stats.Result
+		if err := json.Unmarshal([]byte(jsonOut), &r); err != nil {
+			t.Fatalf("invalid JSON: %v\n%s", err, jsonOut)
+		}
+
+		// 逐桶断言 numeric 字段一致
+		if len(textBuckets) != len(r.BucketRows) {
+			t.Fatalf("bucket count mismatch: text=%d, json=%d\ntext:\n%s\njson:\n%s",
+				len(textBuckets), len(r.BucketRows), textOut, jsonOut)
+		}
+		for i, tb := range textBuckets {
+			br := r.BucketRows[i]
+			if tb.sessions != br.Sessions {
+				t.Errorf("bucket[%d] sessions: text=%d, json=%d", i, tb.sessions, br.Sessions)
+			}
+			if tb.in != br.InputTokens {
+				t.Errorf("bucket[%d] input_tokens: text=%d, json=%d", i, tb.in, br.InputTokens)
+			}
+			if tb.out != br.OutputTokens {
+				t.Errorf("bucket[%d] output_tokens: text=%d, json=%d", i, tb.out, br.OutputTokens)
+			}
+			if tb.cre != br.CacheCreate {
+				t.Errorf("bucket[%d] cache_creation_tokens: text=%d, json=%d", i, tb.cre, br.CacheCreate)
+			}
+			if tb.read != br.CacheRead {
+				t.Errorf("bucket[%d] cache_read_tokens: text=%d, json=%d", i, tb.read, br.CacheRead)
+			}
+			if tb.cost != br.CostUSD {
+				t.Errorf("bucket[%d] cost_usd: text=%f, json=%f", i, tb.cost, br.CostUSD)
+			}
+		}
+	})
+}
+
+// runStatsCapture 跑 runStats 并捕获 stdout,返回捕获到的内容。
+//
+// 比 captureStdout(t, fn) 多一步把 buffer 内容作为 string 返回。
+func runStatsCapture(t *testing.T, args []string) string {
+	t.Helper()
+	orig := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = orig })
+
+	done := make(chan string, 1)
+	go func() {
+		var buf bytes.Buffer
+		_, _ = io.Copy(&buf, r)
+		done <- buf.String()
+	}()
+
+	if err := runStats(args); err != nil {
+		_ = w.Close()
+		t.Fatalf("runStats %v: %v", args, err)
+	}
+	_ = w.Close()
+	os.Stdout = orig
+	return <-done
+}
+
+// abs 整数绝对值(smoke test 本地辅助,避免引 strconv 仅为一个函数)
+func abs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
 }

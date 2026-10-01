@@ -584,6 +584,8 @@ func TestRunCompletion_ServeMutexBlocks(t *testing.T) {
 }
 
 // §8.1.d: stats 候选（ccl __complete stats ""）
+//
+// 决策（stats-time-buckets §D10）：--since 被 --day 取代,completion 候选同步更新。
 func TestRunCompletion_StatsFlags(t *testing.T) {
 	out := captureStdout(t, func() {
 		if err := runCompletion([]string{"stats", ""}); err != nil {
@@ -591,7 +593,7 @@ func TestRunCompletion_StatsFlags(t *testing.T) {
 		}
 	})
 	assertContainsLines(t, out, []string{
-		"--since", "--by-provider", "--by-project", "--project", "--json",
+		"--day", "--by-provider", "--by-project", "--project", "--json",
 		"-h", "--help",
 	})
 }
