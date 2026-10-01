@@ -24,11 +24,16 @@ import (
 var ErrNoDatabase = errors.New("telemetry db 不存在")
 
 // Query 是 ccl stats 的查询参数。
+//
+// 决策（stats-time-buckets §D4 + §D10）：
+//   - 砍掉 Since time.Time（由 `--day` 派生 detail 起点,避免 detail/summary 窗口割裂）
+//   - Buckets *int：nil = 不启用桶聚合（向后兼容,旧 ccl stats 字节级一致 JSON）;
+//     非 nil → 启用,*Buckets 即 N;kind 推导规则:N==1 → "hour",else → "day"
 type Query struct {
-	Since      time.Time // 起始时间（含）；零值 → 7 天前
-	ByProvider bool      // 按 provider 聚合
-	ByProject  bool      // 按 project 聚合
-	Project    string    // 模糊匹配 session.cwd 子串
+	Buckets    *int    // nil = 不启用桶聚合;非 nil = 启用,N ∈ [1,90]
+	ByProvider bool    // 按 provider 聚合
+	ByProject  bool    // 按 project 聚合
+	Project    string  // 模糊匹配 session.cwd 子串
 }
 
 // SessionStats 是单个 session（或聚合行）的指标。
@@ -50,11 +55,19 @@ type SessionStats struct {
 }
 
 // Result 是 ccl stats 的整体输出。
+//
+// 决策（stats-time-buckets §D4）：
+//   - BucketRows / BucketTotals 用 omitempty;Query.Buckets == nil 时这两个字段
+//     JSON 输出完全缺失,保证旧消费者字节级兼容
+//   - BucketTotals 是 *BucketRow(nil=无桶聚合);非 nil 时 Label/BucketISO/BucketUnixMs/
+//     IsCurrent 留零值(总和行无单一 bucket 标识)
 type Result struct {
-	Since    time.Time      `json:"since"`
-	GroupBy  string         `json:"group_by,omitempty"` // "provider" / "project" / "session"
-	Sessions []SessionStats `json:"sessions"`
-	Totals   SessionStats   `json:"totals"`
+	Since        time.Time      `json:"since"`
+	GroupBy      string         `json:"group_by,omitempty"` // "provider" / "project" / "session"
+	Sessions     []SessionStats `json:"sessions"`
+	Totals       SessionStats   `json:"totals"`
+	BucketRows   []BucketRow    `json:"bucket_rows,omitempty"`
+	BucketTotals *BucketRow     `json:"bucket_totals,omitempty"`
 }
 
 // DefaultSince 默认窗口为 7 天前。
@@ -63,6 +76,16 @@ func DefaultSince() time.Time { return time.Now().AddDate(0, 0, -7) }
 // QueryStats 打开 db，读聚合，返回 Result。
 //
 // 调用方负责输出（表格 / JSON）。
+//
+// detail since 推导（stats-time-buckets §D10）：
+//   - q.Buckets != nil:detail since = now - *q.Buckets days（与桶聚合同窗口）
+//   - q.Buckets == nil:detail since = DefaultSince()（7 天前,旧 ccl stats 字节级一致）
+//
+// 桶聚合（q.Buckets != nil 时）：
+//   - kind 推导:N==1 → "hour",else → "day"
+//   - 调 QueryBucketSummary;结果填到 result.BucketRows + result.BucketTotals
+//   - ErrNoDatabase → 整 func return error;其它 SQL 错误 → stderr warning,
+//     BucketRows/BucketTotals 留空(明细仍正常返回,不因桶失败而拖累 detail)
 func QueryStats(dbPath string, q Query) (*Result, error) {
 	if _, err := os.Stat(dbPath); err != nil {
 		if os.IsNotExist(err) {
@@ -78,8 +101,11 @@ func QueryStats(dbPath string, q Query) (*Result, error) {
 	}
 	defer db.Close()
 
-	since := q.Since
-	if since.IsZero() {
+	// detail since:有 Buckets 时跟桶对齐;否则默认 7 天
+	var since time.Time
+	if q.Buckets != nil {
+		since = time.Now().AddDate(0, 0, -*q.Buckets)
+	} else {
 		since = DefaultSince()
 	}
 
@@ -113,7 +139,8 @@ func QueryStats(dbPath string, q Query) (*Result, error) {
 		); err != nil {
 			return nil, fmt.Errorf("scan: %w", err)
 		}
-		ss.StartedAt = func() *time.Time { t := time.UnixMilli(startedAtMs); return &t }()
+		startedAt := time.UnixMilli(startedAtMs)
+		ss.StartedAt = &startedAt
 		ss.Project = projectName(cwd)
 		ss.Provider = providerName(provRaw, labelsJSON)
 		ss.Model = model
@@ -142,6 +169,29 @@ func QueryStats(dbPath string, q Query) (*Result, error) {
 		return a.After(*b)
 	})
 	result.Totals = sumSessions(result.Sessions)
+
+	// 桶聚合：q.Buckets != nil 时启用；ErrNoDatabase 整体 return error,其它错误仅 warning
+	if q.Buckets != nil {
+		kind := "day"
+		if *q.Buckets == 1 {
+			kind = "hour"
+		}
+		sinceMs := since.UnixMilli()
+		rows2, err := QueryBucketSummary(dbPath, kind, sinceMs)
+		if err != nil {
+			if errors.Is(err, ErrNoDatabase) {
+				// 与 detail 一致：db 缺失整 func return error(caller 显示 stderr + exit 1)
+				return nil, err
+			}
+			fmt.Fprintf(os.Stderr, "warning: bucket summary unavailable: %v\n", err)
+		} else {
+			result.BucketRows = rows2
+			if len(rows2) > 0 {
+				totals := sumBuckets(rows2)
+				result.BucketTotals = &totals
+			}
+		}
+	}
 
 	return result, nil
 }
@@ -250,6 +300,23 @@ func sumSessions(ss []SessionStats) SessionStats {
 		total.CacheCreate += s.CacheCreate
 		total.CacheRead += s.CacheRead
 		total.CostUSD += s.CostUSD
+	}
+	return total
+}
+
+// sumBuckets 把所有 BucketRow 按数值字段求和（Label/BucketISO/BucketUnixMs/IsCurrent 留零值）。
+//
+// 用于 result.BucketTotals(JSON 字段 bucket_totals);TOTAL 行的 label / time 字段无单一
+// bucket 标识,序列化时这些字段空,只填数值聚合。
+func sumBuckets(rows []BucketRow) BucketRow {
+	var total BucketRow
+	for _, b := range rows {
+		total.Sessions += b.Sessions
+		total.InputTokens += b.InputTokens
+		total.OutputTokens += b.OutputTokens
+		total.CacheCreate += b.CacheCreate
+		total.CacheRead += b.CacheRead
+		total.CostUSD += b.CostUSD
 	}
 	return total
 }

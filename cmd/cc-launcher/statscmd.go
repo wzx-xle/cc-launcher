@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"cc-launcher/internal/config"
 	"cc-launcher/internal/stats"
@@ -17,11 +16,12 @@ import (
 // statsHelp 是 `ccl stats --help` 的输出。
 const statsHelp = `用法: ccl stats [选项]
 
-直接读 ~/.cc-launcher/telemetry.db 显示 token / cost 聚合（默认最近 7 天）。
+直接读 ~/.cc-launcher/telemetry.db 显示 token / cost 聚合。
+不传 --day 时默认 7 天 detail 明细；传 --day N 则额外打印按时间桶聚合表。
 不需要 daemon 运行中——db 文件已落盘就行。
 
 选项:
-    --since <YYYY-MM-DD>   起始日期（含）；默认 7 天前
+    --day <N>              时间桶聚合:1 表示今天 24 小时 hourly,N(1-90) 表示最近 N 天 daily
     --by-provider          按 provider 聚合（一个 provider 一行）
     --by-project           按 project 聚合（cwd basename 一行）
     --project <子串>       按 cwd 子串过滤（如 cc-launcher）
@@ -33,8 +33,16 @@ const statsHelp = `用法: ccl stats [选项]
 //
 // cli-shell-completion §D2：flag 改动自动同步——加新 flag 时（仅改本函数）completion
 // 自动跟随；若不抽，`runStats` 加 flag 而 `completeAtStats` 漏改 → 脱节。
-func registerStatsFlags(fs *flag.FlagSet) (sinceStr *string, byProvider, byProject, asJSON *bool, project *string) {
-	sinceStr = fs.String("since", "", "起始日期（YYYY-MM-DD）")
+//
+// 决策（stats-time-buckets §D4 + §D10）：
+//   - 砍掉 --since；detail 起点由 `--day` 派生（detail 与桶同窗口,避免割裂）
+//   - 新增 --day N（int,1≤N≤90）启用桶聚合；-1 = 旧 ccl stats 行为（向后兼容）
+//   - day 越界校验在 runStats（"--day 0 / 91 / -1"）触发 stderr + statsExitFn(2);
+//
+// default 是 0 还是 -1 的取舍:Go flag Int 无法区分"未传"与"显式 0"。
+// 但 --day 0 是非法值（必须 ≥1），0 即非法,默认 -1 同时承担"未传"+"非法"标识。
+func registerStatsFlags(fs *flag.FlagSet) (day *int, byProvider, byProject, asJSON *bool, project *string) {
+	day = fs.Int("day", -1, "时间桶聚合:1 表示今天 24 小时 hourly,N(1-90) 表示最近 N 天 daily（缺省 -1 = 旧 detail 行为）")
 	byProvider = fs.Bool("by-provider", false, "按 provider 聚合")
 	byProject = fs.Bool("by-project", false, "按 project 聚合")
 	project = fs.String("project", "", "按 cwd 子串过滤")
@@ -42,10 +50,26 @@ func registerStatsFlags(fs *flag.FlagSet) (sinceStr *string, byProvider, byProje
 	return
 }
 
+// statsExitFn 是 ccl stats 的退出钩子。
+//
+// 默认调 os.Exit；smoke_test 覆盖为 no-op 避免把整个 test 进程杀掉（跟 completion.go::exitFn
+// 同模式：CLI 错误路径走直接退出,不走 return error,语义跟 Go flag package 一致）。
+var statsExitFn = func(code int) { os.Exit(code) }
+
 // runStats 是 `ccl stats` 入口。
+//
+// 决策（stats-time-buckets §2.2）：
+//   - --day 校验：<1 或 >90 → stderr + statsExitFn(2)（Go flag parse error 约定）
+//   - q.Buckets：day != 0 ? &day : nil（QueryStats 内部据此启用桶聚合）
+//   - 输出分支 4 种：
+//       (1) JSON 输出 result（BucketRows/BucketTotals 由 QueryStats 自动填,omitempty）
+//       (2) --day 未启用 + 明细非空：旧 detail 表（向后兼容）
+//       (3) --day 未启用 + 明细空：(no data in window since ...)
+//       (4) --day 启用 + 明细非空：detail 表 + 空行 + 桶聚合表
+//       (5) --day 启用 + 明细空：(no data in window ...) + 桶聚合表（无空行,跟 hint 紧凑）
 func runStats(args []string) error {
 	fs := flag.NewFlagSet("stats", flag.ContinueOnError)
-	sinceStr, byProvider, byProject, asJSON, project := registerStatsFlags(fs)
+	day, byProvider, byProject, asJSON, project := registerStatsFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -56,17 +80,21 @@ func runStats(args []string) error {
 		}
 	}
 
+	// --day 越界校验（决策 §2.2）。用 stderr + statsExitFn(2) 走 Go flag parse error 约定;
+	// 不通过 fmt.Errorf 返回(那会走 main 的"错误: ..."包装,跟 Go flag 标准不一致)。
+	if *day != -1 && (*day < 1 || *day > 90) {
+		fmt.Fprintf(os.Stderr, "--day 必须在 1 到 90 之间, got: %d\n", *day)
+		statsExitFn(2)
+	}
+
 	q := stats.Query{
 		ByProvider: *byProvider,
 		ByProject:  *byProject,
 		Project:    *project,
 	}
-	if *sinceStr != "" {
-		t, err := time.Parse("2006-01-02", *sinceStr)
-		if err != nil {
-			return fmt.Errorf("--since 解析失败（需要 YYYY-MM-DD）: %w", err)
-		}
-		q.Since = t
+	if *day > 0 {
+		d := *day
+		q.Buckets = &d
 	}
 
 	baseDir := cclLauncherBaseDir()
@@ -76,7 +104,7 @@ func runStats(args []string) error {
 	if err != nil {
 		if errors.Is(err, stats.ErrNoDatabase) {
 			fmt.Fprintln(os.Stderr, "no telemetry data yet; run `ccl` to start a session")
-			os.Exit(1)
+			statsExitFn(1)
 		}
 		return err
 	}
@@ -90,14 +118,28 @@ func runStats(args []string) error {
 		return nil
 	}
 
-	if len(result.Sessions) == 0 {
-		fmt.Printf("(no data in window since %s)\n", result.Since.Format("2006-01-02"))
+	if *day == -1 {
+		// 旧 ccl stats 行为:detail 明细,不回溯桶聚合
+		if len(result.Sessions) == 0 {
+			fmt.Printf("(no data in window since %s)\n", result.Since.Format("2006-01-02"))
+			return nil
+		}
+		fmt.Printf("Window since: %s   Group by: %s\n\n",
+			result.Since.Format("2006-01-02"), groupByLabel(result.GroupBy))
+		stats.FormatTable(os.Stdout, result)
 		return nil
 	}
 
-	fmt.Printf("Window since: %s   Group by: %s\n\n",
-		result.Since.Format("2006-01-02"), groupByLabel(result.GroupBy))
-	stats.FormatTable(os.Stdout, result)
+	// --day 启用:detail + 桶聚合
+	if len(result.Sessions) > 0 {
+		fmt.Printf("Window since: %s   Group by: %s\n\n",
+			result.Since.Format("2006-01-02"), groupByLabel(result.GroupBy))
+		stats.FormatTable(os.Stdout, result)
+		fmt.Println() // 空行分隔 detail 与 桶聚合
+	} else {
+		fmt.Printf("(no data in window since %s)\n", result.Since.Format("2006-01-02"))
+	}
+	stats.FormatBucketTable(os.Stdout, result.BucketRows, result.BucketTotals)
 	return nil
 }
 
@@ -297,7 +339,7 @@ func runStatusInner() error {
 		return fmt.Errorf("stat db 失败: %w", err)
 	}
 	fmt.Printf("       db: %s\n", shortenHomePath(dbPath))
-	total, today, err := stats.CountSessionsByWindow(dbPath, todayStartMillis())
+	total, today, err := stats.CountSessionsByWindow(dbPath, stats.TodayStartMillis())
 	if err != nil {
 		// COUNT 失败不回 error——db 文件本身存在,只是 sqlite 读失败,仍报 size
 		fmt.Printf("           %s\n", humanBytes(fi.Size()))
@@ -307,16 +349,6 @@ func runStatusInner() error {
 	fmt.Printf("           %s\n", humanBytes(fi.Size()))
 	fmt.Printf("           %d sessions (%d today)\n", total, today)
 	return nil
-}
-
-// todayStartMillis 返回本地时区今日 00:00 的 UnixMilli。
-//
-// "今日" 按用户感知的本地日历日切分（不是 UTC）；ccl 用户场景下本地时区合理。
-// 仅用于 `ccl serve --status` 输出"今日新增 sessions"统计。
-func todayStartMillis() int64 {
-	now := time.Now()
-	start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	return start.UnixMilli()
 }
 
 // shortenHomePath 把绝对路径缩成 ~/... 形式（仅当 prefix 命中 UserHomeDir 时）。
