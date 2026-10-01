@@ -69,7 +69,7 @@ source <(ccl __init zsh)
 
 - 顶层 `ccl <TAB>` → `serve / stats / provider / mode / -h / --help / help`
 - `ccl serve <TAB>` → `--stop / --restore / --status / --restart`（互斥）
-- `ccl stats <TAB>` → `--since / --by-provider / --by-project / --project / --json`
+- `ccl stats <TAB>` → `--day / --by-provider / --by-project / --project / --json`
 - `ccl provider --template <TAB>` / `-T <TAB>` → 7 种模板名（`anthropic / deepseek / minimax / glm / aliyun-coding / aliyun-pay / aliyun-token`）
 - `ccl provider --new --type <TAB>` → 同上模板名
 - `ccl mode <TAB>` → 6 种权限模式名
@@ -233,12 +233,21 @@ fork 失败 / 端口冲突 → ccl 仍 exec Claude Code（OTel 推送静默失�
 
 ```bash
 ccl stats                       # 最近 7 天的所有 session（表格）
-ccl stats --since 2026-09-20    # 从指定日期起
+ccl stats --day 1               # 今天 24 小时 hourly 桶聚合（柱状图）
+ccl stats --day 7               # 最近 7 天 daily 桶聚合
+ccl stats --day 30              # 最近 30 天 daily 桶聚合
 ccl stats --by-provider         # 按提供商聚合
 ccl stats --by-project          # 按项目（cwd basename）聚合
 ccl stats --project cc-launcher # cwd 子串过滤
 ccl stats --json                # JSON 输出（pipeable to jq）
+ccl stats --json --day 7        # JSON 含 bucket_rows / bucket_totals 字段
 ```
+
+`ccl stats --day N`（`1 ≤ N ≤ 90`）在 detail 表后追加"按时间桶聚合"小表：
+- `--day 1` = 今天 24 小时 hourly（`HH:00` label，当前小时末尾加 `*` 标 partial）
+- `--day N`（N≥2）= 最近 N 天 daily（`MM-DD` label）
+
+每桶一行 `BUCKET | SESSIONS | IN | OUT | CACHE_CRE | CACHE_READ | COST_USD | TOTAL_TOKENS(柱)`，柱长按总 token 数 8 级半块（`▏▎▍▌▋▊▉█`）归一化。`--json --day N` 时 JSON 加 `bucket_rows` 数组 + `bucket_totals` 对象。不传 `--day` 时维持旧 detail-only 行为。
 
 `ccl stats` **不依赖 daemon 正在跑**——它直接打开 `~/.cc-launcher/telemetry.db` 读。db 文件用 SQLite WAL，所以 daemon 写和 ccl stats 读并发安全。
 
