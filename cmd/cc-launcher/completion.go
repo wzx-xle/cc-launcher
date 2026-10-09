@@ -132,7 +132,7 @@ func runShellInit(shell string) error {
 		// fish 当前未实现（spec/powershell-completion Scenario 列表仅
 		// bash/zsh/powershell；fish 在错误信息里标注"已规划"，让用户
 		// 知道未来会加）
-		fmt.Fprintf(os.Stderr, "unknown shell: %s（支持: bash / zsh / fish / powershell）\n", shell)
+		fmt.Fprintf(os.Stderr, "unknown shell: %s（支持: bash / zsh / powershell）\n", shell)
 		exitFn(1)
 		return nil // 满足编译器；exitFn 调用决定是否真的退出
 	}
