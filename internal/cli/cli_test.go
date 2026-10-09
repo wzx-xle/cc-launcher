@@ -26,6 +26,91 @@ func setupCLI(t *testing.T) (*CLI, *provider.Manager, *state.Manager) {
 	return New(pm, sm), pm, sm
 }
 
+// ─── provider-setenv-cwd-binding §5: CLI provider cwd binding ───
+
+// TestProviderList_CwdBindingMarker 覆盖 spec/provider-cwd-binding §"cwd
+// binding exists and differs from active_provider" Scenario——*deepseek 行。
+func TestProviderList_CwdBindingMarker(t *testing.T) {
+	c, pm, sm := setupCLI(t)
+	pm.CreateWithEnv("deepseek", map[string]any{"ANTHROPIC_AUTH_TOKEN": "sk"})
+	sm.SetActiveProvider("anthropic")
+
+	wd, _ := os.Getwd()
+	if err := sm.SetProviderForDir(wd, "deepseek"); err != nil {
+		t.Fatal(err)
+	}
+
+	cap := captureStdout(t)
+	_ = c.Run([]string{"provider", "--list"})
+	output := cap()
+
+	if !strings.Contains(output, "* deepseek") {
+		t.Errorf("output should mark cwd-bound provider with '*', got:\n%s", output)
+	}
+	if !strings.Contains(output, "▶ anthropic") {
+		t.Errorf("output should mark active provider with '▶', got:\n%s", output)
+	}
+}
+
+// TestProviderList_CwdBindingEqualsActive 覆盖 spec §"cwd binding equals
+// active_provider" Scenario——两标记叠加为 *▶。
+func TestProviderList_CwdBindingEqualsActive(t *testing.T) {
+	c, _, sm := setupCLI(t)
+	sm.SetActiveProvider("anthropic")
+
+	wd, _ := os.Getwd()
+	if err := sm.SetProviderForDir(wd, "anthropic"); err != nil {
+		t.Fatal(err)
+	}
+
+	cap := captureStdout(t)
+	_ = c.Run([]string{"provider", "--list"})
+	output := cap()
+
+	if !strings.Contains(output, "*▶ anthropic") {
+		t.Errorf("output should show '*▶' when cwd binding == active, got:\n%s", output)
+	}
+}
+
+// TestProviderList_NoCwdBinding 覆盖 spec §"no cwd binding" Scenario——
+// 仅 ▶ 标记 active，无 * 标记。
+func TestProviderList_NoCwdBinding(t *testing.T) {
+	c, _, sm := setupCLI(t)
+	sm.SetActiveProvider("anthropic")
+
+	cap := captureStdout(t)
+	_ = c.Run([]string{"provider", "--list"})
+	output := cap()
+
+	if strings.Contains(output, "*") {
+		t.Errorf("output should NOT contain '*' when no cwd binding, got:\n%s", output)
+	}
+	if !strings.Contains(output, "▶ anthropic") {
+		t.Errorf("output should still mark active provider with '▶', got:\n%s", output)
+	}
+}
+
+// TestProviderSwitch_BindsCwd 覆盖 spec §"CLI provider switches and binds cwd"
+// Scenario——`ccl provider <name>` 同时写 active_provider + dir_bindings[wd]。
+func TestProviderSwitch_BindsCwd(t *testing.T) {
+	c, pm, sm := setupCLI(t)
+	pm.CreateWithEnv("deepseek", map[string]any{"ANTHROPIC_AUTH_TOKEN": "sk"})
+
+	wd, _ := os.Getwd()
+
+	_ = captureStdout(t)() // capture (output discarded—c.Run doesn't error)
+	if err := c.Run([]string{"provider", "deepseek"}); err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+
+	if got := sm.GetActiveProvider(); got != "deepseek" {
+		t.Errorf("active_provider = %q, want deepseek", got)
+	}
+	if got := sm.GetProviderForDir(wd); got != "deepseek" {
+		t.Errorf("dir_bindings[%s] = %q, want deepseek", wd, got)
+	}
+}
+
 func TestProviderList(t *testing.T) {
 	c, _, _ := setupCLI(t)
 

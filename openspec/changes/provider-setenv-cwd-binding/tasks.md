@@ -31,9 +31,9 @@
 
 ## 5. CLI provider command alignment
 
-- [ ] 5.1 修改 `internal/cli/cli.go:switchProvider(name)`：在 `SetActiveProvider(name)` 后追加 `SetProviderForDir(os.Getwd(), name)`。
-- [ ] 5.2 修改 `internal/cli/cli.go` 的 provider --list 输出：先查 `sm.GetProviderForDir(wd)`，cwd 命中项前置 `*` 标记（叠加在 `▶` 上）；未命中仅显示 `▶`。
-- [ ] 5.3 单元测试：CLI 切换后 dir_bindings 写入；list 输出在 cwd 绑定存在/不存在时的标记正确。
+- [x] 5.1 修改 `internal/cli/cli.go:switchProvider(name)`：在 `SetActiveProvider(name)` 后追加 `SetProviderForDir(os.Getwd(), name)`。
+- [x] 5.2 修改 `internal/cli/cli.go` 的 provider --list 输出：先查 `sm.GetProviderForDir(wd)`，cwd 命中项前置 `*` 标记（叠加在 `▶` 上）；未命中仅显示 `▶`。
+- [x] 5.3 单元测试：CLI 切换后 dir_bindings 写入；list 输出在 cwd 绑定存在/不存在时的标记正确。
 
 ## 6. PowerShell tab completion
 

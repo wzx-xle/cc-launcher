@@ -289,15 +289,32 @@ func (c *CLI) listProviders() error {
 	}
 
 	active := c.state.GetActiveProvider()
+	// provider-setenv-cwd-binding §5.2：cwd 命中 dir_bindings[wd] 的 provider
+	// 加 * 标记（叠加在 ▶ 上时显示 *▶，spec/provider-cwd-binding §"cwd
+	// binding equals active_provider" Scenario）。
+	wd, _ := os.Getwd()
+	cwdBound := c.state.GetProviderForDir(wd)
 	if len(list) == 0 {
 		fmt.Println("暂无提供商配置")
 		return nil
 	}
 
 	for _, info := range list {
-		marker := "  "
-		if info.Name == active {
+		// provider-setenv-cwd-binding §5.2：cwd 命中 dir_bindings[wd] 用 *
+		// 标记，全局 active_provider 用 ▶ 标记；都命中叠加为 *▶（spec §
+		// "cwd binding equals active_provider" Scenario）。
+		isCwd := info.Name == cwdBound
+		isActive := info.Name == active
+		var marker string
+		switch {
+		case isCwd && isActive:
+			marker = "*▶ "
+		case isCwd:
+			marker = "* "
+		case isActive:
 			marker = "▶ "
+		default:
+			marker = "  "
 		}
 		if info.Error != "" {
 			fmt.Printf("⚠️  %s — %s\n", info.Name, info.Error)
@@ -314,6 +331,12 @@ func (c *CLI) switchProvider(name string) error {
 	}
 	if err := c.state.SetActiveProvider(name); err != nil {
 		return err
+	}
+	// provider-setenv-cwd-binding §5.1：CLI 切换也写 dir_bindings[wd]——与
+	// TUI 末尾"记住"对齐（spec §"CLI provider switches and binds cwd"）。
+	wd, _ := os.Getwd()
+	if err := c.state.SetProviderForDir(wd, name); err != nil {
+		return fmt.Errorf("保存 cwd binding 失败: %w", err)
 	}
 	fmt.Printf("已切换到 %s\n", name)
 	return nil
