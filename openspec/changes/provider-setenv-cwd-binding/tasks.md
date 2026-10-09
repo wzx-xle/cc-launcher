@@ -21,13 +21,13 @@
 
 ## 4. TUI flow: cwd binding + setenv
 
-- [ ] 4.1 修改 `internal/tui`：Run 函数签名加 `cwdDefaultProvider string` 参数；启动时若非空，将其作为预选 provider 传给 TUI。
-- [ ] 4.2 TUI 末尾新增交互步骤：若 result.Provider 与 dir_bindings[wd] 不等，询问"记住当前目录 (wd) 默认用 provider 吗？[Y/n]"；Y 调 sm.SetProviderForDir(wd, result.Provider)；n/超时不动；TUI 取消跳过。
-- [ ] 4.3 在 `cmd/cc-launcher/main.go:runTUI` 中：先用 `sm.GetProviderForDir(wd)` 解析默认 provider；再传给 TUI。
+- [x] 4.1 修改 `internal/tui`：Run 函数签名加 `cwdDefaultProvider string` 参数；启动时若非空，将其作为预选 provider 传给 TUI。
+- [x] 4.2 TUI 末尾新增交互步骤：若 result.Provider 与 dir_bindings[wd] 不等，询问"记住当前目录 (wd) 默认用 provider 吗？[Y/n]"；Y 调 sm.SetProviderForDir(wd, result.Provider)；n/超时不动；TUI 取消跳过。
+- [x] 4.3 在 `cmd/cc-launcher/main.go:runTUI` 中：先用 `sm.GetProviderForDir(wd)` 解析默认 provider；再传给 TUI。
 - [x] 4.4 runTUI 在 injectOTelEnv 之前调 `migrateSettingsJSON`；迁移完成后删除 `cm.Merge(providerCfg, oldSnapshot)` 调用。
 - [x] 4.7 Dead code 清理：删除 `config.Manager.Merge` 方法 + 私有 helper `cleanSnapshot`（config.go:195）+ `deepMerge`（config.go:209），共 ~80 行（§4.4 删除唯一 caller 后三者均无 caller）。design.md:261 "回滚靠 Merge" 的承诺改写为 "回滚靠 git revert"（state.json.dir_bindings 不自动清理——用户用 `ccl provider <name>` 重写覆盖即可）。
 - [x] 4.5 runTUI 准备 `opts.Env`：从 `os.Environ()` 开始，用 envutil.Upsert 替换/追加 `providerCfg.env` 里的所有 key；赋给 `launcher.Options.Env`。
-- [ ] 4.6 单元测试：TUI 接 cwd 默认值时正确预选；末尾"记住"接受/拒绝/取消三个分支。
+- [x] 4.6 单元测试：TUI 接 cwd 默认值时正确预选；末尾"记住"接受/拒绝/取消三个分支。
 
 ## 5. CLI provider command alignment
 

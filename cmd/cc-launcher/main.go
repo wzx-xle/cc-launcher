@@ -120,7 +120,15 @@ func runTUI(pm *provider.Manager, sm *state.Manager, cm *config.Manager) error {
 	wd, _ := os.Getwd()
 	defaultMode, _ := sm.GetPermissionMode(wd)
 
-	result, err := tui.Run(providers, defaultProvider, defaultMode)
+	// provider-setenv-cwd-binding §4.3：按 dir_bindings[wd] > active_provider
+	// 顺序解析 preSelected provider，传给 tui.Run 作为预选 cursor。
+	cwdDefaultProvider := sm.GetProviderForDir(wd)
+	preSelected := cwdDefaultProvider
+	if preSelected == "" {
+		preSelected = defaultProvider
+	}
+
+	result, err := tui.Run(providers, preSelected, defaultMode, cwdDefaultProvider, wd)
 	if err != nil {
 		if err == tui.ErrCancelled {
 			return nil
@@ -133,6 +141,15 @@ func runTUI(pm *provider.Manager, sm *state.Manager, cm *config.Manager) error {
 	// setenv 注入到子进程环境（§4.5）。
 	if result.Provider != defaultProvider {
 		sm.SetActiveProvider(result.Provider)
+	}
+
+	// provider-setenv-cwd-binding §4.2：TUI 末尾"记住 cwd binding"——Y 时
+	// 调 sm.SetProviderForDir；n 时不动；TUI 取消（result.RememberBinding=false
+	// 且 result.Provider=""）由上面 tui.Run 的 ErrCancelled 分支处理。
+	if result.RememberBinding && result.Provider != "" {
+		if err := sm.SetProviderForDir(wd, result.Provider); err != nil {
+			return fmt.Errorf("保存 cwd binding 失败: %w", err)
+		}
 	}
 
 	sm.SetPermissionMode(wd, result.Mode)
