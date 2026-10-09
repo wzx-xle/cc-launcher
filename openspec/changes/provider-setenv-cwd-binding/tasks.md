@@ -62,8 +62,8 @@
 
 ## 9. Documentation
 
-- [ ] 9.1 README 加"按目录记 provider"章节：解释 dir_bindings、TUI 末尾"记住"交互、与 permission mode 的对称性。
-- [ ] 9.2 README 加"PowerShell tab completion"章节：解释 `$PROFILE` 配置、`Invoke-Expression` 用法。
-- [ ] 9.3 README 加"settings.json 历史兼容"段落：说明老用户首次切换会被自动迁移一次（备份在 backups/）；用户手写 ANTHROPIC_* 时 ccl setenv 会被压住的限制及解决方式（从 settings.json 删除）。
-- [ ] 9.4 更新 README tab 补全范围表，加 PowerShell 一行（与 bash/zsh 同结构）。
-- [ ] 9.5 更新 CLAUDE.md §"架构约束（来自 requirement.md）"——本 change 之后 §3-4 仍成立（provider 仍走 ccl 管理），新增一条"provider 配置通过 setenv 注入到子进程环境，claudeCode settings.json 不再保留 provider 字段"。
+- [x] 9.1 README 加"按目录记 provider"章节：解释 dir_bindings、TUI 末尾"记住"交互、与 permission mode 的对称性。
+- [x] 9.2 README 加"PowerShell tab completion"章节：解释 `$PROFILE` 配置、`Invoke-Expression` 用法。
+- [x] 9.3 README 加"settings.json 历史兼容"段落：说明老用户首次切换会被自动迁移一次（备份在 backups/）；用户手写 ANTHROPIC_* 时 ccl setenv 会被压住的限制及解决方式（从 settings.json 删除）。
+- [x] 9.4 更新 README tab 补全范围表，加 PowerShell 一行（与 bash/zsh 同结构）。
+- [x] 9.5 更新 CLAUDE.md §"架构约束（来自 requirement.md）"——本 change 之后 §3-4 仍成立（provider 仍走 ccl 管理），新增一条"provider 配置通过 setenv 注入到子进程环境，claudeCode settings.json 不再保留 provider 字段"。

@@ -19,6 +19,7 @@ Claude Code Lancher — 一个终端启动器，在启动 Claude Code 时提供�
 3. 切换提供商时：**提供商配置要覆盖**到 Claude Code 配置中
 4. 切换提供商时：**原提供商配置不能残留**，但 **Claude Code 自身添加的配置要保留**
 5. 流程：选择提供商 → 选择权限模式 → 打开 Claude Code，每一步都可取消
+6. **provider 配置通过 setenv 注入到子进程环境，Claude Code settings.json 不再保留 provider 字段**（provider-setenv-cwd-binding change 起；老 ccl 注入的 ANTHROPIC_* 由 migrate 函数首次启动时自动清理）
 
 ## OpenSpec 工作流
 

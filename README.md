@@ -63,9 +63,23 @@ source <(ccl __init bash)
 source <(ccl __init zsh)
 ```
 
-启用后重启 shell 或 `source ~/.bashrc` / `source ~/.zshrc` 即生效。不启用也能用 ccl，只是不补全。`fish` 与 `powershell` 当前不支持。
+**powershell**：在 `$PROFILE` 加一行
 
-补全范围：
+```powershell
+Invoke-Expression -Command (ccl __init powershell)
+```
+
+或管道方式（仅当前 session）：
+
+```powershell
+ccl __init powershell | Out-String | Invoke-Expression
+```
+
+启用后重启 shell 或 `source ~/.bashrc` / `source ~/.zshrc` 即生效。powershell 需重开 PowerShell 窗口。`fish` 当前不支持（已规划）。
+
+> PowerShell completion 用 `String.StartsWith` 做字面前缀过滤，不用 `-like` 通配符匹配——避免 `ccl proj*<TAB>` 这类通配 token 膨胀候选列表。
+
+补全范围（bash / zsh / powershell 三 shell 一致）：
 
 - 顶层 `ccl <TAB>` → `serve / stats / provider / mode / -h / --help / help`
 - `ccl serve <TAB>` → `--stop / --restore / --status / --restart`（互斥）
@@ -145,6 +159,38 @@ ccl provider --new --type deepseek my-deepseek
 
 > 语义以本机 `claude --help` / Claude Code 2.1.x 为准。注意 `dontAsk` 是**最严格**的非交互模式（适合 CI），不是"自动放行"。
 
+## 按目录记 provider
+
+与"按目录记权限模式"对称，ccl 也可按当前工作目录（cwd）记录默认 provider：
+
+- TUI 选完 provider + mode + session 后，ccl 末尾询问"记住当前目录 (`<wd>`) 默认用 `<provider>` 吗？[Y/n]"
+  - Y → 写入 `state.json.dir_bindings[wd] = "<provider>"`；下次在同 cwd 跑 ccl 预选该 provider
+  - n → 不记；走全局 `active_provider` 兜底
+- `ccl provider <name>`（CLI 切换）也同步写 cwd binding——切完即生效
+- `ccl provider --list` 输出标记：
+  - `*` 标记 cwd 命中 `dir_bindings[wd]` 的 provider（cwd 覆盖是最具体的 scope）
+  - `▶` 标记全局 `active_provider`（保留 legacy 行为）
+  - 两者叠加为 `*▶`（cwd binding == active provider 时）
+
+**示例**：
+
+```bash
+# 在 proj-a 跑 ccl 选 deepseek 并 Y 记住
+cd ~/work/proj-a && ccl
+# 选 deepseek → 末尾"记住当前目录 (~work/proj-a) 默认用 deepseek 吗？[Y/n]" → Y
+# state.json.dir_bindings["/home/you/work/proj-a"] = "deepseek"
+
+# 下次在 proj-a 跑 ccl 预选就是 deepseek
+cd ~/work/proj-a && ccl
+# 选 provider stage 时 cursor 默认在 deepseek
+
+# 在 proj-b 跑 ccl（无 binding）走全局默认 anthropic
+cd ~/work/proj-b && ccl
+# 预选 anthropic（=active_provider）
+```
+
+**清理解除**：在同 cwd 跑 `ccl provider <name>` 重写 binding；或直接编辑 `~/.cc-launcher/state.json` 的 `dir_bindings` 字段（key 是 `os.Getwd()` 解析的绝对路径）。
+
 ## 配置合并机制
 
 切换提供商时，框架执行以下步骤：
@@ -157,6 +203,25 @@ ccl provider --new --type deepseek my-deepseek
 不会被删除的：不在快照中的字段（用户手动加的）、值与快照不同的字段（用户改过的）。
 
 > **备份触发语义**（详见"用量监控" → "自动备份时机"）：除切换提供商外，每次 `ccl` 启动时也会**条件性**触发备份——仅在检测到 settings.json 不再处于 ccl 控制下时（如首次启动、第三方工具覆盖 OTel 端点后）。常态启动（仍在 ccl 控制下）不产生新备份。
+
+### settings.json 历史兼容
+
+老 ccl 版本（≤ provider-setenv-cwd-binding change 前）通过 `config.Manager.Merge` 把 provider env 写到 `~/.claude/settings.json`，但**写时不删**——切 provider 时旧 `ANTHROPIC_*` 可能残留。**本 change 改用 setenv 注入到子进程环境**（不再写 settings.json 的 provider 字段），但**首次升级时** ccl 会自动：
+
+1. 读 `state.json.injected_snapshot`（老 ccl 写入的"上次 Merge 留下的字段"）
+2. 跟 `settings.json` 当前值**值匹配比对**：值完全相同的 key 才删（**保护用户手改的字段**——CLAUDE.md §"Claude Code 本身添加的配置要保留"）
+3. 删除值匹配的 `ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL / ANTHROPIC_MODEL / ...`；OTel / `CC_ORIG_*` / `FORWORD_*` 等非 provider 字段**不动**
+4. 首次删除时打 stderr 日志 `⚙ 检测到 ccl 之前注入的 provider env，正在清理 settings.json（备份到 ~/.cc-launcher/backups/）... ✓ (N 个 key)`，并把 settings.json 备份到 `backups/settings-<时间戳>.json`
+5. 清空 `state.json.injected_snapshot` 标记完成
+
+之后 settings.json 不再被 ccl 写 provider 字段（OTel 注入行为不变）。
+
+**用户手写了 `ANTHROPIC_*` 的情况**：
+
+如果在老 ccl 写入后**手改过** `settings.json` 的 `ANTHROPIC_AUTH_TOKEN` 等 key，migrate 会**保留**（值与 snapshot 不等视为用户意图）。但**这意味着 ccl 的 setenv 注入会被 settings.json 压住**——Claude Code 启动时按 `settings.json` env 优先于 shell env。**解决方法**：
+
+- 从 `settings.json` 删除手写的 `ANTHROPIC_*` key，让 ccl 接管 provider 配置
+- 或用 `ccl provider <name>` 明确覆盖（仍受 settings.json 压住，需先清手写字段）
 
 ## 目录结构
 
