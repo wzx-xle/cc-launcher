@@ -47,9 +47,9 @@
 
 ## 7. Cross-platform launch compatibility
 
-- [ ] 7.1 `GOOS=windows go build ./cmd/cc-launcher` 编译通过；`GOOS=darwin go build ./cmd/cc-launcher` 编译通过；`GOOS=linux go build ./cmd/cc-launcher` 编译通过。
-- [ ] 7.2 在 Windows runner（如有）或 CI 中跑 `./build.sh windows` 出 dist/cc-launcher-windows-amd64.exe + arm64.exe。
-- [ ] 7.3 `GOOS=linux go test ./internal/launcher/...` 通过；`GOOS=windows go test ./internal/launcher/...` 通过。
+- [x] 7.1 `GOOS=windows go build ./cmd/cc-launcher` 编译通过；`GOOS=darwin go build ./cmd/cc-launcher` 编译通过；`GOOS=linux go build ./cmd/cc-launcher` 编译通过。
+- [x] 7.2 在 Windows runner（如有）或 CI 中跑 `./build.sh windows` 出 dist/cc-launcher-windows-amd64.exe + arm64.exe。
+- [x] 7.3 `GOOS=linux go test ./internal/launcher/...` 通过；`GOOS=windows go test ./internal/launcher/...` 通过。
 
 ## 8. Testing & verification
 
