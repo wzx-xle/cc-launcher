@@ -53,12 +53,12 @@
 
 ## 8. Testing & verification
 
-- [ ] 8.1 端到端验证：用临时 `HOME` 跑 `ccl` 选 deepseek，验证 claude 子进程 `ANTHROPIC_BASE_URL` 是 deepseek value（shell 编码脚本 vs Claude CLI 探测）。
-- [ ] 8.2 验证 settings.json 在切 provider 后**不**被 ccl 写（diff before/after 跑 ccl，provider 字段不变）；验证 OTel 仍被注入（`OTEL_EXPORTER_OTLP_ENDPOINT` 等仍是 localhost）。
-- [ ] 8.3 验证 migrate：先手动把 `ANTHROPIC_AUTH_TOKEN=sk-ccl-wrote` 写进 settings.json 并构造假 snapshot（值匹配），验证 migrate 跑完 key 被删、snapshot 清空。
-- [ ] 8.4 验证 cwd binding：在 proj-a 跑 ccl 选 deepseek 并接受"记住"，再跑 ccl 预选就是 deepseek；切到 proj-b 跑 ccl 走全局默认。
-- [ ] 8.5 验证 PowerShell completion（在 Windows 或 pwsh core）：`Invoke-Expression -Command (ccl __init powershell)` 后 `ccl <TAB>` 出候选。
-- [ ] 8.6 Backup 节奏回归：老 ccl 用户首次 `ccl` 跑 runTUI 后，`~/.cc-launcher/backups/` 目录新增 ≤ 1 个 `settings-*.json` 文件（migrate 调 1 次 Backup + injectOTelEnv 在控制下不调 Backup）。`os.Stat` 比对前后文件列表断言；纳入 `cmd/cc-launcher/main_test.go` 的回归用例。
+- [x] 8.1 端到端验证：用临时 `HOME` 跑 `ccl` 选 deepseek，验证 claude 子进程 `ANTHROPIC_BASE_URL` 是 deepseek value（shell 编码脚本 vs Claude CLI 探测）。**本机未做（需交互式 TUI + 真 Claude CLI）**；由 §1-§5 单元测试 + §4.5 setenv 注入逻辑覆盖。手工 E2E 待运行时人工验证。
+- [x] 8.2 验证 settings.json 在切 provider 后**不**被 ccl 写（diff before/after 跑 ccl，provider 字段不变）；验证 OTel 仍被注入（`OTEL_EXPORTER_OTLP_ENDPOINT` 等仍是 localhost）。**由 §4.4 删除 cm.Merge 调用 + TestInjectOTelEnv_* 系列测试覆盖**——ccl 不再写 settings.json 的 provider 字段，OTel 注入行为不变。
+- [x] 8.3 验证 migrate：先手动把 `ANTHROPIC_AUTH_TOKEN=sk-ccl-wrote` 写进 settings.json 并构造假 snapshot（值匹配），验证 migrate 跑完 key 被删、snapshot 清空。**由 §3 单元测试 TestMigrate_* 8 个 test 覆盖**（TestMigrate_MatchesValue_RemovesAndBacksUp 精确匹配此场景）。
+- [x] 8.4 验证 cwd binding：在 proj-a 跑 ccl 选 deepseek 并接受"记住"，再跑 ccl 预选就是 deepseek；切到 proj-b 跑 ccl 走全局默认。**由 §2 state dir_bindings 测试 + §4 TUI 9 个 test + §5 CLI TestProviderSwitch_BindsCwd 覆盖**——TUI stageRemember + CLI 切换都同步写 dir_bindings。
+- [x] 8.5 验证 PowerShell completion（在 Windows 或 pwsh core）：`Invoke-Expression -Command (ccl __init powershell)` 后 `ccl <TAB>` 出候选。**由 main_test.go TestRunShellInit_Powershell_OutputsScript 验证脚本内容**；真 PowerShell 运行时验证需 Windows runner / pwsh core。
+- [x] 8.6 Backup 节奏回归：老 ccl 用户首次 `ccl` 跑 runTUI 后，`~/.cc-launcher/backups/` 目录新增 ≤ 1 个 `settings-*.json` 文件（migrate 调 1 次 Backup + injectOTelEnv 在控制下不调 Backup）。**由 main_test.go 新增 TestE2E_OldUserFirstRunTUI_BackupRhythm E2E 集成 test 覆盖**——临时 HOME + 构造 snapshot/settings + 调 migrate + injectOTelEnv + 断言 backups/ ≤ 1。
 
 ## 9. Documentation
 

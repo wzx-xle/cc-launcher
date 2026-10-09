@@ -1110,6 +1110,70 @@ func TestMigrate_NoMatchNoBackup(t *testing.T) {
 	}
 }
 
+// ─── provider-setenv-cwd-binding §8.6: E2E Backup 节奏回归 ───
+
+// TestE2E_OldUserFirstRunTUI_BackupRhythm 覆盖 tasks.md §8.6 + spec
+// §"Migration backs up settings.json before write" + injectOTelEnv "控制权交接
+// 边界" 备份策略的组合断言——老 ccl 用户首次 runTUI 后 backups/ 目录新增 ≤ 1 个
+// settings-*.json 文件：
+//   - migrate 删 1 个匹配 key 调 Backup（1 次）
+//   - injectOTelEnv 看到 OTel 仍在 → ccl 仍在控制下 → 不调 Backup（0 次）
+//   合计 1 次。
+func TestE2E_OldUserFirstRunTUI_BackupRhythm(t *testing.T) {
+	tmpHome := t.TempDir()
+
+	// 构造 state.json 含 snapshot
+	stateDir := filepath.Join(tmpHome, ".cc-launcher")
+	sm := state.NewManager(stateDir)
+	if err := sm.SetInjectedSnapshot(map[string]any{
+		"env": map[string]any{"ANTHROPIC_AUTH_TOKEN": "sk-ccl-wrote"},
+	}); err != nil {
+		t.Fatalf("SetInjectedSnapshot: %v", err)
+	}
+
+	// 构造 settings.json 含匹配的 ANTHROPIC_* + OTel_*（ccl 仍在控制下）
+	claudeDir := filepath.Join(tmpHome, ".claude")
+	if err := os.MkdirAll(claudeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(claudeDir, "settings.json")
+	settings := map[string]any{"env": map[string]any{
+		"ANTHROPIC_AUTH_TOKEN":        "sk-ccl-wrote",          // 匹配 snapshot → 删
+		"OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4318", // ccl 仍在控制下
+	}}
+	data, _ := json.Marshal(settings)
+	if err := os.WriteFile(settingsPath, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	backupDir := filepath.Join(stateDir, "backups")
+	cm := config.NewManager(settingsPath, backupDir, 10)
+
+	// 模拟 runTUI 的 migrate + injectOTelEnv 顺序（tasks §4.4）
+	if err := migrateSettingsJSON(cm, sm); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if err := injectOTelEnv(cm); err != nil {
+		t.Fatalf("injectOTelEnv: %v", err)
+	}
+
+	// 断言 backups/ ≤ 1 个文件
+	entries, err := os.ReadDir(backupDir)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			t.Fatalf("ReadDir: %v", err)
+		}
+		// 目录不存在 = 0 backup（接受"无操作"语义）
+		return
+	}
+	if len(entries) > 1 {
+		t.Errorf("backups count = %d, want ≤ 1 (migrate 1 + injectOTelEnv 0)", len(entries))
+		for _, e := range entries {
+			t.Logf("  - %s", e.Name())
+		}
+	}
+}
+
 // TestMigrate_StderrLogOnChange 覆盖 spec §"migration prints message before
 // write"——至少一个 key 被删时打 stderr 日志（包含 backup dir 路径与 key 数）。
 func TestMigrate_StderrLogOnChange(t *testing.T) {
