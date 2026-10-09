@@ -8,9 +8,9 @@
 
 ## 2. State extension: dir_bindings
 
-- [ ] 2.1 在 `internal/state` 包扩展 state.json 的读写逻辑：识别并保留 `dir_bindings map[string]string` 字段（未知字段不报错，向前兼容旧 state.json）。
-- [ ] 2.2 在 state.Manager 新增 `GetProviderForDir(wd string) string` 与 `SetProviderForDir(wd, name string) error` 方法。
-- [ ] 2.3 单元测试覆盖：写入新 binding、更新已有 binding、读不存在的 wd 返空字符串、读老 state.json（无 dir_bindings）不报错。
+- [x] 2.1 在 `internal/state` 包扩展 state.json 的读写逻辑：识别并保留 `dir_bindings map[string]string` 字段（未知字段不报错，向前兼容旧 state.json）。
+- [x] 2.2 在 state.Manager 新增 `GetProviderForDir(wd string) string` 与 `SetProviderForDir(wd, name string) error` 方法。
+- [x] 2.3 单元测试覆盖：写入新 binding、更新已有 binding、读不存在的 wd 返空字符串、读老 state.json（无 dir_bindings）不报错。
 
 ## 3. One-time migration: settings.json cleanup
 

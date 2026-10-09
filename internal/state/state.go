@@ -7,10 +7,15 @@ import (
 )
 
 // State 记录 launcher 运行时状态。
+//
+// 字段演进：DirBindings（provider-setenv-cwd-binding §2）从 0 加入。
+// 旧 state.json 无该字段时，json.Unmarshal 忽略未知字段，Load 后由
+// nil-check 兜底为空 map。
 type State struct {
 	ActiveProvider      string            `json:"active_provider"`
 	InjectedSnapshot    map[string]any    `json:"injected_snapshot"`
 	LastPermissionModes map[string]string `json:"last_permission_modes"`
+	DirBindings         map[string]string `json:"dir_bindings"`
 }
 
 // Manager 管理 state.json 的读写。
@@ -28,11 +33,19 @@ func (m *Manager) statePath() string {
 }
 
 // Load 加载 state.json。文件不存在时返回空 State，JSON 损坏时返回 error。
+//
+// 向后兼容：未知字段被 json.Unmarshal 忽略（provider-setenv-cwd-binding §2.1
+// 要求"未知字段不报错"——json.Unmarshal 默认行为就是忽略）。老 state.json
+// 无 DirBindings 字段 → loaded.DirBindings 为 nil → 本函数 nil-check 兜底
+// 为空 map，保证调用方 GetProviderForDir 不会 panic。
 func (m *Manager) Load() (*State, error) {
 	data, err := os.ReadFile(m.statePath())
 	if err != nil {
 		if os.IsNotExist(err) {
-			return &State{LastPermissionModes: map[string]string{}}, nil
+			return &State{
+				LastPermissionModes: map[string]string{},
+				DirBindings:         map[string]string{},
+			}, nil
 		}
 		return nil, err
 	}
@@ -43,6 +56,9 @@ func (m *Manager) Load() (*State, error) {
 	}
 	if s.LastPermissionModes == nil {
 		s.LastPermissionModes = map[string]string{}
+	}
+	if s.DirBindings == nil {
+		s.DirBindings = map[string]string{}
 	}
 	return &s, nil
 }
@@ -115,6 +131,30 @@ func (m *Manager) SetPermissionMode(workDir, mode string) error {
 		return err
 	}
 	s.LastPermissionModes[workDir] = mode
+	return m.Save(s)
+}
+
+// GetProviderForDir 返回指定工作目录绑定的 provider 名称；无绑定返空字符串。
+//
+// provider-setenv-cwd-binding §2.2 + spec/provider-cwd-binding §"reading
+// dir_bindings when none exist"。
+func (m *Manager) GetProviderForDir(workDir string) string {
+	s, err := m.Load()
+	if err != nil {
+		return ""
+	}
+	return s.DirBindings[workDir]
+}
+
+// SetProviderForDir 设置指定工作目录绑定的 provider 并持久化；同 wd 二次
+// 写入覆盖旧值（spec/provider-cwd-binding §"writing a new binding" +
+// §"updating an existing binding"）。
+func (m *Manager) SetProviderForDir(workDir, name string) error {
+	s, err := m.Load()
+	if err != nil {
+		return err
+	}
+	s.DirBindings[workDir] = name
 	return m.Save(s)
 }
 
