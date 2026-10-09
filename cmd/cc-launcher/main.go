@@ -9,6 +9,7 @@ import (
 
 	"cc-launcher/internal/cli"
 	"cc-launcher/internal/config"
+	"cc-launcher/internal/envutil"
 	"cc-launcher/internal/launcher"
 	"cc-launcher/internal/provider"
 	"cc-launcher/internal/state"
@@ -127,28 +128,36 @@ func runTUI(pm *provider.Manager, sm *state.Manager, cm *config.Manager) error {
 		return err
 	}
 
-	// 提供商变更时合并配置
+	// provider-setenv-cwd-binding §4.4：删除 cm.Merge 调用——provider
+	// 配置不再写 settings.json（migrate 已清理 ccl 历史注入），改用
+	// setenv 注入到子进程环境（§4.5）。
 	if result.Provider != defaultProvider {
-		fmt.Print("正在切换提供商配置... ")
-
-		providerCfg, err := pm.Get(result.Provider)
-		if err != nil {
-			fmt.Println("✗")
-			return err
-		}
-
-		oldSnapshot := sm.GetInjectedSnapshot()
-		if err := cm.Merge(providerCfg, oldSnapshot); err != nil {
-			fmt.Println("✗")
-			return fmt.Errorf("配置合并失败: %w", err)
-		}
-
 		sm.SetActiveProvider(result.Provider)
-		sm.SetInjectedSnapshot(providerCfg)
-		fmt.Println("✓")
 	}
 
 	sm.SetPermissionMode(wd, result.Mode)
+
+	// provider-setenv-cwd-binding §4.5：准备 opts.Env——从 os.Environ() 开始，
+	// 用 envutil.Upsert 替换/追加 providerCfg.env 里的所有 key，赋给
+	// launcher.Options.Env。launcher 包在 Unix 透传给 syscall.Exec 第三参数，
+	// Windows 写到 cmd.Env（见 launcher-provider-env spec）。
+	var optsEnv []string
+	if result.Provider != "" {
+		providerCfg, err := pm.Get(result.Provider)
+		if err != nil {
+			return fmt.Errorf("加载提供商 %q 配置失败: %w", result.Provider, err)
+		}
+		if providerEnv, ok := providerCfg["env"].(map[string]any); ok && len(providerEnv) > 0 {
+			optsEnv = os.Environ()
+			for k, v := range providerEnv {
+				s, ok := v.(string)
+				if !ok {
+					continue
+				}
+				optsEnv = envutil.Upsert(optsEnv, k, s)
+			}
+		}
+	}
 
 	sessionLabel := "新会话"
 	opts := launcher.Options{PermissionMode: result.Mode}
@@ -173,6 +182,9 @@ func runTUI(pm *provider.Manager, sm *state.Manager, cm *config.Manager) error {
 	}
 
 	fmt.Printf("正在启动 Claude Code (%s / %s / %s)...\n", result.Provider, result.Mode, sessionLabel)
+	if optsEnv != nil {
+		opts.Env = optsEnv
+	}
 	return launcher.Launch(opts)
 }
 
