@@ -85,6 +85,38 @@ func runCompletion(args []string) error {
 // exitFn 是可注入点：测试覆盖为 no-op 避免 os.Exit 把整个 test 进程杀掉。
 var exitFn = func(code int) { os.Exit(code) }
 
+// powershellCompletionScript 是 `ccl __init powershell` 输出的 PowerShell
+// Register-ArgumentCompleter 脚本。
+//
+// spec/powershell-completion 关键约束：
+//   - 自包含：脚本独立可粘贴到 $PROFILE 通过 Invoke-Expression 工作
+//   - 用 -Native（ccl 是 native binary，不是 cmdlet）
+//   - 通过 `ccl __complete <args>` 协议与 bash/zsh 复用候选
+//   - 过滤用 StartsWith（OrdinalIgnoreCase）做字面前缀匹配，避免 -like
+//     通配符膨胀候选（spec §"wordToComplete contains wildcard metacharacters"）
+//
+// 用户接入（任选其一）：
+//
+//	Invoke-Expression -Command (ccl __init powershell)
+//	ccl __init powershell | Out-String | Invoke-Expression
+const powershellCompletionScript = `$ccl = Get-Command ccl | Select-Object -ExpandProperty Source
+
+Register-ArgumentCompleter -Native -CommandName 'ccl' -ScriptBlock {
+	param($wordToComplete, $commandAst)
+
+	$tokens = @($commandAst.ToString() -split '\s+')
+	$candidates = & $ccl __complete @tokens 2>$null
+
+	foreach ($line in @($candidates)) {
+		if ($line.StartsWith($wordToComplete, [System.StringComparison]::OrdinalIgnoreCase)) {
+			[System.Management.Automation.CompletionResult]::new(
+				$line, $line, 'ParameterName', $line
+			)
+		}
+	}
+}
+`
+
 func runShellInit(shell string) error {
 	switch shell {
 	case "bash":
@@ -93,8 +125,14 @@ func runShellInit(shell string) error {
 	case "zsh":
 		fmt.Print(zshCompletionScript)
 		return nil
+	case "powershell":
+		fmt.Print(powershellCompletionScript)
+		return nil
 	default:
-		fmt.Fprintf(os.Stderr, "unknown shell: %s（支持: bash / zsh）\n", shell)
+		// fish 当前未实现（spec/powershell-completion Scenario 列表仅
+		// bash/zsh/powershell；fish 在错误信息里标注"已规划"，让用户
+		// 知道未来会加）
+		fmt.Fprintf(os.Stderr, "unknown shell: %s（支持: bash / zsh / fish / powershell）\n", shell)
 		exitFn(1)
 		return nil // 满足编译器；exitFn 调用决定是否真的退出
 	}

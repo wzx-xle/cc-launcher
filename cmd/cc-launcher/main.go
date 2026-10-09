@@ -32,6 +32,7 @@ const topHelp = `用法: ccl [子命令] [选项]
 Tab completion:
   bash 用户：在 ~/.bashrc 加一行   source <(ccl __init bash)
   zsh 用户：在 ~/.zshrc 加一行    source <(ccl __init zsh)
+  powershell 用户：在 $PROFILE 加一行   Invoke-Expression -Command (ccl __init powershell)
   启用后 <Tab> 自动补全子命令 / flag / 模板名 / 权限模式名。不启用也能用 ccl，只是不补全。
 
 用量监控：

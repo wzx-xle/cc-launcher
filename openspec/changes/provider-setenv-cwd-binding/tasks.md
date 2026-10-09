@@ -39,11 +39,11 @@
 
 **范围决策**：fish shell 已有 `complete -c ccl -f -a '(ccl __complete ...)'` 支持（main_test.go:771 验证）。本 change **不动 fish**，仅在 `runShellInit` 末尾**追加** `powershell` 分支。`__init` 已知 shell 集合由 `bash / zsh` 扩为 `bash / zsh / fish / powershell`；未知 shell 仍 exit 1。
 
-- [ ] 6.1 修改 `cmd/cc-launcher/completion.go` 的 `runShellInit`：新增 `powershell` 分支，输出 `Register-ArgumentCompleter` 脚本（含 `-Native -CommandName 'ccl'` + 调 `ccl __complete <args>` 协议）。
-- [ ] 6.2 脚本必须自包含：脚本体独立可粘贴到 $PROFILE 通过 `Invoke-Expression` 工作；不依赖外部文件。
-- [ ] 6.3 候选过滤：ScriptBlock 内只输出 `$wordToComplete` 前缀匹配的候选。
-- [ ] 6.4 修改 `cmd/cc-launcher/main.go:topHelp`：在 Tab completion 段落加一行 `powershell 用户：在 $PROFILE 加一行   Invoke-Expression -Command (ccl __init powershell)`。
-- [ ] 6.5 单元测试：runShellInit("powershell") 输出以 Register-ArgumentCompleter 起始；runShellInit("unknown") exit 非 0。
+- [x] 6.1 修改 `cmd/cc-launcher/completion.go` 的 `runShellInit`：新增 `powershell` 分支，输出 `Register-ArgumentCompleter` 脚本（含 `-Native -CommandName 'ccl'` + 调 `ccl __complete <args>` 协议）。
+- [x] 6.2 脚本必须自包含：脚本体独立可粘贴到 $PROFILE 通过 `Invoke-Expression` 工作；不依赖外部文件。
+- [x] 6.3 候选过滤：ScriptBlock 内只输出 `$wordToComplete` 前缀匹配的候选。
+- [x] 6.4 修改 `cmd/cc-launcher/main.go:topHelp`：在 Tab completion 段落加一行 `powershell 用户：在 $PROFILE 加一行   Invoke-Expression -Command (ccl __init powershell)`。
+- [x] 6.5 单元测试：runShellInit("powershell") 输出以 Register-ArgumentCompleter 起始；runShellInit("unknown") exit 非 0。
 
 ## 7. Cross-platform launch compatibility
 

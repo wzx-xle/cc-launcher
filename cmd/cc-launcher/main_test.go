@@ -788,6 +788,59 @@ func TestRunShellInit_FishUnknown(t *testing.T) {
 	}
 }
 
+// §6.5.1: runShellInit("powershell") 输出一段以 Register-ArgumentCompleter
+// 起始的 PowerShell 脚本（spec/powershell-completion §"__init powershell
+// exit code" Scenario "stdout SHALL contain a valid PowerShell script
+// (starts with Register-ArgumentCompleter or $ccl = ...)"）。
+func TestRunShellInit_Powershell_OutputsScript(t *testing.T) {
+	stdout := captureStdout(t, func() {
+		if err := runShellInit("powershell"); err != nil {
+			t.Errorf("runShellInit(powershell) returned error: %v", err)
+		}
+	})
+
+	if !strings.Contains(stdout, "Register-ArgumentCompleter") {
+		t.Errorf("powershell script should contain Register-ArgumentCompleter, got: %q", stdout)
+	}
+	if !strings.Contains(stdout, "-Native") {
+		t.Errorf("powershell script should use -Native flag (ccl is native binary), got: %q", stdout)
+	}
+	if !strings.Contains(stdout, "CommandName 'ccl'") {
+		t.Errorf("powershell script should register for CommandName 'ccl', got: %q", stdout)
+	}
+	if !strings.Contains(stdout, "StartsWith") {
+		t.Errorf("powershell script should use StartsWith for literal prefix matching (spec §wordToComplete Scenario), got: %q", stdout)
+	}
+}
+
+// §6.5.2: runShellInit("unknown") 走 default 分支：exitFn(1) + stderr 含
+// "unknown shell" + 错误信息列出支持 shell（spec §"__init powershell unknown
+// shell error" Scenario）。已存在 TestRunShellInit_FishUnknown 用 "fish" 覆盖
+// 同路径；这里用 "nosuchshell" 确认错误信息包含 "powershell" 字样。
+func TestRunShellInit_UnknownShell_ExitsAndMentionsPowershell(t *testing.T) {
+	exitCode := -1
+	exitCalled := false
+	origExit := exitFn
+	exitFn = func(code int) { exitCalled = true; exitCode = code }
+	t.Cleanup(func() { exitFn = origExit })
+
+	stderr := captureStderr(t, func() {
+		if err := runShellInit("nosuchshell"); err != nil {
+			t.Errorf("runShellInit returned error: %v", err)
+		}
+	})
+
+	if !exitCalled {
+		t.Error("unknown shell should trigger exitFn")
+	}
+	if exitCode != 1 {
+		t.Errorf("exit code = %d, want 1", exitCode)
+	}
+	if !strings.Contains(stderr, "powershell") {
+		t.Errorf("stderr 应在支持列表中提到 powershell, got: %q", stderr)
+	}
+}
+
 // 辅助：sort 一份字符串 slice（用来比较候选集时消除 fs 内部顺序影响）。
 func sortedStrings(s []string) []string {
 	out := append([]string(nil), s...)
