@@ -14,10 +14,10 @@
 
 ## 3. One-time migration: settings.json cleanup
 
-- [ ] 3.1 在 `cmd/cc-launcher/main.go` 新增 `migrateSettingsJSON(cm *config.Manager, sm *state.Manager) error` 函数：读 snapshot → 备份 settings.json（如有变更）→ 删除值匹配的 ANTHROPIC_* → 清空 snapshot。
-- [ ] 3.2 migrate 实现遵循值匹配原则（snapshot 值 == settings.json 当前值才删）；非 ANTHROPIC_* key 不动。
-- [ ] 3.3 migrate 在 runTUI 开头调用；首次改动时打 stderr 日志 `⚙ 检测到 ccl 之前注入的 provider env...`。
-- [ ] 3.4 单元测试：用临时目录 + 假 settings.json + 假 state.json 跑 migrate；验证删除行为、保留行为、幂等性（第二次运行空操作）。
+- [x] 3.1 在 `cmd/cc-launcher/main.go` 新增 `migrateSettingsJSON(cm *config.Manager, sm *state.Manager) error` 函数：读 snapshot → 备份 settings.json（如有变更）→ 删除值匹配的 ANTHROPIC_* → 清空 snapshot。
+- [x] 3.2 migrate 实现遵循值匹配原则（snapshot 值 == settings.json 当前值才删）；非 ANTHROPIC_* key 不动。
+- [x] 3.3 migrate 在 runTUI 开头调用；首次改动时打 stderr 日志 `⚙ 检测到 ccl 之前注入的 provider env...`。
+- [x] 3.4 单元测试：用临时目录 + 假 settings.json + 假 state.json 跑 migrate；验证删除行为、保留行为、幂等性（第二次运行空操作）。
 
 ## 4. TUI flow: cwd binding + setenv
 

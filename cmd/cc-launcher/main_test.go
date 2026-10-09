@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"cc-launcher/internal/config"
+	"cc-launcher/internal/state"
 )
 
 // backup-on-control-handover §1.2 + §1.3：isUnderCclControl 主路径 + 边界 case。
@@ -792,4 +793,296 @@ func sortedStrings(s []string) []string {
 	out := append([]string(nil), s...)
 	sort.Strings(out)
 	return out
+}
+
+// ─── provider-setenv-cwd-binding §3: migrateSettingsJSON ───
+
+// migrateTestRig 构造 migrate 测试所需的临时 cm + sm。
+// snapshot 为 nil 表示不调 SetInjectedSnapshot（state.json 也不存在）。
+// settingsEnv 可为 nil 表示不写 settings.json。
+func migrateTestRig(t *testing.T, snapshot map[string]any, settingsEnv map[string]any) (*config.Manager, *state.Manager) {
+	t.Helper()
+	baseDir := t.TempDir()
+	sm := state.NewManager(baseDir)
+	if snapshot != nil {
+		if err := sm.SetInjectedSnapshot(snapshot); err != nil {
+			t.Fatalf("SetInjectedSnapshot: %v", err)
+		}
+	}
+	settingsPath := filepath.Join(baseDir, "settings.json")
+	if settingsEnv != nil {
+		data, err := json.Marshal(map[string]any{"env": settingsEnv})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(settingsPath, data, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	backupDir := filepath.Join(baseDir, "backups")
+	cm := config.NewManager(settingsPath, backupDir, 10)
+	return cm, sm
+}
+
+// TestMigrate_SnapshotNil_NoOp 覆盖 spec/provider-setenv-migration §"snapshot
+// is nil or empty" Scenario "migration returns early"——无 snapshot 跳过。
+func TestMigrate_SnapshotNil_NoOp(t *testing.T) {
+	cm, sm := migrateTestRig(t, nil, map[string]any{
+		"ANTHROPIC_AUTH_TOKEN": "sk-user",
+		"OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4318",
+	})
+
+	if err := migrateSettingsJSON(cm, sm); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	loaded, err := cm.LoadSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := loaded["env"].(map[string]any)
+	if env["ANTHROPIC_AUTH_TOKEN"] != "sk-user" {
+		t.Errorf("ANTHROPIC_AUTH_TOKEN should be untouched when snapshot is nil, got %v", env["ANTHROPIC_AUTH_TOKEN"])
+	}
+	if env["OTEL_EXPORTER_OTLP_ENDPOINT"] != "http://localhost:4318" {
+		t.Error("OTel key should be untouched when snapshot is nil")
+	}
+	if snap := sm.GetInjectedSnapshot(); snap != nil {
+		t.Errorf("snapshot should remain nil, got %v", snap)
+	}
+}
+
+// TestMigrate_MatchesValue_RemovesAndBacksUp 覆盖 spec §"snapshot has
+// ANTHROPIC_AUTH_TOKEN, settings.json matches"——匹配则删 + 备份 + 清空 snapshot。
+func TestMigrate_MatchesValue_RemovesAndBacksUp(t *testing.T) {
+	baseDir := t.TempDir()
+	sm := state.NewManager(baseDir)
+	if err := sm.SetInjectedSnapshot(map[string]any{
+		"env": map[string]any{"ANTHROPIC_AUTH_TOKEN": "sk-ccl-wrote"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(baseDir, "settings.json")
+	data, _ := json.Marshal(map[string]any{"env": map[string]any{
+		"ANTHROPIC_AUTH_TOKEN":          "sk-ccl-wrote", // 匹配 snapshot → 删
+		"OTEL_EXPORTER_OTLP_ENDPOINT":   "http://localhost:4318", // 不在 snapshot → 保留
+		"CLAUDE_CODE_ENABLE_TELEMETRY":  "1",            // 不在 snapshot → 保留
+	}})
+	if err := os.WriteFile(settingsPath, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	backupDir := filepath.Join(baseDir, "backups")
+	cm := config.NewManager(settingsPath, backupDir, 10)
+
+	if err := migrateSettingsJSON(cm, sm); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	loaded, _ := cm.LoadSettings()
+	env := loaded["env"].(map[string]any)
+	if _, ok := env["ANTHROPIC_AUTH_TOKEN"]; ok {
+		t.Error("ANTHROPIC_AUTH_TOKEN should be removed after migration")
+	}
+	if env["OTEL_EXPORTER_OTLP_ENDPOINT"] != "http://localhost:4318" {
+		t.Error("OTel key should be preserved (not in snapshot)")
+	}
+	if env["CLAUDE_CODE_ENABLE_TELEMETRY"] != "1" {
+		t.Error("CLAUDE_CODE_ENABLE_TELEMETRY should be preserved (not in snapshot)")
+	}
+
+	if snap := sm.GetInjectedSnapshot(); snap != nil {
+		t.Errorf("snapshot should be cleared after migration, got %v", snap)
+	}
+
+	entries, err := os.ReadDir(backupDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("expected 1 backup file, got %d", len(entries))
+	}
+}
+
+// TestMigrate_ValueDiffers_PreservesKey 覆盖 spec §"user manually edited
+// ANTHROPIC_AUTH_TOKEN"——值与 snapshot 不同则不删（保护用户手改）。
+func TestMigrate_ValueDiffers_PreservesKey(t *testing.T) {
+	cm, sm := migrateTestRig(t, map[string]any{
+		"env": map[string]any{"ANTHROPIC_AUTH_TOKEN": "sk-ccl-wrote"},
+	}, map[string]any{
+		"ANTHROPIC_AUTH_TOKEN": "sk-user-wrote", // 用户手改
+	})
+
+	if err := migrateSettingsJSON(cm, sm); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	loaded, _ := cm.LoadSettings()
+	env := loaded["env"].(map[string]any)
+	if env["ANTHROPIC_AUTH_TOKEN"] != "sk-user-wrote" {
+		t.Errorf("user-edited value should be preserved, got %v", env["ANTHROPIC_AUTH_TOKEN"])
+	}
+	if snap := sm.GetInjectedSnapshot(); snap != nil {
+		t.Errorf("snapshot should still be cleared even when no key was deleted, got %v", snap)
+	}
+}
+
+// TestMigrate_KeyNotInSettings_NoOp 覆盖 spec §"snapshot has key but settings.json
+// does not"——不在 settings.json 就跳过。
+func TestMigrate_KeyNotInSettings_NoOp(t *testing.T) {
+	cm, sm := migrateTestRig(t, map[string]any{
+		"env": map[string]any{"ANTHROPIC_AUTH_TOKEN": "sk-ccl-wrote"},
+	}, map[string]any{
+		"OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4318", // 无 ANTHROPIC_AUTH_TOKEN
+	})
+
+	if err := migrateSettingsJSON(cm, sm); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	loaded, _ := cm.LoadSettings()
+	env := loaded["env"].(map[string]any)
+	if _, ok := env["ANTHROPIC_AUTH_TOKEN"]; ok {
+		t.Error("ANTHROPIC_AUTH_TOKEN should not appear")
+	}
+	if env["OTEL_EXPORTER_OTLP_ENDPOINT"] != "http://localhost:4318" {
+		t.Error("OTel key should be preserved")
+	}
+	if snap := sm.GetInjectedSnapshot(); snap != nil {
+		t.Errorf("snapshot should still be cleared, got %v", snap)
+	}
+}
+
+// TestMigrate_OtelKeysNotInSnapshot_Preserved 覆盖 spec §"OTel keys not in
+// snapshot are preserved" + §"CC_ORIG_* keys not in snapshot are preserved"。
+func TestMigrate_OtelKeysNotInSnapshot_Preserved(t *testing.T) {
+	cm, sm := migrateTestRig(t, map[string]any{
+		"env": map[string]any{"ANTHROPIC_AUTH_TOKEN": "sk-ccl-wrote"},
+	}, map[string]any{
+		"OTEL_EXPORTER_OTLP_ENDPOINT":            "http://localhost:4318",
+		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT":    "http://localhost:4318/v1/metrics",
+		"OTEL_METRICS_EXPORTER":                  "otlp",
+		"OTEL_EXPORTER_OTLP_PROTOCOL":            "http/protobuf",
+		"CLAUDE_CODE_ENABLE_TELEMETRY":           "1",
+		"CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT":    "http://remote:4318",
+		"FORWORD_OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://remote:4318/v1/metrics",
+		"ANTHROPIC_AUTH_TOKEN":                   "sk-ccl-wrote", // 匹配 → 删
+	})
+
+	if err := migrateSettingsJSON(cm, sm); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	loaded, _ := cm.LoadSettings()
+	env := loaded["env"].(map[string]any)
+	for _, key := range []string{
+		"OTEL_EXPORTER_OTLP_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+		"OTEL_METRICS_EXPORTER",
+		"OTEL_EXPORTER_OTLP_PROTOCOL",
+		"CLAUDE_CODE_ENABLE_TELEMETRY",
+		"CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT",
+		"FORWORD_OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+	} {
+		if _, ok := env[key]; !ok {
+			t.Errorf("%s should be preserved (not in snapshot)", key)
+		}
+	}
+	if _, ok := env["ANTHROPIC_AUTH_TOKEN"]; ok {
+		t.Error("ANTHROPIC_AUTH_TOKEN should be removed")
+	}
+}
+
+// TestMigrate_Idempotent 覆盖 spec §"second startup after migration"——第二次跑空操作。
+func TestMigrate_Idempotent(t *testing.T) {
+	cm, sm := migrateTestRig(t, map[string]any{
+		"env": map[string]any{"ANTHROPIC_AUTH_TOKEN": "sk-ccl-wrote"},
+	}, map[string]any{
+		"ANTHROPIC_AUTH_TOKEN": "sk-ccl-wrote",
+	})
+
+	// 第一次跑
+	if err := migrateSettingsJSON(cm, sm); err != nil {
+		t.Fatal(err)
+	}
+	firstLoaded, _ := cm.LoadSettings()
+	firstEnv := firstLoaded["env"].(map[string]any)
+	if _, ok := firstEnv["ANTHROPIC_AUTH_TOKEN"]; ok {
+		t.Fatal("first migrate should have removed ANTHROPIC_AUTH_TOKEN")
+	}
+
+	// 第二次跑：snapshot 已 nil，settings.json 已无 ANTHROPIC_AUTH_TOKEN → 无操作
+	if err := migrateSettingsJSON(cm, sm); err != nil {
+		t.Fatalf("second migrate: %v", err)
+	}
+	secondLoaded, _ := cm.LoadSettings()
+	secondEnv := secondLoaded["env"].(map[string]any)
+	if _, ok := secondEnv["ANTHROPIC_AUTH_TOKEN"]; ok {
+		t.Error("second migrate should not re-add ANTHROPIC_AUTH_TOKEN")
+	}
+}
+
+// TestMigrate_NoMatchNoBackup 覆盖 spec §"no backup when migration has nothing
+// to remove"——无 key 被删时不调 Backup。
+func TestMigrate_NoMatchNoBackup(t *testing.T) {
+	baseDir := t.TempDir()
+	sm := state.NewManager(baseDir)
+	if err := sm.SetInjectedSnapshot(map[string]any{
+		"env": map[string]any{"ANTHROPIC_AUTH_TOKEN": "sk-ccl-wrote"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(baseDir, "settings.json")
+	data, _ := json.Marshal(map[string]any{"env": map[string]any{
+		"ANTHROPIC_AUTH_TOKEN": "sk-user-DIFFERENT", // 值不同 → 不删
+	}})
+	if err := os.WriteFile(settingsPath, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	backupDir := filepath.Join(baseDir, "backups")
+	cm := config.NewManager(settingsPath, backupDir, 10)
+
+	if err := migrateSettingsJSON(cm, sm); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	entries, err := os.ReadDir(backupDir)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		// 目录不存在 = 0 backup files（spec §"no backup when migration has
+		// nothing to remove" 允许"无操作"语义，包括不创建 backup dir）。
+	} else if len(entries) != 0 {
+		t.Errorf("expected 0 backup files when no key removed, got %d: %v", len(entries), entries)
+	}
+}
+
+// TestMigrate_StderrLogOnChange 覆盖 spec §"migration prints message before
+// write"——至少一个 key 被删时打 stderr 日志（包含 backup dir 路径与 key 数）。
+func TestMigrate_StderrLogOnChange(t *testing.T) {
+	cm, sm := migrateTestRig(t, map[string]any{
+		"env": map[string]any{
+			"ANTHROPIC_AUTH_TOKEN": "sk-ccl-wrote",
+			"ANTHROPIC_BASE_URL":   "https://api.deepseek.com",
+		},
+	}, map[string]any{
+		"ANTHROPIC_AUTH_TOKEN": "sk-ccl-wrote",
+		"ANTHROPIC_BASE_URL":   "https://api.deepseek.com",
+	})
+
+	stderr := captureStderr(t, func() {
+		if err := migrateSettingsJSON(cm, sm); err != nil {
+			t.Errorf("migrate: %v", err)
+		}
+	})
+
+	if !strings.Contains(stderr, "检测到 ccl 之前注入") {
+		t.Errorf("stderr 应含 '检测到 ccl 之前注入', got: %q", stderr)
+	}
+	if !strings.Contains(stderr, cm.BackupDir()) {
+		t.Errorf("stderr 应含 backup dir %q, got: %q", cm.BackupDir(), stderr)
+	}
+	if !strings.Contains(stderr, "2") { // 2 keys cleaned
+		t.Errorf("stderr 应含 key 数 '2', got: %q", stderr)
+	}
 }

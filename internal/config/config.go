@@ -36,6 +36,11 @@ func NewManager(settingsPath, backupDir string, maxBackups int) *Manager {
 	}
 }
 
+// BackupDir 返回备份目录路径（供 migrate 等需要报告备份位置的调用方使用）。
+func (m *Manager) BackupDir() string {
+	return m.backupDir
+}
+
 // LoadSettings 读取 settings.json，保持原始 JSON 字段顺序。
 // 文件不存在时返回空 map。
 func (m *Manager) LoadSettings() (map[string]any, error) {

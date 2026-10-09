@@ -103,6 +103,13 @@ func run(args []string) error {
 }
 
 func runTUI(pm *provider.Manager, sm *state.Manager, cm *config.Manager) error {
+	// provider-setenv-cwd-binding §3.3：runTUI 开头调 migrateSettingsJSON
+	// 一次性清理 settings.json 历史注入；失败仅警告，不阻断 ccl 主流程
+	//（与 injectOTelEnv 失败的降级策略一致）。
+	if err := migrateSettingsJSON(cm, sm); err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ 迁移 settings.json 失败: %v\n", err)
+	}
+
 	providers, err := pm.List()
 	if err != nil {
 		return fmt.Errorf("加载提供商列表失败: %w", err)
@@ -167,6 +174,74 @@ func runTUI(pm *provider.Manager, sm *state.Manager, cm *config.Manager) error {
 
 	fmt.Printf("正在启动 Claude Code (%s / %s / %s)...\n", result.Provider, result.Mode, sessionLabel)
 	return launcher.Launch(opts)
+}
+
+// migrateSettingsJSON 一次性清理 settings.json 中 ccl 历史注入的 provider env
+//（基于 snapshot 比对），保留用户手写的 key + OTel / 备份键。
+//
+// 详细设计见 openspec/changes/provider-setenv-cwd-binding/design.md §Decision 3。
+//
+// 幂等性：每次 runTUI 开头调一次。无 snapshot → return；有 snapshot → 清完后
+// 清空 snapshot，下次再跑无 snapshot → return。
+//
+// 备份策略：仅当至少一个 key 被删时调 cm.Backup()——无变更不浪费备份槽。
+// "值匹配"原则：snapshot 值 == settings.json 当前值才删；用户手改过的 key
+//（值与 snapshot 不等）保留（CLAUDE.md §"claudeCode 本身添加的配置要保留"）。
+func migrateSettingsJSON(cm *config.Manager, sm *state.Manager) error {
+	snapshot := sm.GetInjectedSnapshot()
+	if snapshot == nil {
+		return nil
+	}
+	snapshotEnv, _ := snapshot["env"].(map[string]any)
+	if len(snapshotEnv) == 0 {
+		// snapshot 没有 env 字段（老 ccl 写入但空 map / 损坏结构）——清空以
+		// 标记"已考虑"，下次启动不重跑。
+		return sm.SetInjectedSnapshot(nil)
+	}
+
+	settings, err := cm.LoadSettings()
+	if err != nil {
+		return err
+	}
+	envAny, _ := settings["env"].(map[string]any)
+
+	cleaned := []string{}
+	for k, snapVal := range snapshotEnv {
+		cur, ok := envAny[k]
+		if !ok {
+			continue // 已不在 settings.json
+		}
+		if cur != snapVal {
+			continue // 用户手改过——不删（spec/provider-setenv-migration §
+			// "Migration preserves user-modified keys"）
+		}
+		delete(envAny, k)
+		cleaned = append(cleaned, k)
+	}
+
+	if len(cleaned) == 0 {
+		// 无 key 匹配——snapshot 仍清空（spec §"second startup after
+		// migration" Scenario "migration SHALL return early without touching
+		// settings.json"）。
+		return sm.SetInjectedSnapshot(nil)
+	}
+
+	// 有 key 要删——先备份再写
+	if err := cm.Backup(); err != nil {
+		return fmt.Errorf("migrate 前备份 settings.json 失败: %w", err)
+	}
+
+	settings["env"] = envAny
+	if err := cm.SaveSettings(settings); err != nil {
+		return err
+	}
+
+	// stderr 日志（spec §"Migration reports to user" Scenario）
+	fmt.Fprintf(os.Stderr,
+		"⚙ 检测到 ccl 之前注入的 provider env，正在清理 settings.json（备份到 %s）... ✓ (%d 个 key)\n",
+		cm.BackupDir(), len(cleaned))
+
+	return sm.SetInjectedSnapshot(nil)
 }
 
 // injectOTelEnv 在 exec Claude Code 前把 OTel env 注入 ~/.claude/settings.json，
