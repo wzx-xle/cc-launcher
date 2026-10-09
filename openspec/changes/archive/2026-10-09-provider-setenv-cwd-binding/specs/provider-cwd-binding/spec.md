@@ -2,7 +2,7 @@
 
 ## Purpose
 TBD - created by archiving change provider-setenv-cwd-binding. Update Purpose after archive.
-## Requirements
+## ADDED Requirements
 
 ### Requirement: state.json maintains dir_bindings map
 The state manager SHALL persist a `dir_bindings map[string]string` field in `~/.cc-launcher/state.json`. The map key SHALL be the absolute working directory (`os.Getwd()` result) and the value SHALL be the provider name. The field SHALL be absent (or empty) when no bindings are configured.

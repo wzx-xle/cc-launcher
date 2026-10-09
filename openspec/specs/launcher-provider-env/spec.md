@@ -3,7 +3,6 @@
 ## Purpose
 TBD - created by archiving change provider-setenv-cwd-binding. Update Purpose after archive.
 ## Requirements
-
 ### Requirement: Launch accepts caller-provided environment
 The launcher package SHALL accept a `Env []string` field on `Options` that callers use to pass the environment passed to the Claude Code subprocess. The launcher package SHALL NOT mutate, interpret, or otherwise inspect the contents of `Env`.
 
@@ -62,3 +61,4 @@ The launcher package SHALL NOT define env-construction helpers. A shared helper 
 #### Scenario: missing key is appended
 - **WHEN** `env = ["FOO=1"]` and `upsertEnv(env, "BAR", "2")` is called
 - **THEN** the result is `["FOO=1", "BAR=2"]` (new key appended at the end)
+

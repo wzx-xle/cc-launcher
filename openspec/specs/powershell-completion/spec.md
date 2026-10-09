@@ -3,7 +3,6 @@
 ## Purpose
 TBD - created by archiving change provider-setenv-cwd-binding. Update Purpose after archive.
 ## Requirements
-
 ### Requirement: __init powershell outputs Register-ArgumentCompleter script
 `ccl __init powershell` SHALL print a PowerShell script to stdout. The script SHALL use `Register-ArgumentCompleter` to register a tab-completion handler for the `ccl` command. The handler SHALL delegate to `ccl __complete <args>` (the existing completion protocol) for each completion request.
 
@@ -70,3 +69,4 @@ The top-level `ccl --help` output SHALL mention PowerShell alongside bash/zsh fo
 #### Scenario: wordToComplete contains wildcard metacharacters
 - **WHEN** `$wordToComplete` contains PowerShell `-like` metacharacters (`*`, `?`, `[`, `]`, e.g. user types `ccl proj*<TAB>`)
 - **THEN** the ScriptBlock SHALL treat `$wordToComplete` as a literal prefix when filtering candidates — use ordinal `StartsWith` (`$line.StartsWith($wordToComplete, [System.StringComparison]::OrdinalIgnoreCase)`) instead of `$line -like "$wordToComplete*"`. This prevents wildcard expansion from inflating or hiding the candidate list when the user's token contains glob metacharacters.
+

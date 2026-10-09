@@ -3,7 +3,6 @@
 ## Purpose
 TBD - created by archiving change provider-setenv-cwd-binding. Update Purpose after archive.
 ## Requirements
-
 ### Requirement: One-time migration removes ccl-injected ANTHROPIC_* from settings.json
 On every TUI startup, before applying provider env, ccl SHALL run a one-time migration that detects `env.ANTHROPIC_*` keys in `~/.claude/settings.json` whose value equals the value in `state.json.injected_snapshot.env[key]` and removes them from `settings.json`. The migration SHALL be a no-op if `injected_snapshot` is empty/nil.
 
@@ -77,3 +76,4 @@ The migration SHALL print a one-line stderr message before modifying settings.js
 #### Scenario: migration with no work
 - **WHEN** the migration function would remove zero keys
 - **THEN** no message SHALL be printed (silent no-op for already-clean settings.json)
+
