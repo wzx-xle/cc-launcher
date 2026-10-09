@@ -1,10 +1,10 @@
 ## 1. Foundation: envutil + launcher Env field
 
-- [ ] 1.1 创建 `internal/envutil` 包，导出 `Upsert(env []string, key, value string) []string` 函数；提供对应单元测试（替换、append、空 slice 边界）。
-- [ ] 1.2 在 `internal/launcher/launcher.go` 的 `Options` struct 中新增 `Env []string` 字段，含注释说明 nil 语义。
-- [ ] 1.3 修改 `internal/launcher/launcher_unix.go`：`syscall.Exec(claudePath, argv, env)` 的 `env` 改为 `opts.Env` if 非 nil 否则 `os.Environ()`。
-- [ ] 1.4 修改 `internal/launcher/launcher_windows.go`：设置 `cmd.Env = opts.Env` if 非 nil；保持 `cmd.Stdin/Stdout/Stderr` 与现有实现不变。
-- [ ] 1.5 给 launcher 包补单元测试：Unix 模拟 `syscall.Exec` 失败回传 opts.Env；Windows 用 `exec.Command` 不可达 fake path 验证 cmd.Env 被设置。
+- [x] 1.1 创建 `internal/envutil` 包，导出 `Upsert(env []string, key, value string) []string` 函数；提供对应单元测试（替换、append、空 slice 边界）。
+- [x] 1.2 在 `internal/launcher/launcher.go` 的 `Options` struct 中新增 `Env []string` 字段，含注释说明 nil 语义。
+- [x] 1.3 修改 `internal/launcher/launcher_unix.go`：`syscall.Exec(claudePath, argv, env)` 的 `env` 改为 `opts.Env` if 非 nil 否则 `os.Environ()`。
+- [x] 1.4 修改 `internal/launcher/launcher_windows.go`：设置 `cmd.Env = opts.Env` if 非 nil；保持 `cmd.Stdin/Stdout/Stderr` 与现有实现不变。
+- [x] 1.5 给 launcher 包补单元测试：Unix 模拟 `syscall.Exec` 失败回传 opts.Env；Windows 用 `exec.Command` 不可达 fake path 验证 cmd.Env 被设置。
 
 ## 2. State extension: dir_bindings
 

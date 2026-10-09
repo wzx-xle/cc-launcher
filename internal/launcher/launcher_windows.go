@@ -9,6 +9,15 @@ import (
 	"strings"
 )
 
+// configureCmd 在 cmd.Run() 之前注入 caller-controlled 配置（env 等）。
+// 提取为 package var 以便 test override：在 hook 里读 cmd.Env 等字段并 panic
+// 中断 cmd.Run，避免真实启动 Claude Code 进程。
+var configureCmd = func(cmd *exec.Cmd, opts Options) {
+	if opts.Env != nil {
+		cmd.Env = opts.Env
+	}
+}
+
 // Launch 在 Windows 上启动 Claude Code。
 //
 // Windows 没有 exec 系统调用（syscall.Exec 直接返回 EWINDOWS），
@@ -31,6 +40,7 @@ func Launch(opts Options) error {
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	configureCmd(cmd, opts)
 
 	err = cmd.Run()
 	var exitErr *exec.ExitError
