@@ -49,5 +49,5 @@
 ## 8. 提交与归档
 
 - [x] 8.1 `git add` + `git commit -m "refactor(templates): 把 aliyun-pay / minimax 特殊流程下移到 templates.PreAsks / PostOverrides / SkipPrompt"`
-- [ ] 8.2 跑 `openspec archive template-driven-preask` 归档（自动同步 `template-preask` capability 到 main specs）
-- [ ] 8.3 跑 `bump-version auto` 或手动 bump（如有用户可见的版本边界——本次纯 refactor 按 minor bump v0.10.0 处理）
+- [x] 8.2 跑 `openspec archive template-driven-preask` 归档（自动同步 `template-preask` capability 到 main specs）
+- [x] 8.3 跑 `bump-version auto` 或手动 bump（如有用户可见的版本边界——本次纯 refactor 按 minor bump v0.10.0 处理）
