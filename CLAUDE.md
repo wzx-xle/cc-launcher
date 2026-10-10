@@ -25,6 +25,20 @@ Claude Code Lancher — 一个终端启动器，在启动 Claude Code 时提供�
 
 项目使用 OpenSpec 规范驱动开发（`spec-driven` schema），配置文件在 `openspec/config.yaml`。所有功能开发应遵循 OpenSpec 的 proposal → design → specs → tasks 流程。
 
+## Release Tag 流程
+
+**强约束**：打 tag 之前必须先把 `CHANGELOG.md` 该版本的变更记录写好；CHANGELOG commit 与 tag 应在**同一次推送**内完成，不能"今天 commit changelog、明天打 tag"——否则 `git checkout v0.X.Y` 拿到的代码没有对应 CHANGELOG 段。
+
+操作顺序：
+
+1. 完成 OpenSpec change（实施 + `openspec archive` 归档）
+2. 在 `CHANGELOG.md` 的 `[Unreleased]` 段下加新版本段（按既有版本格式：Refactor / Features / Fix / Tests / OpenSpec / Compatibility 等分类）
+3. `git commit -m "docs: CHANGELOG 加 v0.X.Y <change-name> 段"`（CHANGELOG commit）
+4. `git tag -a v0.X.Y HEAD -m "<release message>"`（tag 指向 CHANGELOG commit）
+5. 一次推送：`git push origin main --follow-tags`（commit + tag 一起推）
+
+如果历史 tag 指向了不带 changelog 的 commit，修正方法是 `git tag -d v0.X.Y` + `git push origin :refs/tags/v0.X.Y` + 在正确的 commit 上重打 tag + `git push origin v0.X.Y`，**不动 commit history**。
+
 ## 项目启动前注意事项
 
 - 项目名 "Lancher" 应为 "Launcher"（拼写错误），建议在正式开发前修正
