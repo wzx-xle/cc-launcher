@@ -8,6 +8,8 @@
 // `// verified YYYY-MM-DD: <URL>` 注释，记录 base_url 和默认 model 的来源。
 package templates
 
+import "errors"
+
 // Hint 一个交互步骤的解释。
 type Hint struct {
 	Step   string // 步骤名，如 "name" / "base_url"
@@ -22,15 +24,36 @@ type TemplateField struct {
 	Required    bool   // 是否必填
 	Secret      bool   // 是否不回显（如 ANTHROPIC_AUTH_TOKEN）
 	Placeholder string // 用于 URL 的占位符（如 aliyun-pay 的 {WorkspaceId}）
+	SkipPrompt  bool   // true 时 cli 不读 stdin，直接用 Default（含占位符替换后）写入 env
+}
+
+// PreAsk 字段收集前的额外问答。
+// 模板用此声明"在走 Fields 之前先问什么"。PreAsk 结果不写盘到 provider 配置
+// （与 TemplateField 区分），仅作为流程元数据驱动 cli 交互。
+type PreAsk struct {
+	Key      string                // 收集结果的 key，写入 env map
+	Prompt   string                // 提示用户文本
+	Default  string                // 空输入时的默认值（可选）
+	Validate func(s string) error // 验证；nil 表示接受，error 表示重试
+}
+
+// FieldOverride 字段收集后覆盖字段值。
+// 模板用此声明"在 Fields 收集完后，按已收集的所有字段重新决定某些字段值"。
+// Apply 接收 env map（含 PreAsk 结果 + Field 收集结果），返回新值覆盖 Field。
+type FieldOverride struct {
+	Field string                    // 目标字段 Key（必须在 Template.Fields 里存在）
+	Apply func(env map[string]any) any // 返回新值（覆盖 env[Field]）
 }
 
 // Template 一个 provider 类型。
 type Template struct {
-	Name        string
-	Description string
-	Body        string         // 完整 JSON 模板（不含 // 注释）
-	Hints       []Hint         // 每步的提示解释
-	Fields      []TemplateField // 每步要问什么
+	Name         string
+	Description  string
+	Body         string           // 完整 JSON 模板（不含 // 注释）
+	Hints        []Hint           // 每步的提示解释
+	Fields       []TemplateField // 每步要问什么
+	PreAsks      []PreAsk        // 字段收集前的额外问答（cli 走主流程前先跑这些）
+	PostOverrides []FieldOverride // 字段收集后覆盖字段值
 }
 
 // All 是全部已实现的模板，按其注册顺序遍历。
@@ -120,13 +143,37 @@ var minimaxTpl = Template{
 		{Step: "haiku", Prompt: "ANTHROPIC_DEFAULT_HAIKU_MODEL（直接回车用 MiniMax-M3[1m]）"},
 	},
 	Fields: []TemplateField{
-		{Key: "ANTHROPIC_BASE_URL", Prompt: "ANTHROPIC_BASE_URL", Default: "https://api.minimax.cn/anthropic", Required: true},
+		{Key: "ANTHROPIC_BASE_URL", Prompt: "ANTHROPIC_BASE_URL", Default: "https://api.minimax.cn/anthropic", Required: true, SkipPrompt: true},
 		{Key: "ANTHROPIC_AUTH_TOKEN", Prompt: "ANTHROPIC_AUTH_TOKEN", Required: true, Secret: true},
 		{Key: "CLAUDE_CODE_AUTO_COMPACT_WINDOW", Prompt: "CLAUDE_CODE_AUTO_COMPACT_WINDOW", Default: "1000000", Required: true},
 		{Key: "ANTHROPIC_MODEL", Prompt: "ANTHROPIC_MODEL", Default: "MiniMax-M3[1m]", Required: true},
 		{Key: "ANTHROPIC_DEFAULT_SONNET_MODEL", Prompt: "ANTHROPIC_DEFAULT_SONNET_MODEL", Default: "MiniMax-M3[1m]", Required: true},
 		{Key: "ANTHROPIC_DEFAULT_OPUS_MODEL", Prompt: "ANTHROPIC_DEFAULT_OPUS_MODEL", Default: "MiniMax-M3[1m]", Required: true},
 		{Key: "ANTHROPIC_DEFAULT_HAIKU_MODEL", Prompt: "ANTHROPIC_DEFAULT_HAIKU_MODEL", Default: "MiniMax-M3[1m]", Required: true},
+	},
+	PreAsks: []PreAsk{
+		{
+			Key:     "region",
+			Prompt:  "地域 [cn/io]（国内 api.minimax.cn / 国际 api.minimax.io；默认 cn）: ",
+			Default: "cn",
+			Validate: func(s string) error {
+				if s != "cn" && s != "io" {
+					return errors.New("无效地域（只接受 cn / io）")
+				}
+				return nil
+			},
+		},
+	},
+	PostOverrides: []FieldOverride{
+		{
+			Field: "ANTHROPIC_BASE_URL",
+			Apply: func(env map[string]any) any {
+				if region, _ := env["region"].(string); region == "io" {
+					return "https://api.minimax.io/anthropic"
+				}
+				return "https://api.minimax.cn/anthropic"
+			},
+		},
 	},
 }
 
@@ -234,7 +281,7 @@ var aliyunPayTpl = Template{
 	},
 	Fields: []TemplateField{
 		{Key: "WorkspaceId", Prompt: "WorkspaceId", Required: true, Placeholder: "{WorkspaceId}"},
-		{Key: "ANTHROPIC_BASE_URL", Prompt: "ANTHROPIC_BASE_URL", Default: "https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/apps/anthropic", Required: true},
+		{Key: "ANTHROPIC_BASE_URL", Prompt: "ANTHROPIC_BASE_URL", Default: "https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/apps/anthropic", Required: true, SkipPrompt: true},
 		{Key: "ANTHROPIC_AUTH_TOKEN", Prompt: "ANTHROPIC_AUTH_TOKEN", Required: true, Secret: true},
 		{Key: "ANTHROPIC_MODEL", Prompt: "ANTHROPIC_MODEL", Default: "qwen3.7-max", Required: true},
 		{Key: "ANTHROPIC_DEFAULT_HAIKU_MODEL", Prompt: "ANTHROPIC_DEFAULT_HAIKU_MODEL", Default: "qwen3.6-flash", Required: true},

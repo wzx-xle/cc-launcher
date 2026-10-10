@@ -152,3 +152,110 @@ func TestAliyunPayPreservesWorkspaceIdPlaceholder(t *testing.T) {
 		t.Errorf("aliyun-pay Body 必须保留 {WorkspaceId} 字面量占位符（用户必须填入）\nBody:\n%s", tpl.Body)
 	}
 }
+
+// TestMinimax_PreAskRegion minimax 模板声明 region pre-ask + 默认 cn + 校验 cn/io。
+func TestMinimax_PreAskRegion(t *testing.T) {
+	tpl, ok := ByName("minimax")
+	if !ok {
+		t.Fatal("minimax 模板未注册")
+	}
+	if len(tpl.PreAsks) != 1 {
+		t.Fatalf("minimax.PreAsks 应有 1 个 PreAsk，实际 %d 个", len(tpl.PreAsks))
+	}
+	pa := tpl.PreAsks[0]
+	if pa.Key != "region" {
+		t.Errorf("minimax.PreAsks[0].Key = %q, want %q", pa.Key, "region")
+	}
+	if pa.Default != "cn" {
+		t.Errorf("minimax.PreAsks[0].Default = %q, want %q", pa.Default, "cn")
+	}
+	if pa.Validate == nil {
+		t.Fatal("minimax.PreAsks[0].Validate 不应为 nil")
+	}
+	if err := pa.Validate("io"); err != nil {
+		t.Errorf("Validate(\"io\") 应接受，got error: %v", err)
+	}
+	if err := pa.Validate("cn"); err != nil {
+		t.Errorf("Validate(\"cn\") 应接受，got error: %v", err)
+	}
+	if err := pa.Validate("xx"); err == nil {
+		t.Errorf("Validate(\"xx\") 应拒绝，got nil")
+	}
+}
+
+// TestMinimax_PostOverride_BaseURL minimax 模板 ANTHROPIC_BASE_URL 按 region 选 cn / io。
+func TestMinimax_PostOverride_BaseURL(t *testing.T) {
+	tpl, ok := ByName("minimax")
+	if !ok {
+		t.Fatal("minimax 模板未注册")
+	}
+	if len(tpl.PostOverrides) != 1 {
+		t.Fatalf("minimax.PostOverrides 应有 1 个 FieldOverride，实际 %d 个", len(tpl.PostOverrides))
+	}
+	ovr := tpl.PostOverrides[0]
+	if ovr.Field != "ANTHROPIC_BASE_URL" {
+		t.Errorf("minimax.PostOverrides[0].Field = %q, want %q", ovr.Field, "ANTHROPIC_BASE_URL")
+	}
+	if ovr.Apply == nil {
+		t.Fatal("minimax.PostOverrides[0].Apply 不应为 nil")
+	}
+	if got := ovr.Apply(map[string]any{"region": "cn"}); got != "https://api.minimax.cn/anthropic" {
+		t.Errorf("Apply(region=cn) = %v, want 国内 URL", got)
+	}
+	if got := ovr.Apply(map[string]any{"region": "io"}); got != "https://api.minimax.io/anthropic" {
+		t.Errorf("Apply(region=io) = %v, want 国际 URL", got)
+	}
+}
+
+// TestAliyunPay_NoPreAsk aliyun-pay 不走 pre-ask 流程（重构后行为不变）。
+func TestAliyunPay_NoPreAsk(t *testing.T) {
+	tpl, ok := ByName("aliyun-pay")
+	if !ok {
+		t.Fatal("aliyun-pay 模板未注册")
+	}
+	if len(tpl.PreAsks) != 0 {
+		t.Errorf("aliyun-pay.PreAsks 应为空（重构后行为不变），实际 %d 个 PreAsk", len(tpl.PreAsks))
+	}
+}
+
+// TestAliyunPay_BaseURL_SkipPrompt aliyun-pay 的 ANTHROPIC_BASE_URL 字段标 SkipPrompt=true（cli 不读 prompt）。
+func TestAliyunPay_BaseURL_SkipPrompt(t *testing.T) {
+	tpl, ok := ByName("aliyun-pay")
+	if !ok {
+		t.Fatal("aliyun-pay 模板未注册")
+	}
+	var found bool
+	for _, f := range tpl.Fields {
+		if f.Key == "ANTHROPIC_BASE_URL" {
+			if !f.SkipPrompt {
+				t.Errorf("aliyun-pay.ANTHROPIC_BASE_URL.SkipPrompt = false, want true（cli 应跳过 prompt 自动用 WorkspaceId 拼装）")
+			}
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("aliyun-pay 模板没有 ANTHROPIC_BASE_URL 字段")
+	}
+}
+
+// TestMinimax_BaseURL_SkipPrompt minimax 的 ANTHROPIC_BASE_URL 字段标 SkipPrompt=true（cli 不读 prompt，由 PostOverride 覆盖）。
+func TestMinimax_BaseURL_SkipPrompt(t *testing.T) {
+	tpl, ok := ByName("minimax")
+	if !ok {
+		t.Fatal("minimax 模板未注册")
+	}
+	var found bool
+	for _, f := range tpl.Fields {
+		if f.Key == "ANTHROPIC_BASE_URL" {
+			if !f.SkipPrompt {
+				t.Errorf("minimax.ANTHROPIC_BASE_URL.SkipPrompt = false, want true（cli 应跳过 prompt 由 PostOverride 决定 URL）")
+			}
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("minimax 模板没有 ANTHROPIC_BASE_URL 字段")
+	}
+}

@@ -400,71 +400,85 @@ func (c *CLI) newProvider(positional, typeName string) error {
 	// 3. 打印模板预览
 	fmt.Printf("\n模板预览 (%s):\n%s\n\n", tpl.Name, tpl.Body)
 
-	// 4. 收集字段
-	env := make(map[string]any, len(tpl.Fields))
-
-	// aliyun-pay 特殊：WorkspaceId 是 URL 占位符，必须先问
-	if tpl.Name == "aliyun-pay" {
-		fmt.Print("WorkspaceId（在阿里云百炼控制台获取；必填）: ")
-		ws, ok := readLine()
-		if !ok {
-			return fmt.Errorf("已取消")
-		}
-		ws = strings.TrimSpace(ws)
-		if ws == "" {
-			return fmt.Errorf("WorkspaceId 不能为空")
-		}
-		// 占位符替换：先记下来，遍历 Fields 时遇到 ANTHROPIC_BASE_URL 再替换
-		env["WorkspaceId"] = ws
+	// 4. 收集：pre-asks → fields（含通用占位符替换 + SkipPrompt 跳过）→ post-overrides
+	env := make(map[string]any, len(tpl.Fields)+len(tpl.PreAsks))
+	if err := c.collectPreAsks(tpl, env); err != nil {
+		return err
 	}
-
-	// minimax 特殊：先问 国内/国际
-	if tpl.Name == "minimax" {
-		fmt.Print("地域 [cn/io]（国内 api.minimax.cn / 国际 api.minimax.io；默认 cn）: ")
-		region, ok := readLine()
-		if !ok {
-			return fmt.Errorf("已取消")
-		}
-		region = strings.TrimSpace(strings.ToLower(region))
-		if region == "" {
-			region = "cn"
-		}
-		if region != "cn" && region != "io" {
-			return fmt.Errorf("无效地域 %q（只接受 cn / io）", region)
-		}
-		env["region"] = region
+	if err := c.collectFields(tpl, env); err != nil {
+		return err
 	}
+	c.applyPostOverrides(tpl, env)
 
-	for _, f := range tpl.Fields {
-		// aliyun-pay 的 WorkspaceId 已在前面单独询问过
-		if tpl.Name == "aliyun-pay" && f.Key == "WorkspaceId" {
-			continue
-		}
-		// aliyun-pay 的 ANTHROPIC_BASE_URL 自动用 WorkspaceId 拼装，跳过手动输入
-		if tpl.Name == "aliyun-pay" && f.Key == "ANTHROPIC_BASE_URL" {
-			ws, _ := env["WorkspaceId"].(string)
-			url := strings.Replace(f.Default, "{WorkspaceId}", ws, 1)
-			env["ANTHROPIC_BASE_URL"] = url
-			fmt.Printf("  ANTHROPIC_BASE_URL = %s (自动拼装)\n", url)
-			continue
-		}
-		// minimax 的 ANTHROPIC_BASE_URL 根据 region 选 cn 或 io
-		if tpl.Name == "minimax" && f.Key == "ANTHROPIC_BASE_URL" {
-			region, _ := env["region"].(string)
-			var url string
-			if region == "io" {
-				url = "https://api.minimax.io/anthropic"
-			} else {
-				url = "https://api.minimax.cn/anthropic"
+	// 5. 清理临时字段（WorkspaceId 是 aliyun-pay 的 URL 拼装源，写盘前删掉）
+	delete(env, "WorkspaceId")
+	delete(env, "region") // 防御性：region 是 PreAsk 字段理论上不写入 env，但保留 delete 保证兼容性
+
+	// 6. 写盘
+	if err := c.providers.CreateWithEnv(name, env); err != nil {
+		return err
+	}
+	fmt.Printf("\n已写入 %s/%s.json，可手工编辑补充其它字段\n", c.providers.ProvidersDir(), name)
+	return nil
+}
+
+// collectPreAsks 跑模板声明的 PreAsks：按 Prompt 读用户输入，Default / Validate 跟。
+// 结果写入 env[PreAsk.Key]。
+func (c *CLI) collectPreAsks(tpl templates.Template, env map[string]any) error {
+	for _, pa := range tpl.PreAsks {
+		for {
+			fmt.Print(pa.Prompt)
+			line, ok := readLine()
+			if !ok {
+				return fmt.Errorf("已取消")
 			}
-			env["ANTHROPIC_BASE_URL"] = url
-			fmt.Printf("  ANTHROPIC_BASE_URL = %s (%s)\n", url, region)
+			value := strings.TrimSpace(line)
+			if value == "" && pa.Default != "" {
+				value = pa.Default
+			}
+			if pa.Validate != nil {
+				if err := pa.Validate(value); err != nil {
+					fmt.Printf("  %s，请重新输入\n", err)
+					continue
+				}
+			}
+			env[pa.Key] = value
+			break
+		}
+	}
+	return nil
+}
+
+// collectFields 走模板的 TemplateField 主循环：通用占位符替换 + SkipPrompt 跳过 + readLine。
+func (c *CLI) collectFields(tpl templates.Template, env map[string]any) error {
+	for _, f := range tpl.Fields {
+		// 通用占位符替换：f.Default 含 {key} 时用 env[key] 替换（aliyun-pay 用此机制做 WorkspaceId 拼装）
+		defaultVal := f.Default
+		if defaultVal != "" {
+			for k, v := range env {
+				s, ok := v.(string)
+				if !ok {
+					continue
+				}
+				placeholder := "{" + k + "}"
+				if strings.Contains(defaultVal, placeholder) {
+					defaultVal = strings.ReplaceAll(defaultVal, placeholder, s)
+				}
+			}
+		}
+
+		// SkipPrompt 字段：跳过 readLine，直接用 Default 写入 env（aliyun-pay / minimax 的 BASE_URL）
+		if f.SkipPrompt {
+			if defaultVal != "" {
+				env[f.Key] = defaultVal
+				fmt.Printf("  %s = %s (自动拼装)\n", f.Key, defaultVal)
+			}
 			continue
 		}
 
 		var prompt string
-		if f.Default != "" {
-			prompt = fmt.Sprintf("%s [默认 %s]", f.Prompt, f.Default)
+		if defaultVal != "" {
+			prompt = fmt.Sprintf("%s [默认 %s]", f.Prompt, defaultVal)
 		} else if f.Secret {
 			prompt = f.Prompt + " (不回显)"
 		} else {
@@ -479,8 +493,8 @@ func (c *CLI) newProvider(positional, typeName string) error {
 				return fmt.Errorf("已取消")
 			}
 			value = strings.TrimSpace(line)
-			if value == "" && f.Default != "" {
-				value = f.Default
+			if value == "" && defaultVal != "" {
+				value = defaultVal
 			}
 			if value == "" && f.Required {
 				fmt.Println("  该字段必填，请重新输入")
@@ -492,17 +506,14 @@ func (c *CLI) newProvider(positional, typeName string) error {
 			env[f.Key] = value
 		}
 	}
-
-	// 清理临时字段（WorkspaceId, region）—— 它们不算 env 配置
-	delete(env, "WorkspaceId")
-	delete(env, "region")
-
-	// 5. 写盘
-	if err := c.providers.CreateWithEnv(name, env); err != nil {
-		return err
-	}
-	fmt.Printf("\n已写入 %s/%s.json，可手工编辑补充其它字段\n", c.providers.ProvidersDir(), name)
 	return nil
+}
+
+// applyPostOverrides 跑模板声明的 PostOverrides：按 Apply(env) 拿新值覆盖 env[Field]。
+func (c *CLI) applyPostOverrides(tpl templates.Template, env map[string]any) {
+	for _, ovr := range tpl.PostOverrides {
+		env[ovr.Field] = ovr.Apply(env)
+	}
 }
 
 // ProvidersDir 暴露 providers 目录路径（供 newProvider 显示）。
