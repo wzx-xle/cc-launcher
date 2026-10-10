@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-10 — template-driven-preask
+
+### Refactor
+- `cli.newProvider` 160 行混合职责拆开，模板自描述 + cli 数据驱动
+- `templates.Template` 加 `PreAsks []PreAsk` 字段（模板声明字段收集前的额外问答）
+- `templates.Template` 加 `PostOverrides []FieldOverride` 字段（模板声明字段收集后的字段值覆盖）
+- `templates.TemplateField` 加 `SkipPrompt bool` 字段（模板声明此字段跳过 prompt 直接写入）
+- `cli.newProvider` 拆成 `collectPreAsks` / `collectFields` / `applyPostOverrides` 三阶段函数
+- cli 端去除所有 `tpl.Name == "aliyun-pay"` / `"minimax"` 硬编码（3 处），改为模板元数据驱动
+
+### Templates
+- `minimaxTpl` 加 `PreAsk (region)` + `PostOverride (BASE_URL)` + `ANTHROPIC_BASE_URL.SkipPrompt = true`
+- `aliyunPayTpl` `ANTHROPIC_BASE_URL.SkipPrompt = true`（其它字段零修改）
+
+### Tests
+- `internal/templates`：加 4 个新单元测试（`TestMinimax_PreAskRegion` / `TestMinimax_PostOverride_BaseURL` / `TestAliyunPay_NoPreAsk` / `TestAliyunPay_BaseURL_SkipPrompt` / `TestMinimax_BaseURL_SkipPrompt`）
+- `internal/cli/cli_test.go`：零修改（行为不变——5 个 guided-flow 测试原样通过）
+
+### OpenSpec
+- 归档 change `template-driven-preask` → `2026-10-10-template-driven-preask`
+- 新增 capability `template-preask`（4 个 ADDED Requirements + 4 个 Scenario 合并到 `openspec/specs/template-preask/spec.md`）
+
+### Compatibility
+- 行为完全不变：`ccl provider --template minimax` / `--template aliyun-pay` 输出 JSON 与 v0.9.0 一致
+- 现有 user 配置（`~/.cc-launcher/providers/*.json`）不受影响（只动创建流程，不动读取）
+- 跨平台编译验证：linux / darwin / windows 三平台 build 通过
+
 ## [0.9.0] - 2026-10-09 — provider-setenv-cwd-binding
 
 ### Features
