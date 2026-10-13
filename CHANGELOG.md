@@ -7,11 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.11.2] - 2026-10-13 — release-assets-tar-gz
+
 ### Breaking Changes
 - **release 资产结构调整**：
   - 去掉 `windows/arm64`（matrix 减到 5 target：windows/amd64 + linux/{amd64,arm64} + darwin/{amd64,arm64}）
   - Windows 资产只 `cc-launcher-windows-amd64.zip`（不再单独传 `.exe`）
   - Linux/Darwin 资产改为 `cc-launcher-{os}-{arch}.tar.gz`（内含 `cc-launcher` 已 `chmod +x` + `README.md` + `LICENSE`，不再单独传裸 binary）
+
+### Fixes
+- `go build -trimpath` 移到命令行（不是 ldflags 的一部分；Go 1.21+ link 器拒绝作为 ldflags flag）。`build.sh build/cross_build` 与 `.github/workflows/release.yml build step` 同步加 `-trimpath`。v0.11.0 / v0.11.1 release workflow 因 ldflags 错误可能失败；v0.11.2+ 用新命令行为正确。
 
 ## [0.11.1] - 2026-10-13 — windows-detach-build-reproducible
 
