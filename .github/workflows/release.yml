@@ -13,18 +13,18 @@ permissions:
 
 jobs:
   build:
-    name: build (${{ matrix.target }})
+    name: build (${{ matrix.target.os }}-${{ matrix.target.arch }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         target:
-          - windows-amd64
-          - windows-arm64
-          - linux-amd64
-          - linux-arm64
-          - darwin-amd64
-          - darwin-arm64
+          - { os: windows, arch: amd64 }
+          - { os: windows, arch: arm64 }
+          - { os: linux, arch: amd64 }
+          - { os: linux, arch: arm64 }
+          - { os: darwin, arch: amd64 }
+          - { os: darwin, arch: arm64 }
 
     steps:
       - name: checkout
@@ -39,8 +39,8 @@ jobs:
 
       - name: build
         env:
-          GOOS: ${{ matrix.target.split('-')[0] }}
-          GOARCH: ${{ matrix.target.split('-')[1] }}
+          GOOS: ${{ matrix.target.os }}
+          GOARCH: ${{ matrix.target.arch }}
         run: |
           set -euo pipefail
           ext=""
@@ -64,7 +64,7 @@ jobs:
           echo "==> built: ${out}"
 
       - name: zip (windows only)
-        if: startsWith(matrix.target, 'windows-')
+        if: matrix.target.os == 'windows'
         shell: bash
         run: |
           set -euo pipefail
@@ -74,7 +74,7 @@ jobs:
           #   cc-launcher.exe  —— 主可执行
           #   ccl.cmd          —— ccl 命令 shim（项目原生命令名是 ccl，不是 cc-launcher）
           #   README.md / LICENSE —— 元信息
-          cp "cc-launcher-${{ matrix.target }}.exe" "cc-launcher.exe"
+          cp "cc-launcher-${{ matrix.target.os }}-${{ matrix.target.arch }}.exe" "cc-launcher.exe"
           cp ../README.md ./README.md
           cp ../LICENSE ./LICENSE
 
@@ -85,7 +85,7 @@ jobs:
           "%~dp0cc-launcher.exe" %*
           EOF
 
-          zip "cc-launcher-${{ matrix.target }}.zip" \
+          zip "cc-launcher-${{ matrix.target.os }}-${{ matrix.target.arch }}.zip" \
               "cc-launcher.exe" "ccl.cmd" "README.md" "LICENSE"
 
           # 清理中间产物，只留 zip + 单 exe
@@ -96,6 +96,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/cc-launcher-${{ matrix.target }}.exe
-            dist/cc-launcher-${{ matrix.target }}.zip
+            dist/cc-launcher-${{ matrix.target.os }}-${{ matrix.target.arch }}.exe
+            dist/cc-launcher-${{ matrix.target.os }}-${{ matrix.target.arch }}.zip
           fail_on_unmatched_files: false
