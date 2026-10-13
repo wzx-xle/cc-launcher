@@ -99,8 +99,9 @@ cross_build() {
 }
 
 windows_build() {
+    # 与 .github/workflows/release.yml matrix 对齐——v0.11.2 起只 windows/amd64
+    # （windows/arm64 用户少，CI 资源紧；bucket manifest 只跟 amd64 zip）。
     cross_build windows amd64 .exe
-    cross_build windows arm64 .exe
 }
 
 # sha256_cmd 跨 OS 兼容：Linux 用 sha256sum，macOS 用 shasum -a 256。
@@ -164,19 +165,17 @@ scoop_bump() {
         exit 1
     fi
 
-    # 跨编译 Windows amd64 + arm64
+    # 跨编译 Windows amd64（v0.11.2 起去 arm64，与 release.yml matrix 对齐）
     windows_build
 
-    local zip_amd64 zip_arm64
+    local zip_amd64
     zip_amd64=$(pack_windows_zip_for_scoop amd64)
-    zip_arm64=$(pack_windows_zip_for_scoop arm64)
 
-    local hash_amd64 hash_arm64
+    local hash_amd64
     hash_amd64=$(sha256_cmd "$zip_amd64" | awk '{print $1}')
-    hash_arm64=$(sha256_cmd "$zip_arm64" | awk '{print $1}')
 
     # 清理临时 scoop zip（dist/ 只留原始 exe）
-    rm -f "$zip_amd64" "$zip_arm64"
+    rm -f "$zip_amd64"
 
     local repo="wzx-xle/cc-launcher"
     local base="https://github.com/${repo}/releases/download/${version}"
@@ -190,11 +189,6 @@ scoop_bump() {
         "64bit": {
             "url": "${base}/cc-launcher-windows-amd64.zip",
             "hash": "${hash_amd64}",
-            "bin": ["ccl.cmd"]
-        },
-        "arm64": {
-            "url": "${base}/cc-launcher-windows-arm64.zip",
-            "hash": "${hash_arm64}",
             "bin": ["ccl.cmd"]
         }
     }
