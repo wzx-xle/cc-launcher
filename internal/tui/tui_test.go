@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 
 	"cc-launcher/internal/provider"
@@ -176,5 +177,101 @@ func TestRun_RememberStage_TriggeredWhenNoBinding(t *testing.T) {
 	updated := enterSession(m)                     // stageSession → stageRemember
 	if updated.stage != stageRemember {
 		t.Errorf("expected stageRemember when no binding exists (first time), got stage=%d", updated.stage)
+	}
+}
+
+// ─── provider-list-rendering §TUI 渲染：dim [*] / note ───
+
+// TestRenderProviderView_PreSelectedShowsDimAsterisk 覆盖 spec Scenario
+// "Pre-selected provider not at cursor shows dim [*]"——cursor 离开预选项后，
+// 预选项仍带 [*] 形态（颜色由 dimStyle 决定，但本测试只验字符存在）。
+func TestRenderProviderView_PreSelectedShowsDimAsterisk(t *testing.T) {
+	providers := []provider.Info{
+		{Name: "anthropic"},
+		{Name: "deepseek"}, // pre-selected
+		{Name: "glm"},
+	}
+	m := newModel(providers, "deepseek", "manual", "", "/wd")
+	// cursor 默认在 deepseek (index 1)；按 ↓ 移到 glm (index 2)
+	m = sendKey(m, tea.KeyMsg{Type: tea.KeyDown})
+
+	view := m.View()
+
+	// 三个 provider 都应渲染；deepseek 仍带 [*] 形态
+	// 用 strings.Count 统计 [*] 出现次数：cursor(glm) = 1, pre-selected(deepseek) = 1
+	if got := strings.Count(view, "[*]"); got != 2 {
+		t.Errorf("View [*] count = %d, want 2 (cursor=glm + pre-selected=deepseek)", got)
+	}
+	// 其它行（anthropic）应带 [ ]
+	if !strings.Contains(view, "[ ]") {
+		t.Errorf("View should contain '[ ]' for non-selected anthropic row")
+	}
+	// 关键：行尾不应再有"默认"字串
+	if strings.Contains(view, "默认") {
+		t.Errorf("View should NOT contain '默认' tag (removed in this change)")
+	}
+}
+
+// TestRenderProviderView_NoTagAtEnd 覆盖 spec Scenario "Pre-selected
+// provider is the cursor" 边缘 + 锁定"行尾默认 tag 已移除"。
+func TestRenderProviderView_NoTagAtEnd(t *testing.T) {
+	providers := []provider.Info{
+		{Name: "anthropic"},
+		{Name: "deepseek"},
+	}
+	m := newModel(providers, "deepseek", "manual", "", "/wd")
+	view := m.View()
+	if strings.Contains(view, "默认") {
+		t.Errorf("View should NOT contain '默认' tag at end of any row, got:\n%s", view)
+	}
+}
+
+// TestRenderProviderView_NoteShownAfterName 覆盖 spec Scenario "Provider
+// with note displays note in dim style"——note 文本出现在 view 中。
+func TestRenderProviderView_NoteShownAfterName(t *testing.T) {
+	providers := []provider.Info{
+		{Name: "anthropic"},
+		{Name: "deepseek", Note: "国内 / 按量计费"},
+	}
+	m := newModel(providers, "", "manual", "", "/wd")
+	view := m.View()
+	if !strings.Contains(view, "国内 / 按量计费") {
+		t.Errorf("View should contain provider note text, got:\n%s", view)
+	}
+}
+
+// TestRenderProviderView_NoteSuppressedWhenErrored 覆盖 spec Scenario
+// "Errored provider keeps error rendering precedence"——Errored 时不渲染 note。
+func TestRenderProviderView_NoteSuppressedWhenErrored(t *testing.T) {
+	providers := []provider.Info{
+		{Name: "broken", Note: "should not show", Error: "JSON 解析失败"},
+	}
+	m := newModel(providers, "", "manual", "", "/wd")
+	view := m.View()
+	if !strings.Contains(view, "JSON 解析失败") {
+		t.Errorf("View should contain error text, got:\n%s", view)
+	}
+	if strings.Contains(view, "should not show") {
+		t.Errorf("View should NOT contain note text when Error is set, got:\n%s", view)
+	}
+}
+
+// TestRenderProviderView_NoPreSelectedAllBlankMarkers 覆盖 spec Scenario
+// "No pre-selection available"——preSelectedProvider="" 时所有行 marker 为 [ ]。
+func TestRenderProviderView_NoPreSelectedAllBlankMarkers(t *testing.T) {
+	providers := []provider.Info{
+		{Name: "alpha"},
+		{Name: "bravo"},
+		{Name: "charlie"},
+	}
+	m := newModel(providers, "", "manual", "", "/wd")
+	view := m.View()
+	// 任何 [*] 形态都不应出现（cursor 所在行除外——但 cursor 行也算 [*]，
+	// 所以仍可能有 1 个 [*]）→ 我们已经接受这种"cursor 高亮 [*]"事实，
+	// 改用更弱的断言：dim 渲染的 [*] 不应出现。dimStyle 会注入 ANSI
+	// 转义，所以这里改为：view 中非 cursor 行的 provider 名不应有 [*] 在它前面。
+	// 最简单：count([*]) 最多 = 1（仅 cursor 行），不应有 2 个。
+	if got := strings.Count(view, "[*]"); got > 1 {
+		t.Errorf("View [*] count = %d, want <= 1 (no pre-selection → only cursor)", got)
 	}
 }

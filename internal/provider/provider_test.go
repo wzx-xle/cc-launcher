@@ -220,3 +220,219 @@ func writeProvider(t *testing.T, dir, filename string, cfg map[string]any) {
 		t.Fatal(err)
 	}
 }
+
+// writeProviderRaw 直接写原始字节（用于构造非 JSON 兼容字段如 order="ten"）。
+func writeProviderRaw(t *testing.T, dir, filename string, data []byte) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, filename), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// ─── provider-list-rendering §note / order 解析与排序 ───
+
+// TestList_ParsesNoteAndOrder 覆盖 spec/provider-list-rendering §"Provider
+// config supports optional note and order fields" Scenarios "Config without
+// note or order loads successfully" / "Config with note loads into Info.Note"
+// / "Config with order loads into Info.Order"——三个 provider JSON
+// （带/不带 note、order 不同值）各自正确填充 Info。
+func TestList_ParsesNoteAndOrder(t *testing.T) {
+	dir := t.TempDir()
+	m := NewManager(dir)
+
+	writeProvider(t, dir, "alpha.json", map[string]any{
+		"env":   map[string]any{"ANTHROPIC_AUTH_TOKEN": "sk-a"},
+		"order": 5,
+	})
+	writeProvider(t, dir, "bravo.json", map[string]any{
+		"env":   map[string]any{"ANTHROPIC_AUTH_TOKEN": "sk-b"},
+		"note":  "国内 / 按量计费",
+		"order": 10,
+	})
+	writeProvider(t, dir, "charlie.json", map[string]any{
+		"env": map[string]any{"ANTHROPIC_AUTH_TOKEN": "sk-c"},
+		// 无 note / order
+	})
+
+	list, err := m.List()
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(list) != 3 {
+		t.Fatalf("List() len = %d, want 3", len(list))
+	}
+
+	byName := map[string]Info{}
+	for _, info := range list {
+		byName[info.Name] = info
+	}
+
+	if got := byName["alpha"]; got.Note != "" || got.Order != 5 {
+		t.Errorf("alpha = Note=%q Order=%d, want Note=%q Order=5", got.Note, got.Order, "")
+	}
+	if got := byName["bravo"]; got.Note != "国内 / 按量计费" || got.Order != 10 {
+		t.Errorf("bravo = Note=%q Order=%d, want Note=%q Order=10", got.Note, got.Order, "国内 / 按量计费")
+	}
+	if got := byName["charlie"]; got.Note != "" || got.Order != 0 {
+		t.Errorf("charlie = Note=%q Order=%d, want Note=%q Order=0 (defaults)", got.Note, got.Order, "")
+	}
+}
+
+// TestList_SortedByOrderThenName 覆盖 spec/provider-list-rendering §"Manager
+// .List() returns providers sorted by Order then Name" Scenario "Three
+// providers with distinct order"——order=20/5/10 排成 5/10/20。
+func TestList_SortedByOrderThenName(t *testing.T) {
+	dir := t.TempDir()
+	m := NewManager(dir)
+
+	writeProvider(t, dir, "alpha.json", map[string]any{
+		"env": map[string]any{"ANTHROPIC_AUTH_TOKEN": "sk-a"}, "order": 20,
+	})
+	writeProvider(t, dir, "bravo.json", map[string]any{
+		"env": map[string]any{"ANTHROPIC_AUTH_TOKEN": "sk-b"}, "order": 5,
+	})
+	writeProvider(t, dir, "charlie.json", map[string]any{
+		"env": map[string]any{"ANTHROPIC_AUTH_TOKEN": "sk-c"}, "order": 10,
+	})
+
+	list, err := m.List()
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	got := []string{list[0].Name, list[1].Name, list[2].Name}
+	want := []string{"bravo", "charlie", "alpha"}
+	if !slicesEqual(got, want) {
+		t.Errorf("List() order = %v, want %v", got, want)
+	}
+}
+
+// TestList_SameOrderFallsBackToName 覆盖 spec Scenario "Providers with same
+// order fall back to name"——两个 provider 同 order=5 时按 Name 字典序。
+func TestList_SameOrderFallsBackToName(t *testing.T) {
+	dir := t.TempDir()
+	m := NewManager(dir)
+
+	writeProvider(t, dir, "bravo.json", map[string]any{
+		"env": map[string]any{"ANTHROPIC_AUTH_TOKEN": "sk-b"}, "order": 5,
+	})
+	writeProvider(t, dir, "alpha.json", map[string]any{
+		"env": map[string]any{"ANTHROPIC_AUTH_TOKEN": "sk-a"}, "order": 5,
+	})
+
+	list, err := m.List()
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	got := []string{list[0].Name, list[1].Name}
+	want := []string{"alpha", "bravo"}
+	if !slicesEqual(got, want) {
+		t.Errorf("List() order = %v, want %v", got, want)
+	}
+}
+
+// TestList_NoOrderSortsByName 覆盖 spec Scenario "Providers without order
+// sort by name"——无 order 字段（默认 0）按 Name 字典序。
+func TestList_NoOrderSortsByName(t *testing.T) {
+	dir := t.TempDir()
+	m := NewManager(dir)
+
+	writeProvider(t, dir, "charlie.json", map[string]any{
+		"env": map[string]any{"ANTHROPIC_AUTH_TOKEN": "sk-c"},
+	})
+	writeProvider(t, dir, "alpha.json", map[string]any{
+		"env": map[string]any{"ANTHROPIC_AUTH_TOKEN": "sk-a"},
+	})
+
+	list, err := m.List()
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	got := []string{list[0].Name, list[1].Name}
+	want := []string{"alpha", "charlie"}
+	if !slicesEqual(got, want) {
+		t.Errorf("List() order = %v, want %v", got, want)
+	}
+}
+
+// TestList_NonNumericOrderMarksOnlyThatProviderAsError 覆盖 spec Scenario
+// "Config with non-numeric order marks only that provider as Error"——
+// order="ten" 的 provider 单独 Error，其它不受影响。
+func TestList_NonNumericOrderMarksOnlyThatProviderAsError(t *testing.T) {
+	dir := t.TempDir()
+	m := NewManager(dir)
+
+	// 手写：order 字段是字符串，json.Unmarshal configFile 会失败
+	writeProviderRaw(t, dir, "alpha.json", []byte(`{
+  "env": {"ANTHROPIC_AUTH_TOKEN": "sk-a"},
+  "order": "ten"
+}`))
+	writeProvider(t, dir, "bravo.json", map[string]any{
+		"env":   map[string]any{"ANTHROPIC_AUTH_TOKEN": "sk-b"},
+		"note":  "国内",
+		"order": 7,
+	})
+
+	list, err := m.List()
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("List() len = %d, want 2", len(list))
+	}
+
+	byName := map[string]Info{}
+	for _, info := range list {
+		byName[info.Name] = info
+	}
+
+	if got := byName["alpha"]; got.Error == "" {
+		t.Errorf("alpha (order=\"ten\") should have Error set, got empty; Note=%q Order=%d", got.Note, got.Order)
+	}
+	if got := byName["bravo"]; got.Error != "" {
+		t.Errorf("bravo should have no Error, got %q", got.Error)
+	} else if got.Note != "国内" || got.Order != 7 {
+		t.Errorf("bravo Note=%q Order=%d, want Note=%q Order=7", got.Note, got.Order, "国内")
+	}
+}
+
+// TestList_ErroredProviderIncludedAndSorted 覆盖 spec Scenario "Errored
+// providers are included and sorted normally"——无效 JSON + 有效 provider
+// 同时返回；order 都为 0，按 Name 字典序，alpha 在前 bravo 在后。
+func TestList_ErroredProviderIncludedAndSorted(t *testing.T) {
+	dir := t.TempDir()
+	m := NewManager(dir)
+
+	// bravo 是无效 JSON（Order 默认为 0；Error != ""）
+	writeProviderRaw(t, dir, "bravo.json", []byte("not json{{{"))
+	// alpha 是有效 JSON，Order 默认为 0
+	writeProvider(t, dir, "alpha.json", map[string]any{
+		"env": map[string]any{"ANTHROPIC_AUTH_TOKEN": "sk-a"},
+	})
+
+	list, err := m.List()
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("List() len = %d, want 2", len(list))
+	}
+
+	if list[0].Name != "alpha" {
+		t.Errorf("list[0] = %q, want alpha (alpha < bravo by name)", list[0].Name)
+	}
+	if list[1].Name != "bravo" || list[1].Error == "" {
+		t.Errorf("list[1] = %q (Error=%q), want bravo with Error set", list[1].Name, list[1].Error)
+	}
+}
+
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}

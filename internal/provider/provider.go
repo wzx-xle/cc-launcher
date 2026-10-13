@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -12,6 +13,20 @@ import (
 type Info struct {
 	Name  string // 文件名去掉 .json
 	Error string // JSON 解析失败时的错误信息
+	// Note 是 provider 配置文件顶层 `note` 字段，缺省 ""。
+	// 渲染层（TUI / CLI）用它显示一行备注。
+	Note string
+	// Order 是 provider 配置文件顶层 `order` 字段，缺省 0。
+	// List() 返回前按 (Order asc, Name asc) 稳定排序。
+	Order int
+}
+
+// configFile 是 provider JSON 文件的内部表示（仅用于 Unmarshal；List() 不导出）。
+// 新增的 note / order 是可选字段，缺失时为零值。
+type configFile struct {
+	Env   map[string]any `json:"env"`
+	Note  string         `json:"note,omitempty"`
+	Order int            `json:"order,omitempty"`
 }
 
 // Manager 管理 ~/.cc-launcher/providers/ 目录。
@@ -30,6 +45,7 @@ func (m *Manager) ProvidersDir() string {
 }
 
 // List 列出所有提供商。JSON 解析失败的在 Info.Error 中标记，不阻塞其他文件。
+// 返回前按 (Order asc, Name asc) 稳定排序。
 func (m *Manager) List() ([]Info, error) {
 	if err := os.MkdirAll(m.providersDir, 0755); err != nil {
 		return nil, err
@@ -55,13 +71,23 @@ func (m *Manager) List() ([]Info, error) {
 		if err != nil {
 			info.Error = err.Error()
 		} else {
-			var v any
-			if err := json.Unmarshal(data, &v); err != nil {
+			var cfg configFile
+			if err := json.Unmarshal(data, &cfg); err != nil {
 				info.Error = fmt.Sprintf("JSON 解析失败: %s", err.Error())
+			} else {
+				info.Note = cfg.Note
+				info.Order = cfg.Order
 			}
 		}
 		result = append(result, info)
 	}
+
+	slices.SortStableFunc(result, func(a, b Info) int {
+		if a.Order != b.Order {
+			return a.Order - b.Order
+		}
+		return strings.Compare(a.Name, b.Name)
+	})
 	return result, nil
 }
 

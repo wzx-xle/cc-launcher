@@ -255,16 +255,22 @@ func (m model) View() string {
 func (m model) renderProviderView(sb *strings.Builder) {
 	sb.WriteString("选择提供商:\n\n")
 	for i, p := range m.providers {
+		// marker 三态：cursor 行 [*]（高亮）、pre-selected 行 [*]（dim）、
+		// 普通行 [ ]。pre-selected 与 cursor 重合时由 cursorStyle 整行覆盖。
 		marker := "[ ]"
+		isPreSelected := p.Name == m.preSelectedProvider && p.Error == ""
+		if isPreSelected {
+			marker = dimStyle.Render("[*]")
+		}
 		if i == m.cursor {
 			marker = "[*]"
 		}
 		line := fmt.Sprintf("  %s %s", marker, p.Name)
 		if p.Error != "" {
 			line += dimStyle.Render(fmt.Sprintf(" — %s", p.Error))
-		}
-		if p.Name == m.preSelectedProvider && p.Error == "" {
-			line += "  " + tagStyle.Render("默认")
+		} else if p.Note != "" {
+			// success 路径追加 note；errored 不追加（避免双 dim 段）
+			line += dimStyle.Render("  " + p.Note)
 		}
 		if i == m.cursor {
 			line = cursorStyle.Render(line)

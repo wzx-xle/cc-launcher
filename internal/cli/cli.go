@@ -2,11 +2,13 @@ package cli
 
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"cc-launcher/internal/modes"
@@ -414,11 +416,63 @@ func (c *CLI) newProvider(positional, typeName string) error {
 	delete(env, "WorkspaceId")
 	delete(env, "region") // 防御性：region 是 PreAsk 字段理论上不写入 env，但保留 delete 保证兼容性
 
-	// 6. 写盘
+	// 6. 写盘前快照：算当前所有 provider 的 max(Order)，写盘后用此值给用户
+	// 推荐 order 建议（max+10；写盘前的快照不包含本次新文件）。
+	var maxOrder int
+	if existing, err := c.providers.List(); err == nil {
+		for _, info := range existing {
+			if info.Order > maxOrder {
+				maxOrder = info.Order
+			}
+		}
+	}
+	// List() 出错不阻塞主流程——order 建议是 best-effort。
+
+	// 7. 写盘
 	if err := c.providers.CreateWithEnv(name, env); err != nil {
 		return err
 	}
+
+	// 8. 写盘后追加可选 metadata 步骤（provider-list-display-improvements §R2）：
+	// note 询问 → 空串/EOF 视为跳过；非空则 ReadFile + JSON patch 写回 note 字段。
+	// order 提示 → 只显示 max+10，不读输入。
+	// 设计：note 阶段 EOF 视为跳过（与 template prompts 阶段 EOF 视为取消不同——
+	// 因为 env 块已写入无法回滚，回滚要单独 delete-on-EOF 路径，scope 不值）。
+	fmt.Print("note (可选备注，回车跳过): ")
+	raw, _ := readLine() // 忽略 ok：EOF 视为空字符串（与用户回车等价）
+	note := strings.TrimSpace(raw)
+	if note != "" {
+		path := filepath.Join(c.providers.ProvidersDir(), name+".json")
+		if err := writeNoteToProviderFile(path, note); err != nil {
+			return err
+		}
+	}
+
+	fmt.Printf("排序值: %d (现有 max=%d, 建议 max+10；手改 JSON order 字段覆盖)\n", maxOrder+10, maxOrder)
+
 	fmt.Printf("\n已写入 %s/%s.json，可手工编辑补充其它字段\n", c.providers.ProvidersDir(), name)
+	return nil
+}
+
+// writeNoteToProviderFile 把 note 顶层字段写回 provider JSON 文件。
+// env 块不动；用 ReadFile + Unmarshal + MarshalIndent 回写。
+func writeNoteToProviderFile(path, note string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("读回 %s 失败: %w", path, err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return fmt.Errorf("解析 %s 失败: %w", path, err)
+	}
+	cfg["note"] = note
+	out, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, out, 0644); err != nil {
+		return fmt.Errorf("写回 %s 失败: %w", path, err)
+	}
 	return nil
 }
 

@@ -2,8 +2,10 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -908,5 +910,235 @@ func TestProvider_DeleteWithType_TypeIgnored(t *testing.T) {
 	}
 	if pm.Exists("foo") {
 		t.Error("--delete foo --type deepseek 应删 foo")
+	}
+}
+
+// ─── provider-list-display-improvements §R2: ccl provider --new 写盘后 metadata ───
+
+// TestGuidedFlow_NewProvider_PostWrite_NoteEmptySkipped 覆盖 spec
+// /provider-new-guided-flow §"empty note input leaves file unchanged"——
+// note 步骤空字符串（mock EOF）→ 文件无 note 字段。
+func TestGuidedFlow_NewProvider_PostWrite_NoteEmptySkipped(t *testing.T) {
+	providersDir := t.TempDir()
+	stateDir := t.TempDir()
+	pm := provider.NewManager(providersDir)
+	sm := state.NewManager(stateDir)
+	c := New(pm, sm)
+
+	// 喂入 deepseek 流程需要的 fields + 末尾空字符串（note 跳过）
+	restore := mockStdin(append(guidedLines("deepseek"), ""))
+	defer restore()
+
+	cap := captureStdout(t)
+	if err := c.Run([]string{"provider", "--new", "--type", "deepseek"}); err != nil {
+		t.Fatalf("--new --type deepseek error: %v", err)
+	}
+	_ = cap()
+
+	got, err := pm.Get("test-deepseek")
+	if err != nil {
+		t.Fatalf("Get error: %v", err)
+	}
+	if _, hasNote := got["note"]; hasNote {
+		t.Errorf("file should not have 'note' field when user skips; got: %v", got)
+	}
+}
+
+// TestGuidedFlow_NewProvider_PostWrite_NoteWritesToFile 覆盖 spec Scenario
+// "non-empty note input updates the file"——note 非空 → 文件有 note 字段；
+// env 块原 keys 都在。
+func TestGuidedFlow_NewProvider_PostWrite_NoteWritesToFile(t *testing.T) {
+	providersDir := t.TempDir()
+	stateDir := t.TempDir()
+	pm := provider.NewManager(providersDir)
+	sm := state.NewManager(stateDir)
+	c := New(pm, sm)
+
+	// 喂入 deepseek fields + 末尾 note = "国内 / 按量计费"
+	restore := mockStdin(append(guidedLines("deepseek"), "国内 / 按量计费"))
+	defer restore()
+
+	cap := captureStdout(t)
+	if err := c.Run([]string{"provider", "--new", "--type", "deepseek"}); err != nil {
+		t.Fatalf("--new --type deepseek error: %v", err)
+	}
+	_ = cap()
+
+	got, err := pm.Get("test-deepseek")
+	if err != nil {
+		t.Fatalf("Get error: %v", err)
+	}
+	if got["note"] != "国内 / 按量计费" {
+		t.Errorf("note = %v, want %q", got["note"], "国内 / 按量计费")
+	}
+	// env 块仍完整
+	env, ok := got["env"].(map[string]any)
+	if !ok {
+		t.Fatalf("env field missing or wrong type: %v", got)
+	}
+	if _, hasAuth := env["ANTHROPIC_AUTH_TOKEN"]; !hasAuth {
+		t.Errorf("env lost ANTHROPIC_AUTH_TOKEN after note writeback: %v", env)
+	}
+	if env["ANTHROPIC_BASE_URL"] != "https://api.deepseek.com/anthropic" {
+		t.Errorf("env BASE_URL = %v, want deepseek default", env["ANTHROPIC_BASE_URL"])
+	}
+}
+
+// TestGuidedFlow_NewProvider_PostWrite_OrderHintUsesMaxPlusTen 覆盖 spec
+// Scenario "order hint shows max-plus-ten"——预置 bravo.order=20，--new
+// 完成后 stdout 应含 "排序值: 30" 与 "现有 max=20"。
+func TestGuidedFlow_NewProvider_PostWrite_OrderHintUsesMaxPlusTen(t *testing.T) {
+	providersDir := t.TempDir()
+	stateDir := t.TempDir()
+	pm := provider.NewManager(providersDir)
+	sm := state.NewManager(stateDir)
+
+	// 预置 bravo.order=20
+	pm.CreateWithEnv("bravo", map[string]any{
+		"ANTHROPIC_AUTH_TOKEN": "sk-b",
+	})
+	// CreateWithEnv 不接受 order 字段；手写补 order
+	writeOrder(t, providersDir, "bravo", 20)
+
+	c := New(pm, sm)
+	restore := mockStdin(guidedLines("deepseek"))
+	defer restore()
+
+	cap := captureStdout(t)
+	if err := c.Run([]string{"provider", "--new", "--type", "deepseek"}); err != nil {
+		t.Fatalf("--new --type deepseek error: %v", err)
+	}
+	out := cap()
+
+	if !strings.Contains(out, "排序值: 30") {
+		t.Errorf("output should contain '排序值: 30', got:\n%s", out)
+	}
+	if !strings.Contains(out, "现有 max=20") {
+		t.Errorf("output should contain '现有 max=20', got:\n%s", out)
+	}
+}
+
+// TestGuidedFlow_NewProvider_PostWrite_OrderHintZeroBaseline 覆盖 spec
+// Scenario "order hint uses zero baseline when no pre-existing providers"——
+// 空 providers dir 时 max=0、suggested=10。
+func TestGuidedFlow_NewProvider_PostWrite_OrderHintZeroBaseline(t *testing.T) {
+	providersDir := t.TempDir()
+	stateDir := t.TempDir()
+	pm := provider.NewManager(providersDir)
+	sm := state.NewManager(stateDir)
+	c := New(pm, sm)
+
+	restore := mockStdin(guidedLines("deepseek"))
+	defer restore()
+
+	cap := captureStdout(t)
+	if err := c.Run([]string{"provider", "--new", "--type", "deepseek"}); err != nil {
+		t.Fatalf("--new --type deepseek error: %v", err)
+	}
+	out := cap()
+
+	if !strings.Contains(out, "现有 max=0") {
+		t.Errorf("output should contain '现有 max=0', got:\n%s", out)
+	}
+	if !strings.Contains(out, "排序值: 10") {
+		t.Errorf("output should contain '排序值: 10', got:\n%s", out)
+	}
+}
+
+// TestGuidedFlow_NewProvider_PostWrite_OrderHintExcludesNewFile 覆盖 spec
+// Scenario "order hint excludes the just-written file"——连续跑两次 --new
+// (第二次不指定 order)，第二次的 max 不应含第一次的新文件。
+//
+// 验证逻辑：第一次 --new 后新文件无 order 字段（默认 0）。第二次 --new
+// 时 max 应为 0（不是 0+something）。
+func TestGuidedFlow_NewProvider_PostWrite_OrderHintExcludesNewFile(t *testing.T) {
+	providersDir := t.TempDir()
+	stateDir := t.TempDir()
+	pm := provider.NewManager(providersDir)
+	sm := state.NewManager(stateDir)
+	c := New(pm, sm)
+
+	// 第一次 --new：mockStdin 喂一个 type 的 fields
+	restore := mockStdin(guidedLines("deepseek"))
+	if err := c.Run([]string{"provider", "--new", "--type", "deepseek"}); err != nil {
+		t.Fatalf("first --new error: %v", err)
+	}
+	restore() // 恢复 readLineFn
+
+	// 第二次 --new：mockStdin 喂另一个 type 的 fields
+	restore2 := mockStdin(guidedLines("glm"))
+	defer restore2()
+	cap := captureStdout(t)
+	if err := c.Run([]string{"provider", "--new", "--type", "glm"}); err != nil {
+		t.Fatalf("second --new error: %v", err)
+	}
+	out := cap()
+
+	// 第一次新文件 test-deepseek.json 写时没有 order 字段（默认 0）。
+	// 第二次 --new 写盘前 max=0（第一次文件无 order 字段）；写盘后 stdout
+	// 应显示 "现有 max=0" + "排序值: 10"。
+	if !strings.Contains(out, "现有 max=0") {
+		t.Errorf("second run should show '现有 max=0' (first file has no order), got:\n%s", out)
+	}
+	if !strings.Contains(out, "排序值: 10") {
+		t.Errorf("second run should show '排序值: 10', got:\n%s", out)
+	}
+}
+
+// TestProviderList_HonorsOrder 覆盖 design.md Resolved Decisions R1 软测试——
+// ccl provider --list 输出顺序应与 order 升序一致。
+func TestProviderList_HonorsOrder(t *testing.T) {
+	providersDir := t.TempDir()
+	stateDir := t.TempDir()
+	pm := provider.NewManager(providersDir)
+	sm := state.NewManager(stateDir)
+
+	// 三个 provider，order 不同
+	pm.CreateWithEnv("charlie", map[string]any{"ANTHROPIC_AUTH_TOKEN": "sk-c"})
+	pm.CreateWithEnv("alpha", map[string]any{"ANTHROPIC_AUTH_TOKEN": "sk-a"})
+	pm.CreateWithEnv("bravo", map[string]any{"ANTHROPIC_AUTH_TOKEN": "sk-b"})
+
+	writeOrder(t, providersDir, "charlie", 20)
+	writeOrder(t, providersDir, "alpha", 5)
+	writeOrder(t, providersDir, "bravo", 10)
+
+	c := New(pm, sm)
+	cap := captureStdout(t)
+	if err := c.Run([]string{"provider", "--list"}); err != nil {
+		t.Fatalf("provider --list error: %v", err)
+	}
+	out := cap()
+
+	// 期望顺序：alpha (order=5) → bravo (10) → charlie (20)
+	idxA := strings.Index(out, "alpha")
+	idxB := strings.Index(out, "bravo")
+	idxC := strings.Index(out, "charlie")
+	if idxA < 0 || idxB < 0 || idxC < 0 {
+		t.Fatalf("output missing one of providers, got:\n%s", out)
+	}
+	if !(idxA < idxB && idxB < idxC) {
+		t.Errorf("--list order should be alpha < bravo < charlie, got:\n%s", out)
+	}
+}
+
+// writeOrder helper：往 provider JSON 写顶层 order 字段（CreateWithEnv 不接受）。
+func writeOrder(t *testing.T, dir, name string, order int) {
+	t.Helper()
+	path := filepath.Join(dir, name+".json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg["order"] = order
+	out, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, out, 0644); err != nil {
+		t.Fatal(err)
 	}
 }
