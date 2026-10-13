@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Breaking Changes
+- **Windows ccl 启动 Claude Code 后立即退 0**：之前是 `cmd.Run()` wait 子进程退出后透传 exit code，现在改为 `cmd.Start()` 启动后立即 `os.Exit(0)`。ccl 进程不再在任务管理器里持续存在（与 Unix `syscall.Exec` 进程 image 替换的用户感知一致），但 **claude 退出 code 不再传给 ccl 调用者**。Claude 退出 code 由 `cmd.exe → node.exe → claude.exe` 进程链传递给 PowerShell 的 `$LASTEXITCODE`。写 `ccl && echo OK` 类脚本在 claude 失败时误判成功——这是预期 trade-off。
+
 ### Refactor
 - `cmd/cc-launcher/version.go`：移除 `BuildTime` 字段与 `ccl --version` 输出中的 "Built" 行。`BuildTime` 每次 build 注入当前时间让 Go 二进制 byte-level 不可重现（同 commit + 同 source 下两次 build 也不同），导致 zip hash 跨环境无法对齐。`git log` + `Commit` 字段已足够追溯具体 build 时间。
 
