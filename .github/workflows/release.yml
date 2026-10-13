@@ -20,7 +20,6 @@ jobs:
       matrix:
         target:
           - { os: windows, arch: amd64 }
-          - { os: windows, arch: arm64 }
           - { os: linux, arch: amd64 }
           - { os: linux, arch: arm64 }
           - { os: darwin, arch: amd64 }
@@ -67,43 +66,64 @@ jobs:
           go build -trimpath -ldflags="${ldflags}" -o "${out}" ./cmd/cc-launcher/
           echo "==> built: ${out}"
 
-      - name: zip (windows only)
-        if: matrix.target.os == 'windows'
+      - name: package
         shell: bash
         run: |
           set -euo pipefail
           cd dist
 
-          # zip 内文件命名约定（scoop manifest 的 bin 字段依赖此约定）：
-          #   cc-launcher.exe  —— 主可执行
-          #   ccl.cmd          —— ccl 命令 shim（项目原生命令名是 ccl，不是 cc-launcher）
-          #   README.md / LICENSE —— 元信息
-          cp "cc-launcher-${{ matrix.target.os }}-${{ matrix.target.arch }}.exe" "cc-launcher.exe"
-          cp ../README.md ./README.md
-          cp ../LICENSE ./LICENSE
+          OS="${{ matrix.target.os }}"
+          ARCH="${{ matrix.target.arch }}"
+          bare="cc-launcher-${OS}-${ARCH}"
 
-          # ccl.cmd shim：把 `ccl` 命令转发到 `cc-launcher.exe`
-          # 这是 wrapper 不是二进制；用 cmd 的 %~dp0 取自身目录，绝对路径避免 PATH 干扰
-          cat > ccl.cmd <<'EOF'
+          if [ "$OS" = "windows" ]; then
+            # ---- Windows: zip 含 ccl.cmd shim + README + LICENSE ----
+            # zip 内文件命名约定（scoop manifest 的 bin 字段依赖此约定）：
+            #   cc-launcher.exe  —— 主可执行
+            #   ccl.cmd          —— ccl 命令 shim（项目原生命令名是 ccl，不是 cc-launcher）
+            #   README.md / LICENSE —— 元信息
+            cp "${bare}.exe" "cc-launcher.exe"
+            cp ../README.md ./README.md
+            cp ../LICENSE ./LICENSE
+
+            # ccl.cmd shim：把 `ccl` 命令转发到 `cc-launcher.exe`
+            # 这是 wrapper 不是二进制；用 cmd 的 %~dp0 取自身目录，绝对路径避免 PATH 干扰
+            cat > ccl.cmd <<'EOF'
           @echo off
           "%~dp0cc-launcher.exe" %*
           EOF
 
-          # 固定 4 个源文件 mtime 到 epoch 0 + 用 UTC 打包 + 剥 NTFS extra field：
-          # 三个变量统一后，本机 build.sh scoop-bump 同样处理，hash byte-level 一致
-          # （避免 CI 时区 / 100ns mtime 精度让本机 hash 算不准）。
-          touch -d @0 cc-launcher.exe ccl.cmd README.md LICENSE
-          TZ=UTC zip -X "cc-launcher-${{ matrix.target.os }}-${{ matrix.target.arch }}.zip" \
-              "cc-launcher.exe" "ccl.cmd" "README.md" "LICENSE"
+            # 固定 4 个源文件 mtime 到 epoch 0 + 用 UTC 打包 + 剥 NTFS extra field：
+            # 三个变量统一后，本机 build.sh scoop-bump 同样处理，hash byte-level 一致
+            # （避免 CI 时区 / 100ns mtime 精度让本机 hash 算不准）。
+            touch -d @0 cc-launcher.exe ccl.cmd README.md LICENSE
+            TZ=UTC zip -X "${bare}.zip" \
+                "cc-launcher.exe" "ccl.cmd" "README.md" "LICENSE"
 
-          # 清理中间产物，只留 zip + 单 exe
-          rm "cc-launcher.exe" "ccl.cmd" "README.md" "LICENSE"
-          ls -la
+            # 清理中间产物，只留 zip + 单 exe
+            rm "cc-launcher.exe" "ccl.cmd" "README.md" "LICENSE"
+            ls -la
+          else
+            # ---- Linux/Darwin: tar.gz 含 cc-launcher (chmod +x) + README + LICENSE ----
+            stage=$(mktemp -d)
+            cp "${bare}" "$stage/cc-launcher"
+            cp ../README.md ../LICENSE "$stage/"
+            chmod +x "$stage/cc-launcher"
+
+            # 固定 3 个源文件 mtime 到 epoch 0 + tar 归档（保持 hash 可重现）
+            touch -d @0 "$stage"/*
+            tar -C "$stage" -czf "${bare}.tar.gz" \
+                --owner=0 --group=0 --numeric-owner \
+                cc-launcher README.md LICENSE
+
+            rm -rf "$stage"
+            ls -la
+          fi
 
       - name: upload release assets
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/cc-launcher-${{ matrix.target.os }}-${{ matrix.target.arch }}.exe
             dist/cc-launcher-${{ matrix.target.os }}-${{ matrix.target.arch }}.zip
+            dist/cc-launcher-${{ matrix.target.os }}-${{ matrix.target.arch }}.tar.gz
           fail_on_unmatched_files: false

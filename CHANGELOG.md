@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Breaking Changes
+- **release 资产结构调整**：
+  - 去掉 `windows/arm64`（matrix 减到 5 target：windows/amd64 + linux/{amd64,arm64} + darwin/{amd64,arm64}）
+  - Windows 资产只 `cc-launcher-windows-amd64.zip`（不再单独传 `.exe`）
+  - Linux/Darwin 资产改为 `cc-launcher-{os}-{arch}.tar.gz`（内含 `cc-launcher` 已 `chmod +x` + `README.md` + `LICENSE`，不再单独传裸 binary）
+
 ## [0.11.1] - 2026-10-13 — windows-detach-build-reproducible
 
 ### Breaking Changes
