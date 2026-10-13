@@ -52,19 +52,19 @@ jobs:
           #   main.Version   = tag 名（如 v0.10.0；workflow_dispatch 触发时 fallback 到 "dev"）
           #   main.Commit    = commit 短 hash
           #
-          # 注：原 -X main.BuildTime= 与 -trimpath 行为：
-          #   - BuildTime 字段已从 version.go 移除（每次 build 注入当前时间让二进制
-          #     byte-level 不可重现，导致 zip hash 跨环境无法对齐）
-          #   - -trimpath 剥离 GOMODCACHE 等 build 机器路径，让本机 build.sh scoop-bump
-          #     与 CI release workflow 出 byte-level 一致的 zip
+          # 注：原 -X main.BuildTime= 已移除（BuildTime 每次 build 注入当前时间让
+          # 二进制 byte-level 不可重现，导致 zip hash 跨环境无法对齐）。
+          # -trimpath 剥离 GOMODCACHE 等 build 机器路径，让本机 build.sh scoop-bump
+          # 与 CI release workflow 出 byte-level 一致的 zip。**不是** ldflags 的一部
+          # 分（Go 1.21+ link 器拒绝）——放在 go build 命令行。
           version="${GITHUB_REF_NAME:-dev}"
           if [ -z "${version}" ] || [ "${version}" = "main" ]; then
             version="dev"
           fi
           commit="${GITHUB_SHA::8}"
-          ldflags="-s -w -trimpath -X main.Version=${version} -X main.Commit=${commit}"
+          ldflags="-s -w -X main.Version=${version} -X main.Commit=${commit}"
 
-          go build -ldflags="${ldflags}" -o "${out}" ./cmd/cc-launcher/
+          go build -trimpath -ldflags="${ldflags}" -o "${out}" ./cmd/cc-launcher/
           echo "==> built: ${out}"
 
       - name: zip (windows only)

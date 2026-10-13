@@ -52,15 +52,15 @@ version_ldflags() {
     # byte-level 不可重现（同 commit + 同 source 下两次 build 也不同），导致 zip
     # hash 跨环境无法对齐。version 信息仅含 Version + Commit 已足够（git log 可追
     # 溯具体 build 时间）。
-    # -trimpath 剥离 build 机器的文件系统路径（GOMODCACHE 等），同源码跨 build
-    # 目录 hash 也一致。
-    echo "-s -w -trimpath -X main.Version=$version -X main.Commit=$commit"
+    # -trimpath **不是** ldflags 的一部分（Go 1.21+ link 器会拒绝）——它是 go build
+    # 的 flag，在 build.go 调用处加。ldflags 字符串里只放 link 器认识的 flag（-s/-w/-X）。
+    echo "-s -w -X main.Version=$version -X main.Commit=$commit"
 }
 
 build() {
     echo "==> 编译 $BINARY ..."
     # shellcheck disable=SC2046
-    go build -ldflags="$(version_ldflags)" -o "$BINARY" ./cmd/cc-launcher/
+    go build -trimpath -ldflags="$(version_ldflags)" -o "$BINARY" ./cmd/cc-launcher/
     echo "==> 完成: $(pwd)/$BINARY"
 }
 
@@ -94,7 +94,7 @@ cross_build() {
     echo "==> 交叉编译 ${goos}/${goarch} ..."
     mkdir -p dist
     # shellcheck disable=SC2046
-    GOOS="$goos" GOARCH="$goarch" go build -ldflags="$(version_ldflags)" -o "$out" ./cmd/cc-launcher/
+    GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="$(version_ldflags)" -o "$out" ./cmd/cc-launcher/
     echo "==> 完成: $(pwd)/$out"
 }
 
