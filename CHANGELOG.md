@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Refactor
+- `cmd/cc-launcher/version.go`：移除 `BuildTime` 字段与 `ccl --version` 输出中的 "Built" 行。`BuildTime` 每次 build 注入当前时间让 Go 二进制 byte-level 不可重现（同 commit + 同 source 下两次 build 也不同），导致 zip hash 跨环境无法对齐。`git log` + `Commit` 字段已足够追溯具体 build 时间。
+
+### Build
+- `build.sh version_ldflags` 加 `-trimpath`：剥离 GOMODCACHE 等 build 机器路径，让二进制在跨 build 目录（同 source code）下 byte-level 一致。
+- `.github/workflows/release.yml`：go build 命令同步加 `-trimpath`，并删除 `-X main.BuildTime=`（与 version.go 字段移除对齐）。
+
+### Compatibility
+- `ccl --version` 输出从 5 行（Version / Commit / Built / Go / OS-Arch）变为 4 行（删 Built）。如脚本解析 `Built:` 行需更新。
+- **v0.11.0 GitHub release zip 的 hash 不变**（v0.11.0 release workflow 跑在旧代码上），但**v0.11.0 之后**用新流程的 zip hash 在跨环境（CI runner vs 本机）byte-level 一致。
+- 用户场景：
+  - 已用 v0.11.0 release 安装的用户：升级 scoop manifest 用新流程后必须 `scoop update cc-launcher` 重新下载（hash 不同）
+  - v0.12.0+ 发布：本机 `./build.sh scoop-bump v0.X.Y` 算的 hash byte-level = release workflow 出的 hash，**不**需要再从 GitHub download zip 算 hash
+
 ## [0.11.0] - 2026-10-13 — provider-list-display-improvements
 
 ### Features

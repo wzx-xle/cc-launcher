@@ -51,14 +51,18 @@ jobs:
           # 移植 build.sh version_ldflags 语义：
           #   main.Version   = tag 名（如 v0.10.0；workflow_dispatch 触发时 fallback 到 "dev"）
           #   main.Commit    = commit 短 hash
-          #   main.BuildTime = ISO 8601 UTC
+          #
+          # 注：原 -X main.BuildTime= 与 -trimpath 行为：
+          #   - BuildTime 字段已从 version.go 移除（每次 build 注入当前时间让二进制
+          #     byte-level 不可重现，导致 zip hash 跨环境无法对齐）
+          #   - -trimpath 剥离 GOMODCACHE 等 build 机器路径，让本机 build.sh scoop-bump
+          #     与 CI release workflow 出 byte-level 一致的 zip
           version="${GITHUB_REF_NAME:-dev}"
           if [ -z "${version}" ] || [ "${version}" = "main" ]; then
             version="dev"
           fi
           commit="${GITHUB_SHA::8}"
-          build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          ldflags="-s -w -X main.Version=${version} -X main.Commit=${commit} -X main.BuildTime=${build_time}"
+          ldflags="-s -w -trimpath -X main.Version=${version} -X main.Commit=${commit}"
 
           go build -ldflags="${ldflags}" -o "${out}" ./cmd/cc-launcher/
           echo "==> built: ${out}"

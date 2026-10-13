@@ -24,7 +24,7 @@ EOF
     exit 0
 }
 
-# version_ldflags 输出注入 main.Version / main.Commit / main.BuildTime 的 -ldflags 串。
+# version_ldflags 输出注入 main.Version / main.Commit 的 -ldflags 串。
 # 未在 git 仓库跑（或无 tag）时 fallback 到 dev / unknown——`go build` 直接编译同源。
 #
 # Version 字段语义: git describe --tags 原样输出 + 自定义 dirty 标记
@@ -37,7 +37,7 @@ EOF
 #   - date 不加引号（macOS BSD date 把 "%Y" 当字面；GNU date 也接受无引号）
 #   - fallback 用 `git log -1 --format=%cI`（ISO 8601 commit date）—— git 跨 OS 一致
 version_ldflags() {
-    local version commit build_time
+    local version commit
     # git describe --tags 输出: v<X.Y.Z>-<commits_ahead>-g<hash>（无 --dirty——自己加）
     version=$(git describe --tags 2>/dev/null || echo "dev")
     commit=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
@@ -48,11 +48,13 @@ version_ldflags() {
         version="${version}-dirty"
     fi
 
-    # date 跨 OS 兼容写法：GNU / BSD 都接受无引号 format；git commit date 作 fallback
-    build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
-        || git log -1 --format=%cI 2>/dev/null \
-        || echo "unknown")
-    echo "-s -w -X main.Version=$version -X main.Commit=$commit -X main.BuildTime=$build_time"
+    # 注：原 -X main.BuildTime= 已移除。BuildTime 每次 build 注入当前时间让二进制
+    # byte-level 不可重现（同 commit + 同 source 下两次 build 也不同），导致 zip
+    # hash 跨环境无法对齐。version 信息仅含 Version + Commit 已足够（git log 可追
+    # 溯具体 build 时间）。
+    # -trimpath 剥离 build 机器的文件系统路径（GOMODCACHE 等），同源码跨 build
+    # 目录 hash 也一致。
+    echo "-s -w -trimpath -X main.Version=$version -X main.Commit=$commit"
 }
 
 build() {
