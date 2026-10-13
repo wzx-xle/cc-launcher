@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-Claude Code Lancher — 一个终端启动器，在启动 Claude Code 时提供提供商配置切换和权限模式选择功能。
+Claude Code Launcher — 一个终端启动器，在启动 Claude Code 时提供提供商配置切换和权限模式选择功能。
 
 ## 技术选型（待决策）
 
@@ -41,5 +41,4 @@ Claude Code Lancher — 一个终端启动器，在启动 Claude Code 时提供�
 
 ## 项目启动前注意事项
 
-- 项目名 "Lancher" 应为 "Launcher"（拼写错误），建议在正式开发前修正
 - 当前仓库无任何代码，`go.mod`、目录结构等均待初始化
