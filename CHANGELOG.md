@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixes
+- **`build.sh <subcmd>` 失败 → 无限递归**：commit `2a8d1a5` 把 `build.sh` 函数 `local_install()` 重命名为 `local()`，与 bash builtin/reserved word `local` 同名（动态作用域下函数阴影 builtin）。`version_ldflags` 第 41 行 `local version commit` 命中函数 `local`（而不是 builtin）→ 函数 `local` → `build` → `$(version_ldflags)` 命令替换 → 再次进入递归。所有走 `build()` 的子命令（`build` / `install` / `local` / `run` / `windows` / `release` / `bump-scoop`）全坏，只有 `clean` / `test` / `contract` 不受影响。修复：函数名改回 `local_install()`，case dispatch 同步更新；对外子命令名 `local` 不变。
+- `.github/workflows/release.yml` 注释里残留的旧子命令名 `scoop-bump`（v0.11.2 已 rename 为 `bump-scoop`）同步更新为 `bump-scoop`。
+
 ## [0.11.2] - 2026-10-13 — release-assets-tar-gz
 
 ### Breaking Changes

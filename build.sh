@@ -71,7 +71,7 @@ install() {
     echo "==> 已安装: $INSTALL_DIR/$BINARY"
 }
 
-local() {
+local_install() {
     build
     local dir="${HOME}/.local/bin"
     mkdir -p "$dir"
@@ -230,7 +230,7 @@ shift || true
 case "$ACTION" in
     build)   build ;;
     install) install ;;
-    local)   local ;;
+    local)   local_install ;;
     run)     run "$@" ;;
     test)    test ;;
     contract) contract ;;

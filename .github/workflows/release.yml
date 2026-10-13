@@ -53,7 +53,7 @@ jobs:
           #
           # 注：原 -X main.BuildTime= 已移除（BuildTime 每次 build 注入当前时间让
           # 二进制 byte-level 不可重现，导致 zip hash 跨环境无法对齐）。
-          # -trimpath 剥离 GOMODCACHE 等 build 机器路径，让本机 build.sh scoop-bump
+          # -trimpath 剥离 GOMODCACHE 等 build 机器路径，让本机 build.sh bump-scoop
           # 与 CI release workflow 出 byte-level 一致的 zip。**不是** ldflags 的一部
           # 分（Go 1.21+ link 器拒绝）——放在 go build 命令行。
           version="${GITHUB_REF_NAME:-dev}"
@@ -94,7 +94,7 @@ jobs:
           EOF
 
             # 固定 4 个源文件 mtime 到 epoch 0 + 用 UTC 打包 + 剥 NTFS extra field：
-            # 三个变量统一后，本机 build.sh scoop-bump 同样处理，hash byte-level 一致
+            # 三个变量统一后，本机 build.sh bump-scoop 同样处理，hash byte-level 一致
             # （避免 CI 时区 / 100ns mtime 精度让本机 hash 算不准）。
             touch -d @0 cc-launcher.exe ccl.cmd README.md LICENSE
             TZ=UTC zip -X "${bare}.zip" \
