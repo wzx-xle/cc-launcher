@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-13 — provider-list-display-improvements
+
+### Features
+- **Provider list 视觉变更**：TUI 选择 provider 时默认项用左侧灰色 `[*]` 标识（原行尾"默认" tag 移除）。非默认项仍为 `[ ]`；cursor 行整行高亮。
+- **Provider 配置新增 `note` / `order` 字段**：
+  - `note` (string)：一行备注，渲染在 provider 名后、空格分隔、灰色显示
+  - `order` (number)：排序权重，越小越靠前；缺省 0；同 order 时回退到文件名字典序
+  - 旧 provider JSON 文件（无 `note` / `order`）继续工作
+- **`ccl provider --new` 写盘后追加可选 `note` 询问与 `order` 建议值提示**：
+  - 写盘成功后 `note (可选备注，回车跳过):` 让用户填 note（非空时通过 ReadFile + JSON patch 写回顶层 `note` 字段，不动 `env` 块）
+  - 写盘成功后打印 `排序值: <max+10> (现有 max=<M>, 建议 max+10；手改 JSON order 字段覆盖)`（只显示不读输入）
+  - note 阶段 EOF / 空字符串 = 跳过；template prompts 阶段 EOF = 取消（沿用现有语义）
+
+### Tests
+- `internal/provider/provider_test.go`：加 6 个新单元测试覆盖 `note` / `order` 解析、排序、容错、非数字 `order` 标 Error、errored 仍排序
+- `internal/tui/tui_test.go`：加 5 个新单元测试覆盖 dim `[*]` 预选、note 渲染、note 在 errored 状态被压制、无预选时所有 marker 为 `[ ]`、行尾"默认" tag 移除
+- `internal/cli/cli_test.go`：加 6 个新单元测试覆盖 `--new` 写盘后 note 询问（空跳过 / 非空写入）、order 提示（max+10 / 零 baseline / 排除新文件）、`ccl provider --list` 排序软测试
+
+### OpenSpec
+- 归档 change `provider-list-display-improvements` → `2026-10-13-provider-list-display-improvements`
+- 新增 capability `provider-list-rendering`（5 个 ADDED Requirements + 13 个 Scenario）
+- Modified capability `provider-new-guided-flow`（1 个 MODIFIED + 1 个 ADDED Requirement；锁定"template field prompts"边界，EOF 取消语义在 template 阶段保留）
+
 ## [0.10.0] - 2026-10-10 — template-driven-preask
 
 ### Refactor
