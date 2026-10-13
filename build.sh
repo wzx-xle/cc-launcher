@@ -17,6 +17,7 @@ usage() {
     contract        运行契约测试（校验权限模式与本机 claude CLI 一致）
     windows         交叉编译 Windows 版本到 dist/
     release         交叉编译全部目标平台到 dist/
+    scoop-bump      从 GitHub release 算 Windows zip 真实 SHA256 并输出 manifest JSON
     clean           清理编译产物与 dist/
 
 EOF
@@ -100,6 +101,73 @@ windows_build() {
     cross_build windows arm64 .exe
 }
 
+# sha256_cmd 跨 OS 兼容：Linux 用 sha256sum，macOS 用 shasum -a 256。
+sha256_cmd() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$@"
+    else
+        shasum -a 256 "$@"
+    fi
+}
+
+# scoop-bump VERSION（如 v0.11.0）：从 GitHub release 下载 Windows zip + 算
+# SHA256 + 输出 manifest JSON 到 stdout。
+#
+# **必须用 release assets 的真 hash**（mtime / zip 版本 / 压缩参数差异让
+# 本地手打 zip 跟 release zip 字节级永远不一致，scoop install 校验会失败）。
+# 标准流程见 [[scoop-bucket-zip-hash-stability]]。
+#
+# 用法：
+#   $0 scoop-bump v0.11.0
+#   # 把 stdout 复制到 wzx-xle/scoop-bucket 仓的 bucket/cc-launcher.json
+scoop_bump() {
+    local version="${1:-}"
+    if [ -z "$version" ]; then
+        echo "用法: $0 scoop-bump <version>" >&2
+        echo "示例: $0 scoop-bump v0.11.0" >&2
+        exit 1
+    fi
+
+    local repo="wzx-xle/cc-launcher"
+    local base="https://github.com/${repo}/releases/download/${version}"
+    local stage
+    stage=$(mktemp -d)
+    trap "rm -rf '$stage'" EXIT
+
+    local zip_amd64="cc-launcher-windows-amd64.zip"
+    local zip_arm64="cc-launcher-windows-arm64.zip"
+
+    echo "==> 下载 ${base}/${zip_amd64} ..." >&2
+    curl -sSL -o "$stage/$zip_amd64" "$base/$zip_amd64"
+    echo "==> 下载 ${base}/${zip_arm64} ..." >&2
+    curl -sSL -o "$stage/$zip_arm64" "$base/$zip_arm64"
+
+    local hash_amd64 hash_arm64
+    hash_amd64=$(sha256_cmd "$stage/$zip_amd64" | awk '{print $1}')
+    hash_arm64=$(sha256_cmd "$stage/$zip_arm64" | awk '{print $1}')
+
+    cat <<EOF
+{
+    "version": "${version#v}",
+    "description": "Terminal launcher for Claude Code with provider switching and permission mode selection",
+    "homepage": "https://github.com/${repo}",
+    "license": "MIT",
+    "architecture": {
+        "64bit": {
+            "url": "${base}/cc-launcher-windows-amd64.zip",
+            "hash": "${hash_amd64}",
+            "bin": ["ccl.cmd"]
+        },
+        "arm64": {
+            "url": "${base}/cc-launcher-windows-arm64.zip",
+            "hash": "${hash_arm64}",
+            "bin": ["ccl.cmd"]
+        }
+    }
+}
+EOF
+}
+
 release() {
     windows_build
     cross_build linux amd64
@@ -140,6 +208,7 @@ case "$ACTION" in
     contract) contract_test ;;
     windows) windows_build ;;
     release) release ;;
+    scoop-bump) scoop_bump "${1:-}" ;;
     clean)   clean ;;
     -h|--help|help) usage ;;
     *)       echo "未知选项: $ACTION"; usage ;;
