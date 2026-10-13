@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-10-13 — windows-detach-build-reproducible
+
 ### Breaking Changes
 - **Windows ccl 启动 Claude Code 后立即退 0**：之前是 `cmd.Run()` wait 子进程退出后透传 exit code，现在改为 `cmd.Start()` 启动后立即 `os.Exit(0)`。ccl 进程不再在任务管理器里持续存在（与 Unix `syscall.Exec` 进程 image 替换的用户感知一致），但 **claude 退出 code 不再传给 ccl 调用者**。Claude 退出 code 由 `cmd.exe → node.exe → claude.exe` 进程链传递给 PowerShell 的 `$LASTEXITCODE`。写 `ccl && echo OK` 类脚本在 claude 失败时误判成功——这是预期 trade-off。
 
@@ -22,7 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **v0.11.0 GitHub release zip 的 hash 不变**（v0.11.0 release workflow 跑在旧代码上），但**v0.11.0 之后**用新流程的 zip hash 在跨环境（CI runner vs 本机）byte-level 一致。
 - 用户场景：
   - 已用 v0.11.0 release 安装的用户：升级 scoop manifest 用新流程后必须 `scoop update cc-launcher` 重新下载（hash 不同）
-  - v0.12.0+ 发布：本机 `./build.sh scoop-bump v0.X.Y` 算的 hash byte-level = release workflow 出的 hash，**不**需要再从 GitHub download zip 算 hash
+  - v0.11.1+ 发布：本机 `./build.sh scoop-bump v0.X.Y` 算的 hash byte-level = release workflow 出的 hash，**不**需要再从 GitHub download zip 算 hash
 
 ## [0.11.0] - 2026-10-13 — provider-list-display-improvements
 
