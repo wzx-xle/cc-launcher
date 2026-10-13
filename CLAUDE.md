@@ -6,12 +6,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Claude Code Launcher — 一个终端启动器，在启动 Claude Code 时提供提供商配置切换和权限模式选择功能。
 
-## 技术选型（待决策）
-
-需求要求评估 **Golang** 还是 **Bash** 实现。选型考量：
-- Go：适合复杂状态管理（配置覆盖/还原），跨平台好，可测试性强
-- Bash：零依赖，与终端生态天然契合，但复杂逻辑维护成本高
-
 ## 架构约束（来自 requirement.md）
 
 1. 通过 `cc` 命令启动
@@ -38,7 +32,3 @@ Claude Code Launcher — 一个终端启动器，在启动 Claude Code 时提供
 5. 一次推送：`git push origin main --follow-tags`（commit + tag 一起推）
 
 如果历史 tag 指向了不带 changelog 的 commit，修正方法是 `git tag -d v0.X.Y` + `git push origin :refs/tags/v0.X.Y` + 在正确的 commit 上重打 tag + `git push origin v0.X.Y`，**不动 commit history**。
-
-## 项目启动前注意事项
-
-- 当前仓库无任何代码，`go.mod`、目录结构等均待初始化
