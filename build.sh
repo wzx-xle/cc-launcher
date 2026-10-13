@@ -17,7 +17,7 @@ usage() {
     contract        运行契约测试（校验权限模式与本机 claude CLI 一致）
     windows         交叉编译 Windows 版本到 dist/
     release         交叉编译全部目标平台到 dist/
-    scoop-bump      从 GitHub release 算 Windows zip 真实 SHA256 并输出 manifest JSON
+    bump-scoop      从 GitHub release 算 Windows zip 真实 SHA256 并输出 manifest JSON
     clean           清理编译产物与 dist/
 
 EOF
@@ -71,7 +71,7 @@ install() {
     echo "==> 已安装: $INSTALL_DIR/$BINARY"
 }
 
-local_install() {
+local() {
     build
     local dir="${HOME}/.local/bin"
     mkdir -p "$dir"
@@ -98,7 +98,7 @@ cross_build() {
     echo "==> 完成: $(pwd)/$out"
 }
 
-windows_build() {
+windows() {
     # 与 .github/workflows/release.yml matrix 对齐——v0.11.2 起只 windows/amd64
     # （windows/arm64 用户少，CI 资源紧；bucket manifest 只跟 amd64 zip）。
     cross_build windows amd64 .exe
@@ -147,7 +147,7 @@ pack_windows_zip_for_scoop() {
     echo "$zip"
 }
 
-# scoop-bump VERSION（如 v0.11.0）：本机交叉编译 + 打包 Windows zip（与
+# bump-scoop VERSION（如 v0.11.0）：本机交叉编译 + 打包 Windows zip（与
 # release workflow byte-level 一致）+ 算 SHA256 + 输出 manifest JSON。
 #
 # **不下载 GitHub release assets**——本机 hash 与 release hash byte-level 一致
@@ -155,18 +155,18 @@ pack_windows_zip_for_scoop() {
 # 标准流程见 [[scoop-bucket-zip-hash-stability]]（v2 修正版）。
 #
 # 用法：
-#   $0 scoop-bump v0.11.0
+#   $0 bump-scoop v0.11.0
 #   # 把 stdout 复制到 wzx-xle/scoop-bucket 仓的 bucket/cc-launcher.json
-scoop_bump() {
+bump_scoop() {
     local version="${1:-}"
     if [ -z "$version" ]; then
-        echo "用法: $0 scoop-bump <version>" >&2
-        echo "示例: $0 scoop-bump v0.11.0" >&2
+        echo "用法: $0 bump-scoop <version>" >&2
+        echo "示例: $0 bump-scoop v0.11.0" >&2
         exit 1
     fi
 
     # 跨编译 Windows amd64（v0.11.2 起去 arm64，与 release.yml matrix 对齐）
-    windows_build
+    windows
 
     local zip_amd64
     zip_amd64=$(pack_windows_zip_for_scoop amd64)
@@ -197,21 +197,21 @@ EOF
 }
 
 release() {
-    windows_build
+    windows
     cross_build linux amd64
     cross_build linux arm64
     cross_build darwin amd64
     cross_build darwin arm64
 }
 
-test_all() {
+test() {
     echo "==> 运行测试..."
     go test ./... -v
 }
 
 # 契约测试：把项目硬编码的权限模式列表与本机 claude --help 的实际取值对表。
 # 用 build tag 隔离，避免常规 test 依赖外部 CLI；本机无 claude 时自动 SKIP。
-contract_test() {
+contract() {
     echo "==> 运行契约测试..."
     go test -tags contract ./... -v -run "^TestContract_"
 }
@@ -230,13 +230,13 @@ shift || true
 case "$ACTION" in
     build)   build ;;
     install) install ;;
-    local)   local_install ;;
+    local)   local ;;
     run)     run "$@" ;;
-    test)    test_all ;;
-    contract) contract_test ;;
-    windows) windows_build ;;
+    test)    test ;;
+    contract) contract ;;
+    windows) windows ;;
     release) release ;;
-    scoop-bump) scoop_bump "${1:-}" ;;
+    bump-scoop) bump_scoop "${1:-}" ;;
     clean)   clean ;;
     -h|--help|help) usage ;;
     *)       echo "未知选项: $ACTION"; usage ;;
