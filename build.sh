@@ -110,12 +110,46 @@ sha256_cmd() {
     fi
 }
 
-# scoop-bump VERSION（如 v0.11.0）：从 GitHub release 下载 Windows zip + 算
-# SHA256 + 输出 manifest JSON 到 stdout。
+# ccl_cmd_shim 写 ccl.cmd shim：把 `ccl` 转发到同目录的 cc-launcher.exe。
+# 与 .github/workflows/release.yml 的 "zip (windows only)" 步骤保持一致。
+ccl_cmd_shim() {
+    cat <<'EOF'
+@echo off
+"%~dp0cc-launcher.exe" %*
+EOF
+}
+
+# pack_windows_zip_for_scoop VERSION ARCH：本机打 zip + 算 SHA256。
+# 与 .github/workflows/release.yml "zip (windows only)" 步骤 byte-level 对齐：
+#   - touch -d @0 固定 4 个源文件 mtime 到 epoch 0
+#   - TZ=UTC zip -X 用 UTC 解读 mtime + 剥 NTFS extra field
+# 三个变量（mtime / 时区 / extra field）都固定后，hash 跨环境可重现。
+pack_windows_zip_for_scoop() {
+    local arch="$1"
+    local exe="dist/${BINARY}-windows-${arch}.exe"
+    local zip="dist/${BINARY}-windows-${arch}-scoop.zip"
+    local stage
+    stage=$(mktemp -d)
+    trap "rm -rf '$stage'" EXIT
+
+    cp "$exe" "$stage/cc-launcher.exe"
+    ccl_cmd_shim > "$stage/ccl.cmd"
+    [ -f README.md ] && cp README.md "$stage/"
+    [ -f LICENSE ] && cp LICENSE "$stage/"
+    # 固定所有源文件 mtime 到 epoch 0（对齐 release workflow）
+    touch -d @0 "$stage"/*
+    # UTC 解读 mtime + 剥 NTFS extra field（对齐 release workflow）
+    (cd "$stage" && TZ=UTC zip -q -X "$OLDPWD/$zip" cc-launcher.exe ccl.cmd README.md LICENSE)
+
+    echo "$zip"
+}
+
+# scoop-bump VERSION（如 v0.11.0）：本机交叉编译 + 打包 Windows zip（与
+# release workflow byte-level 一致）+ 算 SHA256 + 输出 manifest JSON。
 #
-# **必须用 release assets 的真 hash**（mtime / zip 版本 / 压缩参数差异让
-# 本地手打 zip 跟 release zip 字节级永远不一致，scoop install 校验会失败）。
-# 标准流程见 [[scoop-bucket-zip-hash-stability]]。
+# **不下载 GitHub release assets**——本机 hash 与 release hash byte-level 一致
+# 的前提是两边都用同样约定（touch -d @0 + TZ=UTC zip -X），已在本会话实证。
+# 标准流程见 [[scoop-bucket-zip-hash-stability]]（v2 修正版）。
 #
 # 用法：
 #   $0 scoop-bump v0.11.0
@@ -128,24 +162,22 @@ scoop_bump() {
         exit 1
     fi
 
-    local repo="wzx-xle/cc-launcher"
-    local base="https://github.com/${repo}/releases/download/${version}"
-    local stage
-    stage=$(mktemp -d)
-    trap "rm -rf '$stage'" EXIT
+    # 跨编译 Windows amd64 + arm64
+    windows_build
 
-    local zip_amd64="cc-launcher-windows-amd64.zip"
-    local zip_arm64="cc-launcher-windows-arm64.zip"
-
-    echo "==> 下载 ${base}/${zip_amd64} ..." >&2
-    curl -sSL -o "$stage/$zip_amd64" "$base/$zip_amd64"
-    echo "==> 下载 ${base}/${zip_arm64} ..." >&2
-    curl -sSL -o "$stage/$zip_arm64" "$base/$zip_arm64"
+    local zip_amd64 zip_arm64
+    zip_amd64=$(pack_windows_zip_for_scoop amd64)
+    zip_arm64=$(pack_windows_zip_for_scoop arm64)
 
     local hash_amd64 hash_arm64
-    hash_amd64=$(sha256_cmd "$stage/$zip_amd64" | awk '{print $1}')
-    hash_arm64=$(sha256_cmd "$stage/$zip_arm64" | awk '{print $1}')
+    hash_amd64=$(sha256_cmd "$zip_amd64" | awk '{print $1}')
+    hash_arm64=$(sha256_cmd "$zip_arm64" | awk '{print $1}')
 
+    # 清理临时 scoop zip（dist/ 只留原始 exe）
+    rm -f "$zip_amd64" "$zip_arm64"
+
+    local repo="wzx-xle/cc-launcher"
+    local base="https://github.com/${repo}/releases/download/${version}"
     cat <<EOF
 {
     "version": "${version#v}",
