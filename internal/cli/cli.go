@@ -53,7 +53,7 @@ const modeHelp = `用法: ccl mode [选项] [<name>]
 
 模式说明详见 README "权限模式" 小节。`
 
-// CLI 处理 cc 子命令路由。
+// CLI 处理 ccl 子命令路由。
 type CLI struct {
 	providers *provider.Manager
 	state     *state.Manager
@@ -209,7 +209,7 @@ func (c *CLI) runProvider(args []string) error {
 	}
 	if *deleteFlag {
 		if name == "" {
-			return fmt.Errorf("用法: cc provider --delete <name>")
+			return fmt.Errorf("用法: ccl provider --delete <name>")
 		}
 		return c.deleteProvider(name)
 	}

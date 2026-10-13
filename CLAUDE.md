@@ -8,7 +8,7 @@ Claude Code Launcher — 一个终端启动器，在启动 Claude Code 时提供
 
 ## 架构约束（来自 requirement.md）
 
-1. 通过 `cc` 命令启动
+1. 通过 `ccl` 命令启动 `cc`（Claude Code）
 2. 提供商配置结构必须与 Claude Code 自身配置结构一致（方便增减配置）
 3. 切换提供商时：**提供商配置要覆盖**到 Claude Code 配置中
 4. 切换提供商时：**原提供商配置不能残留**，但 **Claude Code 自身添加的配置要保留**

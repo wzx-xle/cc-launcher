@@ -7,7 +7,7 @@ TBD - created by archiving change cross-platform-launcher-and-mode-contract. Upd
 The system SHALL expose mode metadata (name + Chinese description) through `internal/modes`. Both `internal/cli` and `internal/tui` MUST consume from this package — they MUST NOT hold their own hardcoded list.
 
 #### Scenario: cli uses modes.Names() for validation
-- **WHEN** `cc mode <mode>` is invoked with an arbitrary value
+- **WHEN** `ccl mode <mode>` is invoked with an arbitrary value
 - **THEN** validation iterates `modes.Names()` and accepts only modes listed there
 
 #### Scenario: tui renders from modes.All()
