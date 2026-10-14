@@ -120,6 +120,33 @@ jobs:
             ls -la
           fi
 
+      - name: append windows zip SHA256 to release body
+        # bumb-scoop-hash-trace change: 让 build.sh bump-scoop 不下载 zip 拿 hash
+        # (下载流量高)。release workflow 在 windows-amd64 job 末尾算 zip SHA256,
+        # 用 HTML 注释形式写进 release body (<!-- sha256:auto-hash:HEX -->)。
+        # build.sh bump-scoop 用 curl GitHub releases API fetch body + parse hash,
+        # 避免下载 18 MB zip。
+        # 仅 windows-amd64 跑 (zip 只在 windows-amd64 job 产生;其他 matrix 4 个 job
+        # 不重复写)。
+        if: matrix.target.os == 'windows' && matrix.target.arch == 'amd64'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          cd dist
+          HASH=$(sha256sum cc-launcher-windows-amd64.zip | awk '{print $1}')
+          echo "windows zip SHA256: $HASH"
+          BODY=$(gh api -H "Accept: application/vnd.github+json" \
+              "/repos/${{ github.repository }}/releases/tags/${{ github.ref_name }}" \
+              | python3 -c "import sys,json; print(json.load(sys.stdin)['body'] or '')")
+          # 保留已有 body (e.g. auto-generated changelog),append marker
+          NEW_BODY="${BODY}
+
+          <!-- sha256:auto-hash:${HASH} -->"
+          gh release edit "${{ github.ref_name }}" \
+              --repo "${{ github.repository }}" --notes "$NEW_BODY"
+          echo "appended sha256 marker to release ${{ github.ref_name }} body"
+
       - name: upload release assets
         uses: softprops/action-gh-release@v2
         with:

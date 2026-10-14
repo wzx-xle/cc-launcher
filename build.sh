@@ -116,6 +116,84 @@ sha256_cmd() {
     fi
 }
 
+# fetch_release_zip_hash_gh_api VERSION
+#
+# 从 GitHub releases API fetch release body + parse <!-- sha256:auto-hash:HEX -->
+# marker。不下载 zip（节省 18 MB 流量）。
+#
+# bump-scoop-hash-trace change 引入：release workflow 在 windows-amd64 job 末尾
+# 把 zip SHA256 写进 release body 注释 marker，bump-scoop 改用这个流程。
+#
+# Args:
+#   $1  = version like "v0.12.0"
+#
+# Returns:
+#   stdout: 64-char hex SHA256
+#   exit:   0 on success, non-zero on failure (rate limit / no marker / network)
+#
+# Retry: 3 attempts with 5-second backoff (release workflow 'append hash' step
+# races with manual bump-scoop invocation; operator may run bump-scoop within
+# seconds of tag push).
+fetch_release_zip_hash_gh_api() {
+    local version="$1"
+    local repo="wzx-xle/cc-launcher"
+    local body hash i api_response
+
+    for attempt in 1 2 3; do
+        # GitHub API responses with rate-limit error have message key but no body.
+        # Python parse catches JSON errors. Use python for robust parsing.
+        api_response=$(curl -sS \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${repo}/releases/tags/${version}" \
+            2>/dev/null) || {
+            echo "fetch attempt ${attempt}: curl failed (network); retry in 5s..." >&2
+            sleep 5
+            continue
+        }
+
+        body=$(printf '%s' "$api_response" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    if 'message' in data and 'body' not in data:
+        # API error (e.g. rate limit)
+        sys.stderr.write('API error: ' + data['message'] + '\\n')
+        sys.exit(1)
+    print(data.get('body') or '')
+except Exception as e:
+    sys.stderr.write('JSON parse error: ' + str(e) + '\\n')
+    sys.exit(1)
+" 2>&1) || {
+            echo "fetch attempt ${attempt}: API error; retry in 5s..." >&2
+            sleep 5
+            continue
+        }
+
+        # Extract SHA256 from <!-- sha256:auto-hash:HEX --> marker.
+        # 用 lookahead (?=\s*-->) 而不是 consume \s*--> —— \K reset *up to
+        # that point*, 不 reset *之后 match 的内容*. Consume 形式会把 "-->"
+        # 一起 capture 进 stdout, 让 hash 解析多 3 bytes.
+        hash=$(printf '%s' "$body" | grep -oP 'sha256:auto-hash:\K[a-f0-9]{64}(?=\s*-->)' || true)
+        if [ -n "$hash" ]; then
+            echo "$hash"
+            return 0
+        fi
+
+        echo "fetch attempt ${attempt}: marker not in release body yet (release workflow 'append hash' step 可能还没跑完); retry in 5s..." >&2
+        sleep 5
+    done
+
+    echo "" >&2
+    echo "ERROR: fetch_release_zip_hash_gh_api 失败——3 次重试后仍未拿到 release body 的 sha256 marker" >&2
+    echo "可能原因：" >&2
+    echo "  1. release workflow 的 'append windows zip SHA256 to release body' step 还没跑" >&2
+    echo "  2. GitHub API rate limit exceeded (60/hr unauthenticated)" >&2
+    echo "  3. 手动 fallback（需要下载 18 MB zip 拿真值——bumps-scoop-hash-trace 不自动跑 download）：" >&2
+    echo "     curl -sSL https://github.com/${repo}/releases/download/${version}/cc-launcher-windows-amd64.zip -o /tmp/x.zip" >&2
+    echo "     sha256sum /tmp/x.zip" >&2
+    return 1
+}
+
 # ccl_cmd_shim 写 ccl.cmd shim：把 `ccl` 转发到同目录的 cc-launcher.exe。
 # 与 .github/workflows/release.yml 的 "zip (windows only)" 步骤保持一致。
 ccl_cmd_shim() {
@@ -150,32 +228,50 @@ pack_windows_zip_for_scoop() {
     echo "$zip"
 }
 
-# bump-scoop VERSION（如 v0.11.0）：本机交叉编译 + 打包 Windows zip（与
-# release workflow byte-level 一致）+ 算 SHA256 + 输出 manifest JSON。
+# bump-scoop VERSION（如 v0.12.0）：本机交叉编译 + 打包 Windows zip（仅供人工
+# verify）+ GitHub API fetch release zip SHA256 + 输出 manifest JSON。
 #
-# **不下载 GitHub release assets**——本机 hash 与 release hash byte-level 一致
-# 的前提是两边都用同样约定（touch -d @0 + TZ=UTC zip -X），已在本会话实证。
-# 标准流程见 [[scoop-bucket-zip-hash-stability]]（v2 修正版）。
+# bump-scoop-hash-trace change 引入：原假设"本机 zip hash byte-level == release
+# zip hash"实际不可能——Go build action hash 含 GOMODCACHE state，fresh CI vs
+# incremental local cache 永远不一致（58824 字节 diff / 21822 region，pclntab
+# function hash 表 + build ID 字符串，物理不可修）。
+#
+# 新流程：本地 build 出 zip（**仅用于人工 reference；最终 manifest hash 不写本地
+# zip hash**），改用 GitHub releases API fetch release body + parse
+# `<!-- sha256:auto-hash:HEX -->` marker（release workflow 'append windows
+# zip SHA256 to release body' step 在 CI side 写 marker）。
+#
+# 流量节省：原本每次 bump-scoop 需下载 18 MB release zip 拿真值。改后只 fetch
+# GitHub API metadata（几 KB），下载流量可零至最少。
 #
 # 用法：
-#   $0 bump-scoop v0.11.0
+#   $0 bump-scoop v0.12.0
 #   # 把 stdout 复制到 wzx-xle/scoop-bucket 仓的 bucket/cc-launcher.json
 bump_scoop() {
     local version="${1:-}"
     if [ -z "$version" ]; then
         echo "用法: $0 bump-scoop <version>" >&2
-        echo "示例: $0 bump-scoop v0.11.0" >&2
+        echo "示例: $0 bump-scoop v0.12.0" >&2
         exit 1
     fi
 
     # 跨编译 Windows amd64（v0.11.2 起去 arm64，与 release.yml matrix 对齐）
     windows
 
+    # 本地 build zip（保留用于人工 verify / 调试；hash 不会写进 manifest）
     local zip_amd64
     zip_amd64=$(pack_windows_zip_for_scoop amd64)
+    local local_hash
+    local_hash=$(sha256_cmd "$zip_amd64" | awk '{print $1}')
+    echo "==> local zip (verify-only): $zip_amd64 sha256=$local_hash" >&2
 
-    local hash_amd64
-    hash_amd64=$(sha256_cmd "$zip_amd64" | awk '{print $1}')
+    # GitHub API fetch release zip 真值 hash（不走 download）
+    local release_hash
+    if ! release_hash=$(fetch_release_zip_hash_gh_api "$version"); then
+        # helper 已打印 fallback instructions; bump-scoop 不自动 download
+        return 1
+    fi
+    echo "==> release zip (manifest): sha256=$release_hash" >&2
 
     # 清理临时 scoop zip（dist/ 只留原始 exe）
     rm -f "$zip_amd64"
@@ -191,7 +287,7 @@ bump_scoop() {
     "architecture": {
         "64bit": {
             "url": "${base}/cc-launcher-windows-amd64.zip",
-            "hash": "${hash_amd64}",
+            "hash": "${release_hash}",
             "bin": ["ccl.cmd"]
         }
     }
