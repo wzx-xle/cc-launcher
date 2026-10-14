@@ -83,7 +83,7 @@ Bump the wzx-xle/scoop-bucket manifest for a new cc-launcher release.
 
 - **Including an `arm64` block** in the manifest — breaks `scoop install` because the release no longer ships a windows/arm64 zip. Removed in commit `299a2a4`.
 - **Forgetting to restore `url.https://github.com/.insteadof`** after the push — leaves the local environment inconsistent. Always re-add both rules with `--add`.
-- **Pushing only to `origin` (git.wxyz.ren mirror)** — the bucket repo lives on GitHub only. Verify with `git ls-remote https://github.com/wzx-xle/scoop-bucket main` after pushing.
+- **Pushing bucket to a non-GitHub remote** — bucket repo lives on GitHub only (`wzx-xle/scoop-bucket`); `git.wxyz.ren` mirror is for the cc-launcher source only and does not host the bucket. Verify the bucket repo's remote URL before `git push`.
 - **Trusting the local hash without verifying the release workflow succeeded** — if the workflow failed or the build matrix differed, the local binary won't match the (missing) release asset. Always confirm the release page has `cc-launcher-windows-amd64.zip` before relying on the local hash.
 - **Using the wrong username in the manifest URL** — use `wzx-xle` (GitHub) for this repo, not `wxyz` (Gitea). See memory `github-vs-gitea-usernames`.
 
