@@ -40,7 +40,10 @@ version_ldflags() {
     local version commit
     # git describe --tags 输出: v<X.Y.Z>-<commits_ahead>-g<hash>（无 --dirty——自己加）
     version=$(git describe --tags 2>/dev/null || echo "dev")
-    commit=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+    # commit hash --short=8 (8 字符) 对齐 .github/workflows/release.yml 的
+    # `${GITHUB_SHA::8}`。git --short 默认 7 字符会让 main.Commit 字节长度 8
+    # vs CI 的 9，差 1 字节 → .rdata 偏移 → zip hash byte-level 不一致。
+    commit=$(git rev-parse --short=8 HEAD 2>/dev/null || echo "unknown00")
 
     # dirty 检测: working tree 不干净 → Version 末尾加 "-dirty"
     # 用 git status --porcelain 检测（包含 untracked）比 git describe --dirty 更准
