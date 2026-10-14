@@ -7,10 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-10-14 — tui-mode-default-marker + windows-ccl-detach-rollback
+
 ### Features
 - **TUI 权限模式页默认项视觉变更**：默认项行首 dim `[*]` 标识（原行尾 "默认" tag 移除），与提供商选择页对齐。`renderModeView` marker 三态逻辑（`[ ]` / dim `[*]` / 亮 `[*]`）跟 `renderProviderView` 同构；cursor 行依然用 `cursorStyle` 整行高亮，dim `[*]` 仅在默认项不在 cursor 行时可见。无 state.json schema / CLI / launcher 改动。
-
-## [0.11.3] - 2026-10-14 — windows-ccl-detach-rollback
 
 ### Fixes
 - **Windows 上 Claude Code 收不到任何键盘事件（含 Ctrl+C）**：v0.11.1 (`9f9c110`) 引入的 detach 设计让 ccl 启动 Claude Code 后立即 `os.Exit(0)`，但 Windows console 的 input 是 kernel-managed 结构化事件流（不是 Unix 那种 generic byte stream），由 kernel 在 foreground process 持有该 console 时把 keystroke 投递到 console input queue。ccl 立即退 0 后 PowerShell prompt 立即抢回 interactive read 状态，在 Claude Code 完成 Ink TUI 初始化（几百毫秒到几秒）之前从 console input queue 截走所有 keystroke —— Claude Code 进入 read state 时 input queue 永远为空，连 Ctrl+C 也无效（Ctrl+C 是 console event 走同一路径）。撤回 detach 设计，恢复 v0.11.0 之前的 `cmd.Run()` 同步 wait + `os.Exit(exitErr.ExitCode())` 透传 exit code 行为。任务管理器中 `cc-launcher.exe` 会重新出现于 Claude Code 整个生命周期（v0.11.0 已知状态），作为 v0.11.1 detach 的反向 trade-off。
