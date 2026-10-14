@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Features
+- **TUI 权限模式页默认项视觉变更**：默认项行首 dim `[*]` 标识（原行尾 "默认" tag 移除），与提供商选择页对齐。`renderModeView` marker 三态逻辑（`[ ]` / dim `[*]` / 亮 `[*]`）跟 `renderProviderView` 同构；cursor 行依然用 `cursorStyle` 整行高亮，dim `[*]` 仅在默认项不在 cursor 行时可见。无 state.json schema / CLI / launcher 改动。
+
 ## [0.11.3] - 2026-10-14 — windows-ccl-detach-rollback
 
 ### Fixes
