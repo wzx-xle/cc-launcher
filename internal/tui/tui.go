@@ -287,16 +287,19 @@ func (m model) renderModeView(sb *strings.Builder) {
 	sb.WriteString("\n\n")
 	sb.WriteString("选择权限模式:\n\n")
 	for i, mode := range m.modes {
+		// marker 三态：cursor 行 [*]（高亮）、default 行 [*]（dim）、
+		// 普通行 [ ]。default 与 cursor 重合时由 cursorStyle 整行覆盖——
+		// 与 provider 页同构，避免拉取。
 		marker := "[ ]"
+		if mode.Name == m.defaultMode {
+			marker = dimStyle.Render("[*]")
+		}
 		if i == m.cursor {
 			marker = "[*]"
 		}
 		line := fmt.Sprintf("  %s %s", marker, mode.Name)
 		if mode.Description != "" {
 			line += "  " + dimStyle.Render("— "+mode.Description)
-		}
-		if mode.Name == m.defaultMode {
-			line += "  " + tagStyle.Render("默认")
 		}
 		if i == m.cursor {
 			line = cursorStyle.Render(line)

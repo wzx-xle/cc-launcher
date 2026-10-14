@@ -275,3 +275,114 @@ func TestRenderProviderView_NoPreSelectedAllBlankMarkers(t *testing.T) {
 		t.Errorf("View [*] count = %d, want <= 1 (no pre-selection → only cursor)", got)
 	}
 }
+
+// ─── tui-mode-default-marker §"renderModeView" 默认项视觉 ───
+
+// TestRenderModeView_DefaultShowsDimAsterisk 覆盖 spec/permission-mode-contract
+// §"TUI default mode is marked with a leading dim asterisk" Scenario "Default mode
+// not at cursor shows dim [*]"——defaultMode="plan" + cursor 不在 plan 时：
+//   - count([*]) == 2：cursor 行（acceptEdits）+ 默认行（plan）
+//   - 其它行带 [ ]
+//   - 行尾"默认" tag 不再出现（与 provider 页同构）
+func TestRenderModeView_DefaultShowsDimAsterisk(t *testing.T) {
+	providers := []provider.Info{{Name: "anthropic"}}
+	m := newModel(providers, "anthropic", "plan", "", "/wd")
+	m.stage = stageMode
+	// cursor 落在 acceptEdits（index 1），plan 在 index 5（默认行）
+	for i, mode := range m.modes {
+		if mode.Name == "acceptEdits" {
+			m.cursor = i
+			break
+		}
+	}
+	if m.cursor == 0 || m.modes[m.cursor].Name != "acceptEdits" {
+		t.Fatalf("test setup failed: cursor = %d (%s)", m.cursor, m.modes[m.cursor].Name)
+	}
+
+	view := m.View()
+
+	if got := strings.Count(view, "[*]"); got != 2 {
+		t.Errorf("View [*] count = %d, want 2 (cursor=acceptEdits + default=plan)", got)
+	}
+	if !strings.Contains(view, "[ ]") {
+		t.Errorf("View should contain '[ ]' for non-default, non-cursor rows")
+	}
+	if strings.Contains(view, "默认") {
+		t.Errorf("View should NOT contain '默认' tag (replaced by leading dim [*])")
+	}
+}
+
+// TestRenderModeView_DefaultIsCursor 覆盖 spec Scenario "Default mode is the
+// cursor"——defaultMode="auto" + cursor 落在 auto：cursorStyle 整行覆盖了 dim，
+// 但 marker 形状 [*] 仍可识别；count([*]) 应为 1（仅 cursor 行）；行尾"默认" tag
+// 移除。
+func TestRenderModeView_DefaultIsCursor(t *testing.T) {
+	providers := []provider.Info{{Name: "anthropic"}}
+	m := newModel(providers, "anthropic", "auto", "", "/wd")
+	m.stage = stageMode
+	// cursor 落在 auto（index 2）
+	for i, mode := range m.modes {
+		if mode.Name == "auto" {
+			m.cursor = i
+			break
+		}
+	}
+	if m.cursor == 0 || m.modes[m.cursor].Name != "auto" {
+		t.Fatalf("test setup failed: cursor = %d (%s)", m.cursor, m.modes[m.cursor].Name)
+	}
+
+	view := m.View()
+
+	if got := strings.Count(view, "[*]"); got != 1 {
+		t.Errorf("View [*] count = %d, want 1 (cursor overrides default dim)", got)
+	}
+	if strings.Contains(view, "默认") {
+		t.Errorf("View should NOT contain '默认' tag (replaced by leading dim [*])")
+	}
+}
+
+// TestRenderModeView_NoDefaultAllBlank 覆盖 spec Scenario "No default mode
+// available"——defaultMode 不匹配任何 mode（如 "definitely-not-a-mode"）：没有
+// 行带 dim [*]，仅 cursor 行带 [*]；其它行带 [ ]；行尾"默认" tag 移除。
+func TestRenderModeView_NoDefaultAllBlank(t *testing.T) {
+	providers := []provider.Info{{Name: "anthropic"}}
+	m := newModel(providers, "anthropic", "definitely-not-a-mode", "", "/wd")
+	m.stage = stageMode
+	m.cursor = 0 // 任意 cursor 位置（不与 default 重合，因为没有 default）
+
+	view := m.View()
+
+	if got := strings.Count(view, "[*]"); got != 1 {
+		t.Errorf("View [*] count = %d, want 1 (only cursor row, no default match)", got)
+	}
+	if !strings.Contains(view, "[ ]") {
+		t.Errorf("View should contain '[ ]' for non-cursor rows")
+	}
+	if strings.Contains(view, "默认") {
+		t.Errorf("View should NOT contain '默认' tag")
+	}
+}
+
+// TestRenderModeView_DescriptionStillRendered 覆盖 spec Scenario "Mode row
+// carries description in dim style" 与 "Mode row without default marker and
+// without description shows minimal layout"——dim [*] 替换行尾"默认" tag 不应
+// 顺带砍掉 description 渲染。验证 description 的" — "前缀 + 中文描述 仍出现
+// 在 View() 中。
+func TestRenderModeView_DescriptionStillRendered(t *testing.T) {
+	providers := []provider.Info{{Name: "anthropic"}}
+	m := newModel(providers, "anthropic", "manual", "", "/wd")
+	m.stage = stageMode
+	// cursor 移到 acceptEdits（不在 default manual），让 default 行不带 cursor
+	m.cursor = 1
+
+	view := m.View()
+
+	// description 文案至少出现一次："acceptEdits" 行的描述包含"自动接受"
+	// （dimStyle 渲染会注入 ANSI 转义，所以用子串匹配而不是 [N]M[42m...）。
+	if !strings.Contains(view, "自动接受") {
+		t.Errorf("View should contain acceptEdits description '自动接受', got:\n%s", view)
+	}
+	if !strings.Contains(view, "—") {
+		t.Errorf("View should contain em-dash '—' prefix for description, got:\n%s", view)
+	}
+}
