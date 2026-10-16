@@ -4,9 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math"
 	"strconv"
-	"strings"
 	"text/tabwriter"
 )
 
@@ -181,86 +179,22 @@ func trimK(v float64) string {
 	}
 }
 
-// bucketBar 决策（stats-time-buckets §D6 + §D8）：
-//   - 固定 20 字符宽度,跨终端一致
-//   - 完整 8 级半块字符集:▏▎▍▌▋▊▉█(1/8..8/8)
-//   - cells = round(tokens/max*20*8),0 ≤ cells ≤ 160
-//   - cells/8 个完整█ + 1 个余数半块(余数 0..7)+ 空格补到 20
-//   - max == 0 或 tokens == 0 → "·" + 19 空格(MIDDLE DOT 占位)
-//   - partial == true(当前小时桶)→ 末位替换为 "⏳"(U+23F3),整体仍 20 字符
+// FormatBucketTable 渲染桶聚合表(决策 stats-time-buckets §1.4):
 //
-// rune 计数:半块字符占 3 字节 UTF-8,strings.Builder.Len() 是字节数,不能用来
-// 判断"是否到 20 列"。这里改用 rune 数显式计算。
-func bucketBar(tokens int64, max int64, partial bool) string {
-	if max == 0 || tokens == 0 {
-		// rune 数:1(·)+19(空格)=20
-		runes := make([]rune, 0, 20)
-		runes = append(runes, '·')
-		for range 19 {
-			runes = append(runes, ' ')
-		}
-		if partial {
-			runes[19] = '⏳' // partial 桶零值仍用 ⏳ 标识,让用户一眼识别
-		}
-		return string(runes)
-	}
-
-	cells := int(math.Round(float64(tokens) / float64(max) * 20 * 8))
-	if cells < 0 {
-		cells = 0
-	}
-	if cells > 160 {
-		cells = 160
-	}
-
-	fullBars := cells / 8
-	remainder := cells % 8
-
-	halfBlocks := []rune{'▏', '▎', '▍', '▌', '▋', '▊', '▉'}
-
-	// 显式构造字符串(rune 数 = 20,无 byte/rune 混淆)
-	var visual int
-	var sb strings.Builder
-	sb.Grow(20 + 32) // 20 rune + 半块 UTF-8 多字节
-
-	for i := 0; i < fullBars && visual < 20; i++ {
-		sb.WriteRune('█')
-		visual++
-	}
-	if remainder > 0 && visual < 20 {
-		sb.WriteRune(halfBlocks[remainder-1])
-		visual++
-	}
-	for visual < 20 {
-		sb.WriteRune(' ')
-		visual++
-	}
-
-	// invariant: 构造出 20 rune 字符串(WriteRune 按 rune 计数,与 byte 完全无关)
-	if partial {
-		// partial 时柱末位替换为 ⏳,整体仍 20 rune
-		runes := []rune(sb.String())
-		runes[19] = '⏳'
-		return string(runes)
-	}
-	return sb.String()
-}
-
-// FormatBucketTable 渲染桶聚合表(决策 stats-time-buckets §1.4 + §D6 + §D8):
-//
-//   - 表头:BUCKET | SESSIONS | IN | OUT | CACHE_CRE | CACHE_READ | COST_USD | TOTAL_TOKENS(柱)
+//   - 表头:BUCKET | SESSIONS | IN | OUT | CACHE_CRE | CACHE_READ | COST_USD | TOTAL_TOKENS
 //   - hourly 模式(任一行 IsCurrent=true)→ 表头下追加注 "(* = 当前小时,数据仍在累计)"
-//   - 数据行:Label / 数值字段(humanize, cost 用 %.4f) / 柱状图
-//   - partial 桶柱末加 ⏳;零值桶或 max=0 用 · + 19 空格占位
-//   - TOTAL 行:Label="TOTAL",数值字段 humanize,柱列渲染为 20 个 ─ + " (total)"
+//   - 数据行:Label / 数值字段(IN/OUT/CACHE/CRE/READ humanize, cost 用 %.4f) /
+//     TOTAL_TOKENS 列 = humanize(IN+OUT+CACHE_CRE+CACHE_READ)
+//   - TOTAL 行:Label="TOTAL",数值字段 humanize,TOTAL_TOKENS 列同样 humanize 总和
+//   - 零值桶天然 humanize 成 "0",不再需要 · / ─ / 柱占位
 //
 // rows 为 nil/空时只打表头(便于调用方处理空数据情形)。
 func FormatBucketTable(w io.Writer, rows []BucketRow, totals *BucketRow) {
-	// padding=1(非默认 2):column 总宽更紧,控 ≤80-col(spec scenario 4 hard cap)
+	// padding=1:与 base spec 列宽紧的目标一致;无柱后列宽由 humanizeTokens 自然限定(最长 "12.3K" 5 字符)
 	tw := tabwriter.NewWriter(w, 0, 0, 1, ' ', 0)
 	// defer 先 Flush tabwriter,再输出 hourly note —— note 走 tabwriter 之外
-	// 避免让 \t 撑宽 column 8(注 21 chars > bar 20),但放在 header+data+total 之后
-	// 是 footnote 风格(更符合 spec 措辞 "header note")。
+	// 是 footnote 风格(更符合 spec 措辞 "header note")。hourly partial 标记得以保留:
+	// spec 把 * 与柱的 ⏳ 分成两层抽象,* 负责标识"当前小时、还在累计",与柱无关。
 	defer func() {
 		tw.Flush()
 		for _, r := range rows {
@@ -271,18 +205,8 @@ func FormatBucketTable(w io.Writer, rows []BucketRow, totals *BucketRow) {
 		}
 	}()
 
-	// max for normalization:全表 total tokens 最大值(maxTokens=0 → 所有桶全 zero,统一占位)
-	var maxTokens int64
-	for _, r := range rows {
-		t := r.InputTokens + r.OutputTokens + r.CacheCreate + r.CacheRead
-		if t > maxTokens {
-			maxTokens = t
-		}
-	}
-
 	fmt.Fprintln(tw, "BUCKET\tSESSIONS\tIN\tOUT\tCACHE_CRE\tCACHE_READ\tCOST_USD\tTOTAL_TOKENS")
 
-	// hourly 注已移至 defer 内:Flush 后输出到 w,在 header+data+total 之下
 	for _, r := range rows {
 		t := r.InputTokens + r.OutputTokens + r.CacheCreate + r.CacheRead
 		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\t%.4f\t%s\n",
@@ -293,12 +217,12 @@ func FormatBucketTable(w io.Writer, rows []BucketRow, totals *BucketRow) {
 			humanizeTokens(r.CacheCreate),
 			humanizeTokens(r.CacheRead),
 			r.CostUSD,
-			bucketBar(t, maxTokens, r.IsCurrent),
+			humanizeTokens(t),
 		)
 	}
 
 	if totals != nil {
-		sepLine := strings.Repeat("─", 20) + " (total)"
+		t := totals.InputTokens + totals.OutputTokens + totals.CacheCreate + totals.CacheRead
 		fmt.Fprintf(tw, "TOTAL\t%d\t%s\t%s\t%s\t%s\t%.4f\t%s\n",
 			totals.Sessions,
 			humanizeTokens(totals.InputTokens),
@@ -306,7 +230,7 @@ func FormatBucketTable(w io.Writer, rows []BucketRow, totals *BucketRow) {
 			humanizeTokens(totals.CacheCreate),
 			humanizeTokens(totals.CacheRead),
 			totals.CostUSD,
-			sepLine,
+			humanizeTokens(t),
 		)
 	}
 }

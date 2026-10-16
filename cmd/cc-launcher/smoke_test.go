@@ -31,7 +31,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"cc-launcher/internal/collector"
 	"cc-launcher/internal/config"
@@ -922,10 +921,14 @@ func TestStatsTimeBuckets(t *testing.T) {
 		}
 	})
 
-	t.Run("i_80col_alignment", func(t *testing.T) {
-		// spec: TOTAL_TOKENS bar 右边界(柱末 + ⏳ / · / 半块 / 整块 / 横线后缀)在
-		// 跨行 ±1 column tolerance 内对齐。本测试只对 header / data / TOTAL 行做
-		// 容差检查(hourly note 是独立行,不在 column layout 内)。
+	t.Run("i_no_bar_glyphs_in_table", func(t *testing.T) {
+		// 决策(stats-bucket-tokens-column-numeric §Decision 1 + §Decision 3):
+		//   TOTAL_TOKENS 列从 20 字符 Unicode 柱改为 humanizeTokens 数字合计。
+		//   spec 改 "TOTAL_TOKENS column shows the humanized per-bucket sum"。
+		//
+		// 本测试覆盖:FormatBucketTable 输出不含任何柱字符 / 半块字符集 /
+		// 占位符 / 横线 separator;data 行 + TOTAL 行末列是 humanize 输出形态;
+		// hourly note 仍保留(* partial 标记不走列内,语义不变)。
 		rows := []stats.BucketRow{
 			{Label: "00:00", Sessions: 1, InputTokens: 100, OutputTokens: 20, CacheRead: 5, CostUSD: 0.01},
 			{Label: "11:00*", IsCurrent: true, Sessions: 2, InputTokens: 1000, OutputTokens: 500, CacheCreate: 50, CacheRead: 200, CostUSD: 1.5},
@@ -933,33 +936,64 @@ func TestStatsTimeBuckets(t *testing.T) {
 		totals := &stats.BucketRow{Sessions: 3, InputTokens: 1100, OutputTokens: 520, CacheCreate: 50, CacheRead: 205, CostUSD: 1.51}
 		var sb strings.Builder
 		stats.FormatBucketTable(&sb, rows, totals)
-		// spec: TOTAL_TOKENS bar right edges (柱末 + ⏳ / · / 半块 / 整块)在 data 行
-		// 间 ±1 column tolerance 对齐。TOTAL 行 separator 是 20 ─ + " (total)" = 28
-		// chars(spec design,标识"超 length");hourly note 行在 tabwriter 之外;header
-		// 行 column 8 是文本"TOTAL_TOKENS"短于 bar。这 3 种不参与 bar alignment 比较。
-		lines := strings.Split(strings.TrimRight(sb.String(), "\n"), "\n")
-		var dataWidths []int
+		out := sb.String()
+
+		// 旧版柱字符集 + 占位符 + 横线 separator 全部禁止出现
+		// (data 行 + TOTAL 行 —— hourly note `(*` 不在表内,跟列内字符无关)
+		forbidden := []string{
+			"█", "▏", "▎", "▍", "▌", "▋", "▊", "▉", // 半块字符集
+			"⏳", "·", "─", " (total)", // partial / zero / separator 后缀
+		}
+		lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+		tableLines := 0
 		for _, line := range lines {
 			trim := strings.TrimSpace(line)
-			if strings.HasPrefix(trim, "(*") || strings.HasPrefix(trim, "BUCKET") || strings.HasPrefix(trim, "TOTAL") {
+			if strings.HasPrefix(trim, "(*") {
+				// hourly partial note 行允许保留 `(*`,但禁止其它列内字符
 				continue
 			}
-			dataWidths = append(dataWidths, utf8.RuneCountInString(line))
-		}
-		var maxW int
-		for _, w := range dataWidths {
-			if w > maxW {
-				maxW = w
+			tableLines++
+			for _, f := range forbidden {
+				if strings.Contains(line, f) {
+					t.Errorf("table line should not contain %q (removed bar glyph/separator):\n%s", f, line)
+				}
 			}
 		}
-		// 硬上限:spec 强调 "no wider than 80 columns" — 任何 data 行宽度 > 80 即 fail
-		if maxW > 80 {
-			t.Errorf("data 行宽度 %d 超过 80-col 上限:\n%s", maxW, sb.String())
+		if tableLines < 4 { // header + 2 data + TOTAL → 至少 4 行
+			t.Errorf("expected >=4 table lines (header+data+TOTAL), got %d:\n%s", tableLines, out)
 		}
-		// 容差 ±1 column:所有 data 行右边缘应一致(tabwriter 偶有 padding 差异)
-		for i, w := range dataWidths {
-			if abs(w-maxW) > 1 {
-				t.Errorf("data 行 %d 宽度 %d 偏离 max %d 超过 1 容差:\n%s", i, w, maxW, sb.String())
+
+		// 末列应是 humanize 形态:匹配正则 ^[0-9]+(\.[0-9]+)?[KMB]?$ 或 ^0$
+		// (覆盖 spec scenario:零值桶 = literal "0",非零值 humanize)
+		for _, line := range lines {
+			trim := strings.TrimSpace(line)
+			if trim == "" || strings.HasPrefix(trim, "BUCKET") || strings.HasPrefix(trim, "(*") {
+				continue
+			}
+			fields := strings.Fields(line)
+			if len(fields) < 8 {
+				continue
+			}
+			last := fields[len(fields)-1]
+			if last != "0" {
+				// humanize 后的形态:数字 + 可选 .xx + K/M/B
+				matched := false
+				for _, suffix := range []string{"", "K", "M", "B"} {
+					if suffix == "" {
+						if last != "" && !strings.ContainsAny(last, "KMB.") {
+							// 纯整数(可选小数)
+							dotCount := strings.Count(last, ".")
+							if dotCount <= 1 {
+								matched = true
+							}
+						}
+					} else if strings.HasSuffix(last, suffix) {
+						matched = true
+					}
+				}
+				if !matched {
+					t.Errorf("末列应为 humanize 数字形态, got %q (line=%q)", last, line)
+				}
 			}
 		}
 	})
@@ -1002,8 +1036,9 @@ func TestStatsTimeBuckets(t *testing.T) {
 				continue
 			}
 			// 数据行:tab-separated,字段顺序:BUCKET SESSIONS IN OUT CACHE_CRE CACHE_READ COST_USD TOTAL_TOKENS
+			// (8 个 field;TOTAL_TOKENS 是新增的 humanize 数字合计列,不参与 numeric 比对)
 			fields := strings.Fields(line)
-			if len(fields) < 7 {
+			if len(fields) < 8 {
 				continue
 			}
 			// fields[0] = "MM-DD"

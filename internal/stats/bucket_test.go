@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"cc-launcher/internal/collector"
 )
@@ -351,165 +350,97 @@ func TestHumanizeTokens_Boundaries(t *testing.T) {
 	}
 }
 
-// TestBucketBar_Proportional 覆盖 spec scenario "TOTAL_TOKENS bar length is proportional to total tokens"。
+// TestFormatBucketTable_TokensSumColumn 覆盖 spec scenario "TOTAL_TOKENS column
+// shows the humanized per-bucket sum"。
 //
-// max=1000 给 20 格;100 给 2 格(±1 容差);tokens=43 给出 remainder=7 → ▉(7/8),
-// 直接断言 8 级字符集完整。
-func TestBucketBar_Proportional(t *testing.T) {
-	max := int64(1000)
-	fullBar := bucketBar(1000, max, false)
-	if utf8.RuneCountInString(fullBar) != 20 {
-		t.Errorf("full bar should be 20 runes, got %d", utf8.RuneCountInString(fullBar))
-	}
-	// 100 tokens 应给 20 * (100/1000) * 8 = 16 cells → 2 full blocks
-	smallBar := bucketBar(100, max, false)
-	smallRunes := []rune(smallBar)
-	if utf8.RuneCountInString(smallBar) != 20 {
-		t.Errorf("small bar should be 20 runes, got %d", utf8.RuneCountInString(smallBar))
-	}
-	// 统计前 N 个非空格字符
-	var nonSpaceCount int
-	for _, r := range smallRunes {
-		if r != ' ' {
-			nonSpaceCount++
-		} else {
-			break
-		}
-	}
-	if nonSpaceCount < 1 || nonSpaceCount > 3 {
-		t.Errorf("small bar should have ~2 visual cells (±1), got %d non-space prefix", nonSpaceCount)
-	}
-
-	// 字符集完整 8 级断言:每个 remainder(0..7)都构造对应 cells,验证桶
-	// 输出第一非空格 rune 是预期字符;余数=0 时全格(无半块)。
-	//
-	// cells = round(tokens/1000 * 160) — tokens 表为算后 round 命中目标余数:
-	//   cells=1  → tokens=6.28..6.5 → tokens=6  → remainder=1 → '▏'
-	//   cells=2  → tokens=12.5     → tokens=13 → remainder=2 → '▎'
-	//   cells=3  → tokens=18.75    → tokens=20 → remainder=3 → '▍'
-	//   cells=4  → tokens=25       → tokens=25 → remainder=4 → '▌'
-	//   cells=5  → tokens=31.25    → tokens=31 → remainder=5 → '▋'
-	//   cells=6  → tokens=37.5     → tokens=38 → remainder=6 → '▊'
-	//   cells=7  → tokens=43.75    → tokens=44 → remainder=7 → '▉'
-	//   cells=8  → tokens=50       → tokens=50 → remainder=0 → 全格(无半块)
-	for _, tc := range []struct {
-		name        string
-		tokens      int64
-		wantHalfRune rune // 0 表示该 case 应全格或全空格(无半块)
-	}{
-		{"cells=1", 6, '▏'},
-		{"cells=2", 13, '▎'},
-		{"cells=3", 20, '▍'},
-		{"cells=4", 25, '▌'},
-		{"cells=5", 31, '▋'},
-		{"cells=6", 38, '▊'},
-		{"cells=7", 44, '▉'},
-		{"cells=8", 50, 0}, // remainder=0 → fullBars=1,半块不出现
-	} {
-		bar := bucketBar(tc.tokens, max, false)
-		runes := []rune(bar)
-		if len(runes) != 20 {
-			t.Errorf("%s bar should be 20 runes, got %d", tc.name, len(runes))
-			continue
-		}
-		if tc.wantHalfRune == 0 {
-			// 余数=0:第一个非空格应是 █(full block),不应出现半块字符
-			for i, r := range runes {
-				if r != ' ' && r != '█' {
-					t.Errorf("%s bar[%d]: expect only space/full block (no half-block), got %q",
-						tc.name, i, r)
-					break
-				}
-			}
-		} else {
-			// 第一非空格字符应是 tc.wantHalfRune(半块字符,来自完整 8 级字符集)
-			var firstNonSpace rune
-			for _, r := range runes {
-				if r != ' ' {
-					firstNonSpace = r
-					break
-				}
-			}
-			if firstNonSpace != tc.wantHalfRune {
-				t.Errorf("%s first non-space rune: want %q, got %q (bar=%q)",
-					tc.name, tc.wantHalfRune, firstNonSpace, bar)
-			}
-		}
-	}
-}
-
-// TestBucketBar_ZeroTokens 覆盖 spec scenario "0-token buckets render · placeholder"。
-//
-// tokens=0 或 max=0 → bar = · + 19 空格(20 rune,首字符 ·,其余空格)。
-func TestBucketBar_ZeroTokens(t *testing.T) {
-	zeroTok := bucketBar(0, 1000, false)
-	if utf8.RuneCountInString(zeroTok) != 20 {
-		t.Errorf("zero-token bar should be 20 runes, got %d", utf8.RuneCountInString(zeroTok))
-	}
-	if []rune(zeroTok)[0] != '·' {
-		t.Errorf("zero-token bar first rune: want %q, got %q", '·', []rune(zeroTok)[0])
-	}
-	for i, r := range []rune(zeroTok)[1:] {
-		if r != ' ' {
-			t.Errorf("zero-token bar rune[%d]: want space, got %q", i+1, r)
-		}
-	}
-
-	zeroMax := bucketBar(500, 0, false)
-	if []rune(zeroMax)[0] != '·' {
-		t.Errorf("zero-max bar first rune: want %q, got %q", '·', []rune(zeroMax)[0])
-	}
-}
-
-// TestBucketBar_Partial 覆盖 spec scenario "partial bucket bar ends with ⏳"。
-//
-// partial=true → bar 末位是 ⏳;non-partial → 末位是空格或半块字符(非 ⏳)。
-func TestBucketBar_Partial(t *testing.T) {
-	partial := bucketBar(500, 1000, true)
-	if utf8.RuneCountInString(partial) != 20 {
-		t.Errorf("partial bar should still be 20 runes, got %d", utf8.RuneCountInString(partial))
-	}
-	if []rune(partial)[19] != '⏳' {
-		t.Errorf("partial bar rune[19]: want ⏳, got %q", []rune(partial)[19])
-	}
-
-	nonPartial := bucketBar(500, 1000, false)
-	if []rune(nonPartial)[19] == '⏳' {
-		t.Errorf("non-partial bar rune[19] should not be ⏳")
-	}
-}
-
-// TestBucketBar_PartialZeroTokens 覆盖 partial 零值桶也保留 ⏳ 标记。
-//
-// 当前小时 zero tokens 仍用 ⏳ 让用户一眼识别 partial。
-func TestBucketBar_PartialZeroTokens(t *testing.T) {
-	bar := bucketBar(0, 1000, true)
-	if utf8.RuneCountInString(bar) != 20 {
-		t.Errorf("partial zero bar should be 20 runes, got %d", utf8.RuneCountInString(bar))
-	}
-	if []rune(bar)[0] != '·' {
-		t.Errorf("partial zero bar first rune: want ·, got %q", []rune(bar)[0])
-	}
-	if []rune(bar)[19] != '⏳' {
-		t.Errorf("partial zero bar rune[19]: want ⏳, got %q", []rune(bar)[19])
-	}
-}
-
-// TestBucketBar_TotalSeparator 覆盖 spec scenario "TOTAL row shows horizontal-rule separator"。
-//
-// FormatBucketTable 输出的 TOTAL 行 TOTAL_TOKENS 列 = 20 个 ─ + " (total)"。
-func TestBucketBar_TotalSeparator(t *testing.T) {
+// 决策(stats-bucket-tokens-column-numeric §Decision 1)：每行 TOTAL_TOKENS 列为
+// humanizeTokens(Input+Output+CacheCreate+CacheRead);TOTAL 行同样 humanize 总和;
+// 零值桶天然 humanize 成 "0",不再需要 · / ─ / 柱占位。
+func TestFormatBucketTable_TokensSumColumn(t *testing.T) {
 	rows := []BucketRow{
-		{Label: "09-24", Sessions: 1, InputTokens: 100, OutputTokens: 50},
+		// sum = 1000+200+150+650 = 2000 → humanizeTokens(2000) = "2.00K"
+		{Label: "09-24", Sessions: 1, InputTokens: 1000, OutputTokens: 200, CacheCreate: 150, CacheRead: 650},
+		// sum = 500 → "500"
+		{Label: "09-25", Sessions: 2, InputTokens: 500, OutputTokens: 0, CacheCreate: 0, CacheRead: 0},
+		// sum = 0 → "0"
+		{Label: "09-26", Sessions: 0},
 	}
-	totals := &BucketRow{Sessions: 1, InputTokens: 100, OutputTokens: 50}
+	// total = 1500+200+150+650 = 2500 → humanizeTokens(2500) = "2.50K"
+	totals := &BucketRow{Sessions: 3, InputTokens: 1500, OutputTokens: 200, CacheCreate: 150, CacheRead: 650}
 	var sb strings.Builder
 	FormatBucketTable(&sb, rows, totals)
 
-	// 找 TOTAL 行,断言 TOTAL_TOKENS 列包含 20 个 ─ + " (total)"
-	wantSep := strings.Repeat("─", 20) + " (total)"
-	if !strings.Contains(sb.String(), wantSep) {
-		t.Errorf("TOTAL row should contain %q, got:\n%s", wantSep, sb.String())
+	out := sb.String()
+	// 每行 TOTAL_TOKENS 列断言(humanize 输出形态)
+	wantDataTokens := []string{"2.00K", "500", "0"}
+	for _, want := range wantDataTokens {
+		if !strings.Contains(out, want) {
+			t.Errorf("output should contain %q (humanize Tokens sum), got:\n%s", want, out)
+		}
+	}
+	// 找 TOTAL 行,断言最后一个 field(经 tabwriter pad 后)等于 "2.50K"
+	var totalLine string
+	for _, l := range strings.Split(out, "\n") {
+		if strings.HasPrefix(l, "TOTAL ") {
+			totalLine = l
+			break
+		}
+	}
+	if totalLine == "" {
+		t.Fatalf("TOTAL row not found in output:\n%s", out)
+	}
+	totalFields := strings.Fields(totalLine)
+	if got := totalFields[len(totalFields)-1]; got != "2.50K" {
+		t.Errorf("TOTAL row TOTAL_TOKENS column: want %q, got %q", "2.50K", got)
+	}
+
+	// 整表不应出现旧版的柱字符、半块字符、·、⏳、─
+	// 旧版柱子集全替换为 humanize;无效字符必须消失
+	forbidden := []string{"█", "▏", "▎", "▍", "▌", "▋", "▊", "▉", "·", "⏳", "─", " (total)"}
+	for _, f := range forbidden {
+		if strings.Contains(out, f) {
+			t.Errorf("output should NOT contain %q (removed bar glyphs), got:\n%s", f, out)
+		}
+	}
+}
+
+// TestFormatBucketTable_TotalSeparatorRemoved 覆盖 spec scenario "TOTAL row shows
+// humanized aggregates without any separator characters"。
+//
+// 旧版 TOTAL 行 TOTAL_TOKENS 列是 20 个 ─ + " (total)";新版本改为 humanizeTokens 总和,
+// 不再有任何 box-drawing / middle-dot / hourglass 字符。
+func TestFormatBucketTable_TotalSeparatorRemoved(t *testing.T) {
+	rows := []BucketRow{
+		{Label: "09-24", Sessions: 1, InputTokens: 100, OutputTokens: 50, CacheCreate: 0, CacheRead: 0},
+	}
+	// total tokens = 150 → humanizeTokens(150) = "150"
+	totals := &BucketRow{Sessions: 1, InputTokens: 100, OutputTokens: 50, CacheCreate: 0, CacheRead: 0}
+	var sb strings.Builder
+	FormatBucketTable(&sb, rows, totals)
+
+	out := sb.String()
+	// 旧版的水平分隔符 "──────────────────── (total)" 必须消失
+	wantOldSep := strings.Repeat("─", 20) + " (total)"
+	if strings.Contains(out, wantOldSep) {
+		t.Errorf("TOTAL row should NO LONGER contain old %q separator, got:\n%s", wantOldSep, out)
+	}
+	// TOTAL 行 TOTAL_TOKENS 列应等于 humanizeTokens(150) = "150"
+	// tabwriter Flush 后字段间已被 pad 为空格,strings.Fields 按任意空白切。
+	lines := strings.Split(out, "\n")
+	var totalLine string
+	for _, l := range lines {
+		if strings.HasPrefix(l, "TOTAL ") {
+			totalLine = l
+			break
+		}
+	}
+	if totalLine == "" {
+		t.Fatalf("TOTAL row not found in output:\n%s", out)
+	}
+	fields := strings.Fields(totalLine)
+	wantTokens := humanizeTokens(150)
+	if got := fields[len(fields)-1]; got != wantTokens {
+		t.Errorf("TOTAL row TOTAL_TOKENS column: want %q, got %q (full line=%q)", wantTokens, got, totalLine)
 	}
 }
 

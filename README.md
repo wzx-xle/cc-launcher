@@ -312,7 +312,7 @@ ccl stats --json --day 7        # JSON 含 bucket_rows / bucket_totals 字段
 - `--day 1` = 今天 24 小时 hourly（`HH:00` label，当前小时末尾加 `*` 标 partial）
 - `--day N`（N≥2）= 最近 N 天 daily（`MM-DD` label）
 
-每桶一行 `BUCKET | SESSIONS | IN | OUT | CACHE_CRE | CACHE_READ | COST_USD | TOTAL_TOKENS(柱)`，柱长按总 token 数 8 级半块（`▏▎▍▌▋▊▉█`）归一化。`--json --day N` 时 JSON 加 `bucket_rows` 数组 + `bucket_totals` 对象。不传 `--day` 时维持旧 detail-only 行为。
+每桶一行 `BUCKET | SESSIONS | IN | OUT | CACHE_CRE | CACHE_READ | COST_USD | TOTAL_TOKENS`；末列 `TOTAL_TOKENS` 为本桶 token 合计（`humanizeTokens(IN+OUT+CACHE_CRE+CACHE_READ)`，例如 `2.50K` / `150` / `0`）。`--json --day N` 时 JSON 加 `bucket_rows` 数组 + `bucket_totals` 对象，字段都是原始 int64。不传 `--day` 时维持旧 detail-only 行为。
 
 `ccl stats` **不依赖 daemon 正在跑**——它直接打开 `~/.cc-launcher/telemetry.db` 读。db 文件用 SQLite WAL，所以 daemon 写和 ccl stats 读并发安全。
 
