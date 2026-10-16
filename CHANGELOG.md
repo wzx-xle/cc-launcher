@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-10-16 — stats-bucket-tokens-column-numeric
+
+### Refactor
+- **`ccl stats --day N` 桶聚合表 `TOTAL_TOKENS` 列改数字合计**：原用 20 字符 Unicode 柱（`▏▎▍▌▋▊▉█`，最右 8 半块字符集 + 零值 `·` 占位 + partial `⏳` 后缀 + TOTAL 行 `─── (total)` 横线）展示每桶 token 合计。改为 `humanizeTokens(IN+OUT+CACHE_CRE+CACHE_READ)` 数字列（`2.50K` / `150` / `0`），与 IN/OUT/CACHE 列同形态；零值桶天然 = `"0"`，partial ⏳ / 横线 separator 全删。hourly 模式的 `BUCKET` 列末尾 `*` partial marker 保留（与柱无关）。spec `time-buckets` Requirement 1 / 4 与对应 Scenario 同步改文字；archive 合并到 base spec。
+
+### Compatibility
+- `--json --day N` 输出**字节级不变**（`bucket_rows` / `bucket_totals` 仍是原始 int64 + 4 位 cost），JSON 消费者零影响。文本消费者：原正则 grep `TOTAL_TOKENS` 列的 `█` / `⏳` 等柱字符的脚本需更新；该列文本 shape 已变、文本本就是 human-readable、不可作 stable API。
+
+### OpenSpec
+- archive `stats-bucket-tokens-column-numeric` (2026-10-16)
+
 ## [0.12.0] - 2026-10-14 — tui-mode-default-marker + windows-ccl-detach-rollback
 
 ### Features
