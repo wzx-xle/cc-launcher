@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.13.2] - 2026-10-18 — stats-day-no-detail-table
+
+### Fixes
+- **`ccl stats --day N` 砍 detail 表，只输出桶视图**：`--day` 路径原本在桶聚合表前还打一份 session 明细（`FormatTable`） + `Window since: ... Group by: ...` 头，是 v0.12.0 加 `--day` 时遗留的 UX bug——用户传 `--day` 的语义是"看 hourly/daily 趋势"，不关心每个 session 明细（要明细用 `ccl stats` 不传 `--day` 即可），detail 把桶表顶到屏幕底部看不见。本次：
+  - `cmd/cc-launcher/statscmd.go::runStatsWithQuery` `--day != -1` 分支：删 detail 头 + `FormatTable` 调用 + 空行；只剩 `(no data in window ...)` hint（detail 空时）+ 桶聚合表
+  - `smoke_test.go` sub-test `a` / `b` 加"无 `Window since:` / `Group by:` / `STARTED`" 断言
+  - `--day` 缺省路径（detail-only）**不动**；`--json` 输出 shape **完全不动**（`sessions` + `totals` + `bucket_rows` + `bucket_totals` 全保留）
+  - base spec `time-buckets` Requirement 1 改文字：明确"`--day N` MUST print ONLY the bucket table, NOT a preceding detail table"；Scenario 加"stdout does NOT contain `STARTED` / `Window since:` / `Group by:`"
+
+### OpenSpec
+- archive `stats-day-no-detail-table` (2026-10-18)
+
 ## [0.13.1] - 2026-10-18 — stats-clock-injection
 
 ### Fixes
