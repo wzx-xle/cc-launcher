@@ -76,9 +76,9 @@ Therefore the new flow fetches the release zip SHA256 from **GitHub release body
    git config --global --unset-all url.https://github.com/.insteadof
    git add bucket/cc-launcher.json
    git -c user.name=wxyz -c user.email=wxyz@users.noreply.github.com commit \
-       -m "chore(scoop): bump cc-launcher 到 v0.X.Y
+       -m "chore(scoop): bump cc-launcher to v0.X.Y
 
-   v0.X.Y release 资产 hash: <hash> (windows-amd64 zip, fetched from GitHub
+   v0.X.Y release asset hash: <hash> (windows-amd64 zip, fetched from GitHub
    release body via bump-scoop-hash-trace flow)"
    git push origin main
    git config --global --add url.https://github.com/.insteadof "git@github.com:"
@@ -86,6 +86,8 @@ Therefore the new flow fetches the release zip SHA256 from **GitHub release body
    ```
 
    The `insteadOf` unset/add cycle is required because the global `url.https://github.com/.insteadof` rule otherwise rewrites `git@github.com:` to `https://github.com:`, which fails without a GitHub PAT. Always re-add both rules with `--add` (not set), to avoid dropping a rule.
+
+   **Commit message is English** (NOT Chinese): the `wzx-xle/scoop-bucket` repo is cloned by Windows users via `scoop update`; git GUI / GitHub web on Windows mis-renders CJK characters without proper LANG/LC_ALL. cc-launcher's own commit message convention (Chinese) does NOT apply to the bucket repo — bucket commits stay ASCII to avoid encoding hazards for downstream consumers.
 
 4. **Verify**:
 
