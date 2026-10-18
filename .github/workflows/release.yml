@@ -146,7 +146,10 @@ jobs:
           version = os.environ["VERSION"]
           with open("CHANGELOG.md", "r", encoding="utf-8") as f:
               body = f.read()
-          m = re.search(r"## \[v?" + re.escape(version) + r"\][^#]*?(?=## \[|\Z)", body, re.DOTALL)
+          # 跨 H3 (### ...) 到下一个 H2 (## [) 之前。[\s\S]*? 含换行,
+          # (?=\n## \[|\Z) 锚下一个 H2 行首。re.MULTILINE 让 ^ 匹配行首。
+          # (不能用 [^#]*? —— H3 含 # 会阻断匹配)
+          m = re.search(r"## \[v?" + re.escape(version) + r"\][\s\S]*?(?=\n## \[|\Z)", body, re.MULTILINE)
           if not m:
               sys.stderr.write("WARNING: ## [" + version + "] section not found in CHANGELOG.md, skip inject\n")
               sys.exit(0)
