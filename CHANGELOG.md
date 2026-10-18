@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.13.3] - 2026-10-18 — release-notes-changelog-injection
+
+### Features
+- **GitHub release 页面用户视觉上能看到 CHANGELOG 段**：`softprops/action-gh-release` create release 时 body 是空的，windows-amd64 job 末尾只 append `<!-- sha256:auto-hash:HEX -->` 一个 HTML 注释——用户打开 release 页面看不到任何内容。修复：windows-amd64 job 内新增独立 step `inject CHANGELOG [v0.X.Y] section to release body`（跑在 append-hash step 之前），用 python 从仓库根 `CHANGELOG.md` 提取 `## [v0.X.Y]` 段（H2 + 后续内容到下一个 `## [` 之前，含 H3 子段 Refactor / Fixes / Features / OpenSpec 等），`gh release edit --notes-file` 写入。CHANGELOG 段找不到时 stderr warn + skip（不 fail workflow），append-hash step 仍跑。最终 release body = `<CHANGELOG 段>\n\n<!-- sha256:cc-launcher-windows-amd64.zip:HEX -->`。
+
+### Refactor
+- **hash marker 改带文件名**：`<!-- sha256:auto-hash:HEX -->` → `<!-- sha256:cc-launcher-windows-amd64.zip:HEX -->`（`auto-hash` token 替换为真实 zip 文件名），build.sh `fetch_release_zip_hash_gh_api` regex 同步改通用格式 `sha256:[^:]+:\K[a-f0-9]{64}(?=\s*-->)` 向前兼容 v0.12.0 ~ v0.13.2 旧 marker。
+
+### OpenSpec
+- archive `release-notes-changelog-injection` (2026-10-18)
+
 ## [0.13.2] - 2026-10-18 — stats-day-no-detail-table
 
 ### Fixes
