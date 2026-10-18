@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-10-18 — stats-clock-injection
+
+### Fixes
+- **`ccl stats` smoke test 跨日期边界稳定**：`internal/stats` 包对时钟不可控（`QueryStats` / `QueryBucketSummary` / `DefaultSince` 硬编码 `time.Now()`），smoke test `TestStatsTimeBuckets` 顶层 `collector.OpenStore.WithClock` 注入 2026-09-30 17:30 mock today 但 stats 路径走真实 today，expected dates `09-24..09-30` 在真实 today 跨过 9 月底后必然 fail（v0.12.0 起 pre-existing bug）。修复：
+  - `stats.Query` struct 新增 `Clock func() time.Time` 字段（nil = fallback `time.Now`，向后兼容）
+  - `QueryBucketSummary` 签名加 `nowFn func() time.Time` 第 4 参数（nil = fallback `time.Now`）
+  - `QueryStats` 内部 `time.Now()` 全部走 `q.now()` / `q.Clock` 注入
+  - `cmd/cc-launcher/statscmd.go` 抽 `runStatsWithQuery(base stats.Query, args)` 内部函数，`runStats` 改为 thin wrapper（main.go 调用不变）
+  - smoke test 10 个 sub-test 全部走 `runStatsWithQuery(stats.Query{Clock: nowFn}, args)`，与 collector store 共享 mock today
+
+### OpenSpec
+- archive `stats-clock-injection` (2026-10-18)
+
 ## [0.13.0] - 2026-10-16 — stats-bucket-tokens-column-numeric
 
 ### Refactor
