@@ -124,8 +124,9 @@ jobs:
         # release-notes-changelog-injection: 让 GitHub release 页面用户视觉
         # 看到 CHANGELOG 段(而非仅 hidden hash marker)。从仓库根 CHANGELOG.md
         # 提取 ## [v0.X.Y] 段(H2 + 后续内容到下一个 ## [ 之前),用
-        # gh release edit --notes-file 写入。提取不到 → stderr warning + skip
-        # (不 fail workflow;append hash step 仍会跑,marker 单独成 body)。
+        # gh release edit --notes 写入(--notes 接 string inline;CHANGELOG
+        # 段 inline 远 < 64KB 命令行上限,不需要 file 形式)。提取不到 → stderr
+        # warning + skip(不 fail workflow;append hash step 仍会跑,marker 单独成 body)。
         # 仅 windows-amd64 跑(与 hash append step 同一 job,顺序执行,
         # 保证最终 body = CHANGELOG 段 + 空行 + hash marker)。
         if: matrix.target.os == 'windows' && matrix.target.arch == 'amd64'
@@ -156,12 +157,10 @@ jobs:
             echo "WARNING: extracted CHANGELOG section for $VERSION is empty, skip" >&2
             exit 0
           fi
-          TMPFILE=$(mktemp)
-          trap 'rm -f "$TMPFILE"' EXIT
-          printf '%s\n' "$CHANGELOG_SECTION" > "$TMPFILE"
           gh release edit "$VERSION" \
-              --repo "${{ github.repository }}" --notes-file "$TMPFILE"
-          echo "injected CHANGELOG [$VERSION] section ($(wc -l < "$TMPFILE") lines) to release body"
+              --repo "${{ github.repository }}" --notes "$CHANGELOG_SECTION"
+          LINE_COUNT=$(printf '%s\n' "$CHANGELOG_SECTION" | wc -l)
+          echo "injected CHANGELOG [$VERSION] section ($LINE_COUNT lines) to release body"
 
       - name: append windows zip SHA256 to release body
         # bumb-scoop-hash-trace change: 让 build.sh bump-scoop 不下载 zip 拿 hash
