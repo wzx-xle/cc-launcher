@@ -169,11 +169,16 @@ except Exception as e:
             continue
         }
 
-        # Extract SHA256 from <!-- sha256:auto-hash:HEX --> marker.
+        # Extract SHA256 from <!-- sha256:<filename>:HEX --> marker.
+        # release-notes-changelog-injection change: marker 格式从
+        # `<!-- sha256:auto-hash:HEX -->` 改为 `<!-- sha256:cc-launcher-windows-amd64.zip:HEX -->`,
+        # 文件名替换 `auto-hash` token。regex 通用化为 `sha256:[^:]+:`,向前兼容
+        # 旧 `auto-hash` marker(v0.12.0 ~ v0.13.2) + 新 `cc-launcher-windows-amd64.zip`
+        # marker(v0.13.3+)。[^:]+ 匹配任意非冒号字符串,避免绑死具体文件名。
         # 用 lookahead (?=\s*-->) 而不是 consume \s*--> —— \K reset *up to
         # that point*, 不 reset *之后 match 的内容*. Consume 形式会把 "-->"
         # 一起 capture 进 stdout, 让 hash 解析多 3 bytes.
-        hash=$(printf '%s' "$body" | grep -oP 'sha256:auto-hash:\K[a-f0-9]{64}(?=\s*-->)' || true)
+        hash=$(printf '%s' "$body" | grep -oP 'sha256:[^:]+:\K[a-f0-9]{64}(?=\s*-->)' || true)
         if [ -n "$hash" ]; then
             echo "$hash"
             return 0

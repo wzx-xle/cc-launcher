@@ -120,14 +120,61 @@ jobs:
             ls -la
           fi
 
+      - name: inject CHANGELOG [v0.X.Y] section to release body
+        # release-notes-changelog-injection: 让 GitHub release 页面用户视觉
+        # 看到 CHANGELOG 段(而非仅 hidden hash marker)。从仓库根 CHANGELOG.md
+        # 提取 ## [v0.X.Y] 段(H2 + 后续内容到下一个 ## [ 之前),用
+        # gh release edit --notes-file 写入。提取不到 → stderr warning + skip
+        # (不 fail workflow;append hash step 仍会跑,marker 单独成 body)。
+        # 仅 windows-amd64 跑(与 hash append step 同一 job,顺序执行,
+        # 保证最终 body = CHANGELOG 段 + 空行 + hash marker)。
+        if: matrix.target.os == 'windows' && matrix.target.arch == 'amd64'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ ! -f CHANGELOG.md ]; then
+            echo "WARNING: CHANGELOG.md not found at repo root, skip changelog inject" >&2
+            exit 0
+          fi
+          # python re.search: '## [v0.X.Y]' 后所有内容(到下一个 '## [' 之前),
+          # re.DOTALL 让 . 匹配换行。re.escape version 防 regex injection。
+          CHANGELOG_SECTION=$(VERSION="$VERSION" python3 - <<'PYEOF'
+          import os, re, sys
+          version = os.environ["VERSION"]
+          with open("CHANGELOG.md", "r", encoding="utf-8") as f:
+              body = f.read()
+          m = re.search(r"## \[v?" + re.escape(version) + r"\][^#]*?(?=## \[|\Z)", body, re.DOTALL)
+          if not m:
+              sys.stderr.write("WARNING: ## [" + version + "] section not found in CHANGELOG.md, skip inject\n")
+              sys.exit(0)
+          print(m.group(0).rstrip())
+          PYEOF
+          )
+          if [ -z "$CHANGELOG_SECTION" ]; then
+            echo "WARNING: extracted CHANGELOG section for $VERSION is empty, skip" >&2
+            exit 0
+          fi
+          TMPFILE=$(mktemp)
+          trap 'rm -f "$TMPFILE"' EXIT
+          printf '%s\n' "$CHANGELOG_SECTION" > "$TMPFILE"
+          gh release edit "$VERSION" \
+              --repo "${{ github.repository }}" --notes-file "$TMPFILE"
+          echo "injected CHANGELOG [$VERSION] section ($(wc -l < "$TMPFILE") lines) to release body"
+
       - name: append windows zip SHA256 to release body
         # bumb-scoop-hash-trace change: 让 build.sh bump-scoop 不下载 zip 拿 hash
         # (下载流量高)。release workflow 在 windows-amd64 job 末尾算 zip SHA256,
-        # 用 HTML 注释形式写进 release body (<!-- sha256:auto-hash:HEX -->)。
+        # 用 HTML 注释形式写进 release body。
         # build.sh bump-scoop 用 curl GitHub releases API fetch body + parse hash,
         # 避免下载 18 MB zip。
         # 仅 windows-amd64 跑 (zip 只在 windows-amd64 job 产生;其他 matrix 4 个 job
         # 不重复写)。
+        # release-notes-changelog-injection:marker 格式从
+        # `<!-- sha256:auto-hash:HEX -->` 改为 `<!-- sha256:cc-launcher-windows-amd64.zip:HEX -->`,
+        # 文件名替换 `auto-hash` token,build.sh regex 同步改通用格式
+        # `sha256:[^:]+:\K[a-f0-9]{64}` 兼容新旧 marker。
         if: matrix.target.os == 'windows' && matrix.target.arch == 'amd64'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -139,10 +186,10 @@ jobs:
           BODY=$(gh api -H "Accept: application/vnd.github+json" \
               "/repos/${{ github.repository }}/releases/tags/${{ github.ref_name }}" \
               | python3 -c "import sys,json; print(json.load(sys.stdin)['body'] or '')")
-          # 保留已有 body (e.g. auto-generated changelog),append marker
+          # 保留已有 body (CHANGELOG 段由上一个 step 注入),append marker
           NEW_BODY="${BODY}
 
-          <!-- sha256:auto-hash:${HASH} -->"
+          <!-- sha256:cc-launcher-windows-amd64.zip:${HASH} -->"
           gh release edit "${{ github.ref_name }}" \
               --repo "${{ github.repository }}" --notes "$NEW_BODY"
           echo "appended sha256 marker to release ${{ github.ref_name }} body"
