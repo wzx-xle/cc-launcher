@@ -717,15 +717,24 @@ func TestStatsTimeBuckets(t *testing.T) {
 	exitCalled := false
 	statsExitFn = func(code int) { exitCode = code; exitCalled = true }
 
+	// runStatsForTest 是 TestStatsTimeBuckets 内部 helper：把 mock now 注入
+	// stats.Query.Clock,让 stats 路径与 collector store 共享同一 mock today
+	//（见 spec/stats-query "stats query accepts an optional clock"）。
+	// 这样 sub-test 不再依赖 time.Now() 真实 today,a_day7 在任何日期跑都 deterministic。
+	runStatsForTest := func(args []string) error {
+		return runStatsWithQuery(stats.Query{Clock: func() time.Time { return now }}, args)
+	}
+
 	t.Run("a_day7_text_has_7_buckets_and_total", func(t *testing.T) {
 		var runErr error
 		out := captureStdout(t, func() {
-			runErr = runStats([]string{"--day", "7"})
+			runErr = runStatsForTest([]string{"--day", "7"})
 		})
 		if runErr != nil {
 			t.Fatalf("runStats --day 7: %v", runErr)
 		}
-		// 7 daily label (09-24 .. 09-30) 应都出现
+		// 7 daily label (09-24 .. 09-30) 应都出现 — 与 collector store mock today
+		// (2026-09-30 17:30) + 注入 stats.Query.Clock 共享,跨任何真实 today 都 deterministic
 		for _, d := range []string{"09-24", "09-25", "09-26", "09-27", "09-28", "09-29", "09-30"} {
 			if !strings.Contains(out, d) {
 				t.Errorf("--day 7 output 应含 %q, got:\n%s", d, out)
@@ -743,13 +752,14 @@ func TestStatsTimeBuckets(t *testing.T) {
 	t.Run("b_day1_text_has_hourly_with_partial_note", func(t *testing.T) {
 		var runErr error
 		out := captureStdout(t, func() {
-			runErr = runStats([]string{"--day", "1"})
+			runErr = runStatsForTest([]string{"--day", "1"})
 		})
 		if runErr != nil {
 			t.Fatalf("runStats --day 1: %v", runErr)
 		}
-		// 0..currentHour hourly label 都应出现(currentHour 由 time.Now() 决定,smoke test 不注入)
-		currentHour := time.Now().Hour()
+		// 0..currentHour hourly label 都应出现;currentHour 走 mock now 而非 time.Now()
+		// (与 collector store 共享同一 2026-09-30 17:30)
+		currentHour := now.Hour()
 		for h := 0; h <= currentHour; h++ {
 			want := fmt.Sprintf("%02d:00", h)
 			if !strings.Contains(out, want) {
@@ -770,7 +780,7 @@ func TestStatsTimeBuckets(t *testing.T) {
 	t.Run("c_no_day_text_has_no_bucket_table", func(t *testing.T) {
 		var runErr error
 		out := captureStdout(t, func() {
-			runErr = runStats([]string{})
+			runErr = runStatsForTest([]string{})
 		})
 		if runErr != nil {
 			t.Fatalf("runStats (no --day): %v", runErr)
@@ -783,7 +793,7 @@ func TestStatsTimeBuckets(t *testing.T) {
 	t.Run("d_json_day7_has_bucket_rows_and_totals", func(t *testing.T) {
 		var runErr error
 		out := captureStdout(t, func() {
-			runErr = runStats([]string{"--json", "--day", "7"})
+			runErr = runStatsForTest([]string{"--json", "--day", "7"})
 		})
 		if runErr != nil {
 			t.Fatalf("runStats --json --day 7: %v", runErr)
@@ -814,7 +824,7 @@ func TestStatsTimeBuckets(t *testing.T) {
 	t.Run("e_json_no_day_omits_bucket_fields", func(t *testing.T) {
 		var runErr error
 		out := captureStdout(t, func() {
-			runErr = runStats([]string{"--json"})
+			runErr = runStatsForTest([]string{"--json"})
 		})
 		if runErr != nil {
 			t.Fatalf("runStats --json (no --day): %v", runErr)
@@ -842,7 +852,7 @@ func TestStatsTimeBuckets(t *testing.T) {
 	t.Run("f_since_removed", func(t *testing.T) {
 		var runErr error
 		stderr := captureStderr(t, func() {
-			runErr = runStats([]string{"--since", "2026-09-20"})
+			runErr = runStatsForTest([]string{"--since", "2026-09-20"})
 		})
 		// Go flag package 会返回 fs.Parse 错误 → runStats return err
 		if runErr == nil {
@@ -858,7 +868,7 @@ func TestStatsTimeBuckets(t *testing.T) {
 		exitCode = -1
 		exitCalled = false
 		stderr0 := captureStderr(t, func() {
-			_ = runStats([]string{"--day", "0"})
+			_ = runStatsForTest([]string{"--day", "0"})
 		})
 		if !exitCalled {
 			t.Error("--day 0 应触发 statsExitFn")
@@ -874,7 +884,7 @@ func TestStatsTimeBuckets(t *testing.T) {
 		exitCode = -1
 		exitCalled = false
 		stderr91 := captureStderr(t, func() {
-			_ = runStats([]string{"--day", "91"})
+			_ = runStatsForTest([]string{"--day", "91"})
 		})
 		if !exitCalled {
 			t.Error("--day 91 应触发 statsExitFn")
@@ -890,7 +900,7 @@ func TestStatsTimeBuckets(t *testing.T) {
 	t.Run("h_json_day1_marks_current_hour", func(t *testing.T) {
 		var runErr error
 		out := captureStdout(t, func() {
-			runErr = runStats([]string{"--json", "--day", "1"})
+			runErr = runStatsForTest([]string{"--json", "--day", "1"})
 		})
 		if runErr != nil {
 			t.Fatalf("runStats --json --day 1: %v", runErr)
@@ -899,7 +909,7 @@ func TestStatsTimeBuckets(t *testing.T) {
 		if err := json.Unmarshal([]byte(out), &r); err != nil {
 			t.Fatalf("invalid JSON: %v\n%s", err, out)
 		}
-		currentHour := time.Now().Hour()
+		currentHour := now.Hour()
 		wantRows := currentHour + 1
 		if len(r.BucketRows) != wantRows {
 			t.Fatalf("--day 1 应 %d rows (00..%d), got %d", wantRows, currentHour, len(r.BucketRows))
@@ -1007,7 +1017,7 @@ func TestStatsTimeBuckets(t *testing.T) {
 		// 跑 text 拿 stdout
 		var textOut string
 		captureStdout(t, func() {
-			if err := runStats([]string{"--day", "7"}); err != nil {
+			if err := runStatsForTest([]string{"--day", "7"}); err != nil {
 				t.Fatalf("runStats --day 7: %v", err)
 			}
 		})
@@ -1016,8 +1026,8 @@ func TestStatsTimeBuckets(t *testing.T) {
 		_ = textOut
 
 		// 直接用临时 buffer 重跑
-		textOut = runStatsCapture(t, []string{"--day", "7"})
-		jsonOut := runStatsCapture(t, []string{"--json", "--day", "7"})
+		textOut = runStatsCapture(t, func() time.Time { return now }, []string{"--day", "7"})
+		jsonOut := runStatsCapture(t, func() time.Time { return now }, []string{"--json", "--day", "7"})
 
 		// parse text:提取每桶 sessions / input_tokens / output_tokens / cache_create / cache_read / cost_usd
 		type textBucket struct {
@@ -1102,10 +1112,14 @@ func TestStatsTimeBuckets(t *testing.T) {
 	})
 }
 
-// runStatsCapture 跑 runStats 并捕获 stdout,返回捕获到的内容。
+// runStatsCapture 跑 runStatsWithQuery 并捕获 stdout,返回捕获到的内容。
 //
 // 比 captureStdout(t, fn) 多一步把 buffer 内容作为 string 返回。
-func runStatsCapture(t *testing.T, args []string) string {
+// 接受 nowFn 用于 clock 注入,让 caller (smoke test) 把 mock now 传给 stats 路径,
+// 与 collector.Store.WithClock 共享同一 mock today(见 spec/stats-query
+// "stats query accepts an optional clock")。j sub-test 依赖 text + JSON 两次跑
+// 输出 bucket 数一致,两次必须用同一 clock。
+func runStatsCapture(t *testing.T, nowFn func() time.Time, args []string) string {
 	t.Helper()
 	orig := os.Stdout
 	r, w, err := os.Pipe()
@@ -1122,9 +1136,9 @@ func runStatsCapture(t *testing.T, args []string) string {
 		done <- buf.String()
 	}()
 
-	if err := runStats(args); err != nil {
+	if err := runStatsWithQuery(stats.Query{Clock: nowFn}, args); err != nil {
 		_ = w.Close()
-		t.Fatalf("runStats %v: %v", args, err)
+		t.Fatalf("runStatsWithQuery %v: %v", args, err)
 	}
 	_ = w.Close()
 	os.Stdout = orig

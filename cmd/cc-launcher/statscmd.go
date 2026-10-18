@@ -67,7 +67,32 @@ var statsExitFn = func(code int) { os.Exit(code) }
 //       (3) --day 未启用 + 明细空：(no data in window since ...)
 //       (4) --day 启用 + 明细非空：detail 表 + 空行 + 桶聚合表
 //       (5) --day 启用 + 明细空：(no data in window ...) + 桶聚合表（无空行,跟 hint 紧凑）
+// runStats 是 `ccl stats` 入口。
+//
+// 决策（stats-time-buckets §2.2）：
+//   - --day 校验：<1 或 >90 → stderr + statsExitFn(2)（Go flag parse error 约定）
+//   - q.Buckets：day != 0 ? &day : nil（QueryStats 内部据此启用桶聚合）
+//   - 输出分支 4 种：
+//       (1) JSON 输出 result（BucketRows/BucketTotals 由 QueryStats 自动填,omitempty）
+//       (2) --day 未启用 + 明细非空：旧 detail 表（向后兼容）
+//       (3) --day 未启用 + 明细空：(no data in window since ...)
+//       (4) --day 启用 + 明细非空：detail 表 + 空行 + 桶聚合表
+//       (5) --day 启用 + 明细空：(no data in window ...) + 桶聚合表（无空行,跟 hint 紧凑）
+//
+// 真实生产调用走 runStats（无 clock 注入,fallback time.Now）；
+// smoke test 走 runStatsWithQuery(stats.Query{Clock: ...}, args) 注入 mock clock,
+// 与 collector.Store.WithClock 共享同一 mock today(见 spec/stats-query
+// "stats query accepts an optional clock")。
 func runStats(args []string) error {
+	return runStatsWithQuery(stats.Query{}, args)
+}
+
+// runStatsWithQuery 是 runStats 的可注入 clock 版本。
+//
+// base.Clock 会合并到 args 解析后的 Query;base 的其它字段(ByProvider / ByProject
+// / Project / Buckets)被 args 解析结果覆盖(以 CLI flag 为准)。这样设计让 caller
+// 只关心 Clock 注入,不污染 CLI flag 行为。
+func runStatsWithQuery(base stats.Query, args []string) error {
 	fs := flag.NewFlagSet("stats", flag.ContinueOnError)
 	day, byProvider, byProject, asJSON, project := registerStatsFlags(fs)
 	if err := fs.Parse(args); err != nil {
@@ -91,6 +116,7 @@ func runStats(args []string) error {
 		ByProvider: *byProvider,
 		ByProject:  *byProject,
 		Project:    *project,
+		Clock:      base.Clock, // 仅 Clock 来自 base 注入,其它字段以 CLI flag 为准
 	}
 	if *day > 0 {
 		d := *day

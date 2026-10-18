@@ -29,11 +29,29 @@ var ErrNoDatabase = errors.New("telemetry db 不存在")
 //   - 砍掉 Since time.Time（由 `--day` 派生 detail 起点,避免 detail/summary 窗口割裂）
 //   - Buckets *int：nil = 不启用桶聚合（向后兼容,旧 ccl stats 字节级一致 JSON）;
 //     非 nil → 启用,*Buckets 即 N;kind 推导规则:N==1 → "hour",else → "day"
+//   - Clock func() time.Time：nil = fallback time.Now（向后兼容,旧 caller 字节级一致）;
+//     非 nil → 内部所有 time.Now() 走该函数,实现 deterministic 测试
+//     （与 collector.Store.WithClock 模式对齐,见 spec/stats-query "stats query
+//     accepts an optional clock"）。Query 不进 JSON 输出（Result 只用 Sessions /
+//     Totals / BucketRows / BucketTotals 等具体字段,无 Query 反序列化需求）,
+//     所以不加 json tag。
 type Query struct {
 	Buckets    *int    // nil = 不启用桶聚合;非 nil = 启用,N ∈ [1,90]
 	ByProvider bool    // 按 provider 聚合
 	ByProject  bool    // 按 project 聚合
 	Project    string  // 模糊匹配 session.cwd 子串
+	Clock      func() time.Time // nil = time.Now;非 nil = 注入 clock(测试 / 跨包 deterministic)
+}
+
+// now 返回 Query 注入的 clock 或 fallback time.Now。
+//
+// unexported helper:QueryStats 内部统一调用入口,避免每个 time.Now 点都重复
+// "q.Clock != nil ? q.Clock() : time.Now" 三元式。
+func (q Query) now() time.Time {
+	if q.Clock != nil {
+		return q.Clock()
+	}
+	return time.Now()
 }
 
 // SessionStats 是单个 session（或聚合行）的指标。
@@ -102,11 +120,14 @@ func QueryStats(dbPath string, q Query) (*Result, error) {
 	defer db.Close()
 
 	// detail since:有 Buckets 时跟桶对齐;否则默认 7 天
+	// 时间源走 q.now()(Query.Clock 注入或 fallback time.Now),让 smoke test
+	// 能与 collector.Store.WithClock 共享同一 mock today(见 spec/stats-query
+	// "stats query accepts an optional clock")。
 	var since time.Time
 	if q.Buckets != nil {
-		since = time.Now().AddDate(0, 0, -*q.Buckets)
+		since = q.now().AddDate(0, 0, -*q.Buckets)
 	} else {
-		since = DefaultSince()
+		since = q.now().AddDate(0, 0, -7)
 	}
 
 	groupBy := "session"
@@ -177,7 +198,7 @@ func QueryStats(dbPath string, q Query) (*Result, error) {
 			kind = "hour"
 		}
 		sinceMs := since.UnixMilli()
-		rows2, err := QueryBucketSummary(dbPath, kind, sinceMs)
+		rows2, err := QueryBucketSummary(dbPath, kind, sinceMs, q.Clock)
 		if err != nil {
 			if errors.Is(err, ErrNoDatabase) {
 				// 与 detail 一致：db 缺失整 func return error(caller 显示 stderr + exit 1)

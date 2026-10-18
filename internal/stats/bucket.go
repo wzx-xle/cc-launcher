@@ -50,13 +50,20 @@ type BucketRow struct {
 //   - dbPath：SQLite 文件路径；不存在 → ErrNoDatabase 包裹
 //   - kind ∈ {"hour", "day"}；其它值 → 报错
 //   - sinceMs：sessions.started_at 下界（UnixMilli,本地时区零点）
+//   - nowFn func() time.Time：nil = fallback time.Now；非 nil = 注入 clock
+//     （测试 / 跨包 deterministic,与 collector.Store.WithClock / stats.Query.Clock
+//      模式对齐,见 spec/stats-query "stats query accepts an optional clock"）
 //
 // 返回：
 //   - hourly：currentHour+1 行（0..currentHour,partial 当前小时标记）
 //   - daily：(todayStart - sinceMs)/86400000 + 1 行（最旧 → 今天,包含今天）
 //   - 空 db 仍返回完整骨架（零值桶）
-func QueryBucketSummary(dbPath string, kind string, sinceMs int64) ([]BucketRow, error) {
-	return queryBucketSummaryAt(dbPath, kind, sinceMs, time.Now())
+func QueryBucketSummary(dbPath string, kind string, sinceMs int64, nowFn func() time.Time) ([]BucketRow, error) {
+	now := time.Now()
+	if nowFn != nil {
+		now = nowFn()
+	}
+	return queryBucketSummaryAt(dbPath, kind, sinceMs, now)
 }
 
 // queryBucketSummaryAt 同 QueryBucketSummary,但显式接受 now（测试用 mock 当前小时）。

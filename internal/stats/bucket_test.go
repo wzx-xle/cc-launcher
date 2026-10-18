@@ -308,7 +308,7 @@ func TestBucket_Daily_FillsMissing(t *testing.T) {
 
 // TestBucket_ErrNoDatabase 覆盖 spec scenario db 不存在 → errors.Is(err, ErrNoDatabase)。
 func TestBucket_ErrNoDatabase(t *testing.T) {
-	_, err := QueryBucketSummary("/tmp/definitely-not-exist-bucket.db", "hour", 0)
+	_, err := QueryBucketSummary("/tmp/definitely-not-exist-bucket.db", "hour", 0, nil)
 	if err == nil {
 		t.Fatal("expected error for missing db")
 	}
