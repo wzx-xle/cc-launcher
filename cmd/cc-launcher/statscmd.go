@@ -156,13 +156,10 @@ func runStatsWithQuery(base stats.Query, args []string) error {
 		return nil
 	}
 
-	// --day 启用:detail + 桶聚合
-	if len(result.Sessions) > 0 {
-		fmt.Printf("Window since: %s   Group by: %s\n\n",
-			result.Since.Format("2006-01-02"), groupByLabel(result.GroupBy))
-		stats.FormatTable(os.Stdout, result)
-		fmt.Println() // 空行分隔 detail 与 桶聚合
-	} else {
+	// --day 启用:仅桶聚合表(不再前置 detail 表;--day 语义是"换桶视图",
+	// 想看 session 明细请用 ccl stats 不传 --day)。--json 路径 shape 不动,
+	// 仍含 sessions + totals + bucket_rows + bucket_totals 完整结构。
+	if len(result.Sessions) == 0 {
 		fmt.Printf("(no data in window since %s)\n", result.Since.Format("2006-01-02"))
 	}
 	stats.FormatBucketTable(os.Stdout, result.BucketRows, result.BucketTotals)

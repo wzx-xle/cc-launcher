@@ -747,6 +747,13 @@ func TestStatsTimeBuckets(t *testing.T) {
 		if !strings.Contains(out, "TOTAL") {
 			t.Errorf("--day 7 应含 TOTAL 行, got:\n%s", out)
 		}
+		// --day 路径只输出桶表,不再前置 detail 表(无 Window since / Group by / STARTED 头)
+		// 见 spec/time-buckets Requirement 1 修订
+		for _, banned := range []string{"Window since:", "Group by:", "STARTED"} {
+			if strings.Contains(out, banned) {
+				t.Errorf("--day 7 不应再含 detail 头 %q (spec Requirement 1 修订), got:\n%s", banned, out)
+			}
+		}
 	})
 
 	t.Run("b_day1_text_has_hourly_with_partial_note", func(t *testing.T) {
@@ -774,6 +781,12 @@ func TestStatsTimeBuckets(t *testing.T) {
 		currentLabel := fmt.Sprintf("%02d:00*", currentHour)
 		if !strings.Contains(out, currentLabel) {
 			t.Errorf("--day 1 当前小时 label 应为 %q, got:\n%s", currentLabel, out)
+		}
+		// --day 路径只输出桶表,不再前置 detail 表
+		for _, banned := range []string{"Window since:", "Group by:", "STARTED"} {
+			if strings.Contains(out, banned) {
+				t.Errorf("--day 1 不应再含 detail 头 %q (spec Requirement 1 修订), got:\n%s", banned, out)
+			}
 		}
 	})
 

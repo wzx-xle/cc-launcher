@@ -4,15 +4,15 @@
 在 `ccl stats` 子命令下提供"按时间桶聚合"的次级视图(hourly / daily),与现有 session 明细列表并存,帮助用户快速对照"今天每小时"或"最近 N 天每天"的 token / cost 趋势,无需手算或调 `--since`。
 ## Requirements
 ### Requirement: ccl stats --day N prints a time-bucket aggregate table
-`ccl stats --day N` MUST open `~/.cc-launcher/telemetry.db` directly and, after the existing session detail table, print a second human-readable table. The bucket table MUST have columns `BUCKET`, `SESSIONS`, `IN`, `OUT`, `CACHE_CRE`, `CACHE_READ`, `COST_USD`, `TOTAL_TOKENS`. Each row MUST aggregate per-session token / cost totals using the same metric-name rules as the base `ccl stats` (input / output / cacheCreation / cacheRead / cost.usage). The `TOTAL_TOKENS` column MUST display the humanized sum `IN + OUT + CACHE_CRE + CACHE_READ` rendered by the same `humanizeTokens` rule as the other token columns (`0` for zero, `1.23K` / `1.23M` / `1.23B` for values ≥ 1K, with at most 2 significant digits after the leading portion). The `--day N` flag MUST accept integer `N` in range `[1, 90]`; values outside MUST cause exit non-zero with a clear error. When `--day N` is used together with `--json`, the JSON output MUST include a `bucket_rows` array and a `bucket_totals` object (see Requirement 4).
+`ccl stats --day N` MUST open `~/.cc-launcher/telemetry.db` directly and print a human-readable time-bucket aggregate table. The bucket table MUST have columns `BUCKET`, `SESSIONS`, `IN`, `OUT`, `CACHE_CRE`, `CACHE_READ`, `COST_USD`, `TOTAL_TOKENS`. **No preceding session detail table** is printed: when `--day` is enabled, the output contains ONLY the bucket table (and a `(no data in window since ...)` hint when there are no sessions in the window). The `--day` flag's semantic is "switch to the bucket view" — users who want per-session detail run `ccl stats` without `--day` (see Requirement 2). Each row MUST aggregate per-session token / cost totals using the same metric-name rules as the base `ccl stats` (input / output / cacheCreation / cacheRead / cost.usage). The `TOTAL_TOKENS` column MUST display the humanized sum `IN + OUT + CACHE_CRE + CACHE_READ` rendered by the same `humanizeTokens` rule as the other token columns (`0` for zero, `1.23K` / `1.23M` / `1.23B` for values ≥ 1K, with at most 2 significant digits after the leading portion). The `--day N` flag MUST accept integer `N` in range `[1, 90]`; values outside MUST cause exit non-zero with a clear error. When `--day N` is used together with `--json`, the JSON output MUST include a `bucket_rows` array and a `bucket_totals` object (see Requirement 4).
 
 #### Scenario: --day 7 produces 7 daily buckets in chronological order
 - **WHEN** user runs `ccl stats --day 7` and telemetry.db has at least one session within the last 7 days
-- **THEN** stdout contains a second table with headers `BUCKET SESSIONS IN OUT CACHE_CRE CACHE_READ COST_USD TOTAL_TOKENS` and exactly 7 data rows followed by 1 `TOTAL` row; data rows are in chronological order (oldest first → most recent last); each data row's `BUCKET` is a date string in `MM-DD` format (e.g., `09-24`)
+- **THEN** stdout contains a single table with headers `BUCKET SESSIONS IN OUT CACHE_CRE CACHE_READ COST_USD TOTAL_TOKENS` and exactly 7 data rows followed by 1 `TOTAL` row; data rows are in chronological order (oldest first → most recent last); each data row's `BUCKET` is a date string in `MM-DD` format (e.g., `09-24`); stdout does NOT contain the words `STARTED`, `Window since:`, or `Group by:`
 
 #### Scenario: --day 1 produces 24 hourly buckets
 - **WHEN** user runs `ccl stats --day 1` and telemetry.db has at least one session today
-- **THEN** the bucket table has exactly 24 data rows plus 1 `TOTAL` row; each data row's `BUCKET` is an hour string in `HH:00` format (e.g., `00:00`, `17:00`); rows are in chronological order
+- **THEN** the bucket table has exactly 24 data rows plus 1 `TOTAL` row; each data row's `BUCKET` is an hour string in `HH:00` format (e.g., `00:00`, `17:00`); rows are in chronological order; stdout does NOT contain the words `STARTED`, `Window since:`, or `Group by:`
 
 #### Scenario: --day 1 includes the current hour with a star suffix
 - **WHEN** user runs `ccl stats --day 1` at local time 17:30 and a session started at 17:15
@@ -35,6 +35,10 @@
 #### Scenario: --day N validates N is in [1, 90]
 - **WHEN** user runs `ccl stats --day 0` or `ccl stats --day 91` or `ccl stats --day -1`
 - **THEN** exit code is non-zero; stderr / stdout contains an error message of the form `--day 必须在 1 到 90 之间, got: <N>`
+
+#### Scenario: --day with empty db prints no-data hint and bucket skeleton, no detail table
+- **WHEN** user runs `ccl stats --day 7` and `telemetry.db` has zero rows in `sessions`
+- **THEN** stdout contains the `(no data in window since YYYY-MM-DD)` hint followed by a 7-row daily bucket table (all zero values); stdout does NOT contain `STARTED`, `Window since:`, or `Group by:`; exit code 0
 
 ### Requirement: ccl stats preserves base behavior when --day is not specified
 When `--day` is NOT specified, `ccl stats` MUST produce output byte-identical to the pre-change behavior: same session detail table, same JSON shape (no `bucket_rows` / `bucket_totals` keys), same empty-data message, same exit codes for missing db, same default 7-day window. The `--since` flag MUST NOT exist in this state (it was removed by this change; passing `--since` produces a "flag provided but not defined" error).
