@@ -91,13 +91,28 @@ type Result struct {
 // DefaultSince 默认窗口为 7 天前。
 func DefaultSince() time.Time { return time.Now().AddDate(0, 0, -7) }
 
+// oldestBucketStart 返回 --day N 桶视图的最旧桶那天的本地 00:00。
+//
+// design Decision 6：detail 视图的窗口起点必须与桶视图的窗口起点重合，
+// 否则 detail totals ≠ Σbucket rows（原实现 detail 覆盖 [now-Nd, now]、
+// 桶覆盖 [todayStart-(N-1)d, todayStart]，两者错开约一天）。
+//
+// N=1 → 今天 00:00（hourly 桶覆盖当天 0..currentHour）。
+func oldestBucketStart(now time.Time, n int) time.Time {
+	if n < 1 {
+		n = 1
+	}
+	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	return midnight.AddDate(0, 0, -(n - 1))
+}
+
 // QueryStats 打开 db，读聚合，返回 Result。
 //
 // 调用方负责输出（表格 / JSON）。
 //
-// detail since 推导（stats-time-buckets §D10）：
-//   - q.Buckets != nil:detail since = now - *q.Buckets days（与桶聚合同窗口）
-//   - q.Buckets == nil:detail since = DefaultSince()（7 天前,旧 ccl stats 字节级一致）
+// detail since 推导（stats-time-buckets §D10 + design Decision 6）：
+//   - q.Buckets != nil:detail since = 最旧桶那天的本地 00:00（与桶视图完全同窗口）
+//   - q.Buckets == nil:detail since = now - 7 days（不午夜对齐）
 //
 // 桶聚合（q.Buckets != nil 时）：
 //   - kind 推导:N==1 → "hour",else → "day"
@@ -119,13 +134,14 @@ func QueryStats(dbPath string, q Query) (*Result, error) {
 	}
 	defer db.Close()
 
-	// detail since:有 Buckets 时跟桶对齐;否则默认 7 天
+	// detail since:有 Buckets 时对齐到**最旧桶那天的本地 00:00**(design Decision 6);
+	// 否则默认 7 天前。
 	// 时间源走 q.now()(Query.Clock 注入或 fallback time.Now),让 smoke test
 	// 能与 collector.Store.WithClock 共享同一 mock today(见 spec/stats-query
 	// "stats query accepts an optional clock")。
 	var since time.Time
 	if q.Buckets != nil {
-		since = q.now().AddDate(0, 0, -*q.Buckets)
+		since = oldestBucketStart(q.now(), *q.Buckets)
 	} else {
 		since = q.now().AddDate(0, 0, -7)
 	}
@@ -248,7 +264,11 @@ func buildSessionStatsSQL(groupBy, projectFilter string, since time.Time) (strin
 		groupClause = "GROUP BY s.id"
 	}
 
-	where := "WHERE s.started_at >= ?"
+	// 窗口过滤按**消费时刻**（design Decision 4）：session 行只累加 captured_at
+	// 落在窗口内的 metric；窗口外没有活动的 session 不会出现
+	// （LEFT JOIN 退化为 INNER JOIN 语义）。session 元信息（MIN(s.started_at) /
+	// model / cwd）不变——STARTED 列仍显示真实 session 起始（可能早于窗口）。
+	where := "WHERE m.captured_at >= ?"
 	if projectFilter != "" {
 		where += " AND s.cwd LIKE ?"
 		args = append(args, "%"+strings.ReplaceAll(projectFilter, "%", `\%`)+"%")

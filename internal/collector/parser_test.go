@@ -231,6 +231,206 @@ func TestParseMetricsRequest_CacheLabelValues(t *testing.T) {
 	}
 }
 
+// makeSessionCountBatch 构造一个只含 claude_code.session.count 的 OTLP batch。
+//
+// session.count 是 session 创建时刻的权威观测（spec telemetry-storage
+// "session start time reflects the real session start"）。
+func makeSessionCountBatch(t *testing.T, sid string, tsNanos uint64) []byte {
+	t.Helper()
+
+	req := &collectormetrics.ExportMetricsServiceRequest{
+		ResourceMetrics: []*metricpb.ResourceMetrics{
+			{
+				ScopeMetrics: []*metricpb.ScopeMetrics{
+					{
+						Metrics: []*metricpb.Metric{
+							{
+								Name: "claude_code.session.count",
+								Data: &metricpb.Metric_Gauge{
+									Gauge: &metricpb.Gauge{
+										DataPoints: []*metricpb.NumberDataPoint{
+											{
+												TimeUnixNano: tsNanos,
+												Value:        &metricpb.NumberDataPoint_AsDouble{AsDouble: 1},
+												Attributes:   []*commonpb.KeyValue{kv("session.id", sid)},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	b, err := proto.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return b
+}
+
+// makeTokenBatch 构造一个含 claude_code.token.usage 的 OTLP batch（可多个 datapoint）。
+func makeTokenBatch(t *testing.T, sid string, tsNanos []uint64) []byte {
+	t.Helper()
+
+	dps := make([]*metricpb.NumberDataPoint, 0, len(tsNanos))
+	for _, ts := range tsNanos {
+		dps = append(dps, &metricpb.NumberDataPoint{
+			TimeUnixNano: ts,
+			Value:        &metricpb.NumberDataPoint_AsInt{AsInt: 100},
+			Attributes: []*commonpb.KeyValue{
+				kv("session.id", sid),
+				kv("type", "input"),
+				kv("model", "deepseek-chat"),
+			},
+		})
+	}
+
+	req := &collectormetrics.ExportMetricsServiceRequest{
+		ResourceMetrics: []*metricpb.ResourceMetrics{
+			{
+				ScopeMetrics: []*metricpb.ScopeMetrics{
+					{
+						Metrics: []*metricpb.Metric{
+							{
+								Name: "claude_code.token.usage",
+								Data: &metricpb.Metric_Sum{
+									Sum: &metricpb.Sum{DataPoints: dps},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	b, err := proto.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return b
+}
+
+// TestParseMetricsRequest_SessionStartedAtFromSessionCount 覆盖 spec scenario
+// "session start time comes from the session.count metric"。
+//
+// batch 里 session.count 的 ts = 1790664811109ms → Session.StartedAt 必须是它，
+// 而不是 batch 到达 daemon 的时刻（time.Now()）。
+func TestParseMetricsRequest_SessionStartedAtFromSessionCount(t *testing.T) {
+	const tsNanos = 1_790_664_811_109_000_000 // = 1790664811109 ms
+
+	res, err := ParseMetricsRequest(makeSessionCountBatch(t, "sess-start", tsNanos))
+	if err != nil {
+		t.Fatalf("ParseMetricsRequest: %v", err)
+	}
+	if len(res.Sessions) != 1 {
+		t.Fatalf("want 1 session, got %d", len(res.Sessions))
+	}
+	if got := res.Sessions[0].StartedAt.UnixMilli(); got != 1790664811109 {
+		t.Errorf("StartedAt: want 1790664811109 (session.count ts), got %d", got)
+	}
+}
+
+// TestParseMetricsRequest_SessionStartedAtFallbackToEarliestMetric 覆盖 spec
+// "otherwise, the earliest captured_at among the session's metrics in the same
+// OTLP export batch is used as an approximation"。
+//
+// batch 里没有 session.count，只有两个 token.usage → 取最早的 captured_at。
+func TestParseMetricsRequest_SessionStartedAtFallbackToEarliestMetric(t *testing.T) {
+	const (
+		early uint64 = 1_790_664_811_109_000_000
+		late  uint64 = 1_790_664_871_109_000_000 // +60s
+	)
+
+	res, err := ParseMetricsRequest(makeTokenBatch(t, "sess-fallback", []uint64{late, early}))
+	if err != nil {
+		t.Fatalf("ParseMetricsRequest: %v", err)
+	}
+	if len(res.Sessions) != 1 {
+		t.Fatalf("want 1 session, got %d", len(res.Sessions))
+	}
+	if got := res.Sessions[0].StartedAt.UnixMilli(); got != 1790664811109 {
+		t.Errorf("StartedAt: want 1790664811109 (earliest captured_at in batch), got %d", got)
+	}
+}
+
+// TestParseMetricsRequest_SessionStartedAtPrefersSessionCount 验证同一 batch 里
+// session.count 优先于其它 metric 的 captured_at（即使后者更早）。
+//
+// spec: "The captured_at of the session's claude_code.session.count metric is
+// the authoritative observation of the session's creation, and MUST be used
+// when present"。
+func TestParseMetricsRequest_SessionStartedAtPrefersSessionCount(t *testing.T) {
+	const (
+		countTs = 1_790_664_871_109_000_000 // session.count: +60s
+		tokenTs = 1_790_664_811_109_000_000 // 其它 metric 更早
+	)
+
+	// 手工拼一个 batch：session.count 与 token.usage 各一个 datapoint。
+	req := &collectormetrics.ExportMetricsServiceRequest{
+		ResourceMetrics: []*metricpb.ResourceMetrics{
+			{
+				ScopeMetrics: []*metricpb.ScopeMetrics{
+					{
+						Metrics: []*metricpb.Metric{
+							{
+								Name: "claude_code.token.usage",
+								Data: &metricpb.Metric_Sum{
+									Sum: &metricpb.Sum{
+										DataPoints: []*metricpb.NumberDataPoint{
+											{
+												TimeUnixNano: tokenTs,
+												Value:        &metricpb.NumberDataPoint_AsInt{AsInt: 100},
+												Attributes: []*commonpb.KeyValue{
+													kv("session.id", "sess-priority"),
+													kv("type", "input"),
+												},
+											},
+										},
+									},
+								},
+							},
+							{
+								Name: "claude_code.session.count",
+								Data: &metricpb.Metric_Gauge{
+									Gauge: &metricpb.Gauge{
+										DataPoints: []*metricpb.NumberDataPoint{
+											{
+												TimeUnixNano: countTs,
+												Value:        &metricpb.NumberDataPoint_AsDouble{AsDouble: 1},
+												Attributes:   []*commonpb.KeyValue{kv("session.id", "sess-priority")},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	body, err := proto.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	res, err := ParseMetricsRequest(body)
+	if err != nil {
+		t.Fatalf("ParseMetricsRequest: %v", err)
+	}
+	if len(res.Sessions) != 1 {
+		t.Fatalf("want 1 session, got %d", len(res.Sessions))
+	}
+	if got := res.Sessions[0].StartedAt.UnixMilli(); got != 1790664871109 {
+		t.Errorf("StartedAt: want 1790664871109 (session.count ts wins), got %d", got)
+	}
+}
+
 // TestParseMetricsRequest_SessionModelFromLaterMetric 验证：session.count
 // 先到（没 model）→ cost.usage 后到（有 model）→ session 行应有 model。
 //

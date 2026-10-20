@@ -117,6 +117,11 @@ func OpenStore(path string, opts ...OpenStoreOption) (*Store, error) {
 		return nil, err
 	}
 
+	if err := migrateStore(db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+
 	s := &Store{
 		db:     db,
 		path:   path,
@@ -165,9 +170,65 @@ func createSchema(db *sql.DB) error {
 	return nil
 }
 
+// schemaVersion 是 db 的迁移版本号（存 SQLite PRAGMA user_version）。
+//
+//	1 = 回填历史 sessions.started_at（design Decision 3）
+const schemaVersion = 1
+
+// migrateStore 按 PRAGMA user_version 驱动一次性数据迁移。
+//
+// 幂等：user_version >= schemaVersion 直接跳过；回填语句本身也可重复执行。
+// 新建 db（无任何 session 行）同样走一遍回填——空表上是无害的 no-op。
+func migrateStore(db *sql.DB) error {
+	var v int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
+		return fmt.Errorf("读 user_version 失败: %w", err)
+	}
+	if v >= schemaVersion {
+		return nil
+	}
+	if err := backfillSessionStartTimes(db); err != nil {
+		return fmt.Errorf("回填 sessions.started_at 失败: %w", err)
+	}
+	// PRAGMA 不支持参数占位符；schemaVersion 是包内常量 int，非外部输入。
+	if _, err := db.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)); err != nil {
+		return fmt.Errorf("写 user_version 失败: %w", err)
+	}
+	return nil
+}
+
+// backfillSessionStartTimes 修正被污染的历史 sessions.started_at。
+//
+// 旧版本把 started_at 写成"最后一次 OTLP export 到达 daemon 的时刻"，且每次
+// export 都覆盖它。这里用 metrics 表里一直是准的 captured_at 还原真实起始：
+//
+//	claude_code.session.count 的 MIN(captured_at)   ← session 创建时刻的权威观测
+//	回退:该 session 全部 metric 的 MIN(captured_at)   ← 最早的活动时刻
+//
+// 没有任何 metric 的 session 行：COALESCE 两项都是 NULL，WHERE 条件不匹配
+// → 原样保留（不写 NULL、不删行）。
+func backfillSessionStartTimes(db *sql.DB) error {
+	const q = `
+UPDATE sessions SET started_at = COALESCE(
+    (SELECT MIN(m.captured_at) FROM metrics m
+      WHERE m.session_id = sessions.id AND m.name = 'claude_code.session.count'),
+    (SELECT MIN(m.captured_at) FROM metrics m
+      WHERE m.session_id = sessions.id)
+)
+WHERE started_at <> COALESCE(
+    (SELECT MIN(m.captured_at) FROM metrics m
+      WHERE m.session_id = sessions.id AND m.name = 'claude_code.session.count'),
+    (SELECT MIN(m.captured_at) FROM metrics m
+      WHERE m.session_id = sessions.id)
+)`
+	_, err := db.Exec(q)
+	return err
+}
+
 // WriteSession 把 Session 入队（非阻塞；超 10k 丢最旧）。
 //
-// session 由 caller 保证 ID 非空。重复 ID 走 INSERT OR REPLACE 语义。
+// session 由 caller 保证 ID 非空。重复 ID 走 ON CONFLICT DO UPDATE 语义：
+// started_at 取 MIN(现有, 新值)（只降不升），其余列被新值覆盖。
 func (s *Store) WriteSession(sess Session) error {
 	if sess.ID == "" {
 		return errors.New("session.id 不能为空")
@@ -258,10 +319,21 @@ func (s *Store) insertSession(sess Session) error {
 		t := sess.EndedAt.UnixMilli()
 		endedAt = &t
 	}
+	// ON CONFLICT DO UPDATE（而非 INSERT OR REPLACE）：
+	//   - started_at 只降不升（MIN(现有, 新值)）——后续 export batch 的
+	//     captured_at 更大，绝不能把 session 起始时刻往前推。
+	//   - 其余列（ended_at / provider / cwd / model）保持"后续 batch 覆盖"
+	//     语义，与原 INSERT OR REPLACE 一致。
 	_, err := s.db.Exec(
-		`INSERT OR REPLACE INTO sessions
+		`INSERT INTO sessions
 			(id, started_at, ended_at, provider, cwd, model)
-			VALUES (?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			started_at = MIN(sessions.started_at, excluded.started_at),
+			ended_at   = excluded.ended_at,
+			provider   = excluded.provider,
+			cwd        = excluded.cwd,
+			model      = excluded.model`,
 		sess.ID,
 		sess.StartedAt.UnixMilli(),
 		endedAt,

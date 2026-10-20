@@ -317,6 +317,73 @@ func TestBucket_ErrNoDatabase(t *testing.T) {
 	}
 }
 
+// TestBucket_Daily_KeyedByConsumptionTime 覆盖 spec scenario
+// "daily buckets are keyed by consumption time"。
+//
+// 一个 session 起于 09-28，metric 分布在 09-28 / 09-29 / 09-30：
+//   - daily 桶各天只含当天 captured 的 token（design Decision 5）
+//   - SESSIONS 列仍按 s.started_at 归桶 → 只有 09-28 桶 sessions=1
+func TestBucket_Daily_KeyedByConsumptionTime(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "telemetry.db")
+	now := fixedNow() // 2026-09-30 17:30
+
+	store, err := collector.OpenStore(dbPath, collector.WithClock(func() time.Time { return now }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WriteSession(collector.Session{
+		ID: "x", StartedAt: time.Date(2026, 9, 28, 10, 0, 0, 0, time.Local),
+		Provider: "anthropic", Cwd: "/tmp", Model: "claude-opus",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// 每天一个 input metric
+	for _, d := range []struct {
+		day int
+		val float64
+	}{{28, 100}, {29, 200}, {30, 300}} {
+		if err := store.WriteMetric(collector.Metric{
+			SessionID: "x", Name: "claude_code.token.usage", Value: d.val,
+			Labels: map[string]string{"type": "input"},
+			CapturedAt: time.Date(2026, 9, d.day, 12, 0, 0, 0, time.Local),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	// 3 个 daily 桶：09-28 / 09-29 / 09-30
+	since := time.Date(2026, 9, 28, 0, 0, 0, 0, time.Local).UnixMilli()
+	rows, err := queryBucketSummaryAt(dbPath, "day", since, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("want 3 daily rows, got %d", len(rows))
+	}
+	wantTokens := []int64{100, 200, 300}
+	wantLabels := []string{"09-28", "09-29", "09-30"}
+	for i := range rows {
+		if rows[i].Label != wantLabels[i] {
+			t.Errorf("row[%d] label: want %q, got %q", i, wantLabels[i], rows[i].Label)
+		}
+		if rows[i].InputTokens != wantTokens[i] {
+			t.Errorf("row[%d] (%s) InputTokens: want %d, got %d (bucket must be keyed by consumption time)",
+				i, rows[i].Label, wantTokens[i], rows[i].InputTokens)
+		}
+	}
+	// SESSIONS 列仍按 s.started_at 归桶：只有 09-28 桶有 session
+	if rows[0].Sessions != 1 {
+		t.Errorf("09-28 bucket Sessions: want 1 (session started here), got %d", rows[0].Sessions)
+	}
+	if rows[1].Sessions != 0 || rows[2].Sessions != 0 {
+		t.Errorf("09-29/09-30 Sessions: want 0/0, got %d/%d", rows[1].Sessions, rows[2].Sessions)
+	}
+}
+
 // TestHumanizeTokens_Boundaries 覆盖 spec scenario "humanize 边界 case"。
 func TestHumanizeTokens_Boundaries(t *testing.T) {
 	cases := []struct {

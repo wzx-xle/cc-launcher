@@ -38,6 +38,8 @@ type ParseResult struct {
 //   - 只处理 Sum / Gauge 的 NumberDataPoint；Histogram / Summary 跳过
 //   - session.id 从 datapoint attrs 取（per-datapoint 覆盖 → 同一 resource 里多个 session 也能区分）
 //   - model 从 datapoint attrs 取
+//   - Session.StartedAt 取真实 session 起始时刻（claude_code.session.count 的 captured_at，
+//     回退同 batch 内最早 captured_at），**不是** batch 到达 daemon 的时刻
 //   - 不抛 panic：malformed protobuf → ParseError
 func ParseMetricsRequest(body []byte) (*ParseResult, error) {
 	var req collectormetrics.ExportMetricsServiceRequest
@@ -51,6 +53,13 @@ func ParseMetricsRequest(body []byte) (*ParseResult, error) {
 	result := &ParseResult{}
 	sessionSeen := make(map[string]bool)
 	sessionModels := make(map[string]string) // session.id → model（首个非空值留下）
+	// sessionStarts: session.id → 本 batch 内该 session 最早的 captured_at（UnixMilli）
+	sessionStarts := make(map[string]int64)
+	// sessionCountStarts: session.id → claude_code.session.count 的 captured_at（UnixMilli）
+	//   session.count 是 session 创建时刻的权威观测（spec telemetry-storage
+	//   "session start time reflects the real session start"）；有它就用它，
+	//   没有才回退到 sessionStarts（同 batch 内最早的活动时刻）。
+	sessionCountStarts := make(map[string]int64)
 
 	for _, rm := range req.GetResourceMetrics() {
 		if rm == nil {
@@ -68,7 +77,7 @@ func ParseMetricsRequest(body []byte) (*ParseResult, error) {
 				if m == nil {
 					continue
 				}
-				extractFromMetric(m, resAttrs, scopeAttrs, sessionModels, result)
+				extractFromMetric(m, resAttrs, scopeAttrs, sessionModels, sessionStarts, sessionCountStarts, result)
 			}
 		}
 	}
@@ -78,9 +87,23 @@ func ParseMetricsRequest(body []byte) (*ParseResult, error) {
 		if sid == "" || sessionSeen[sid] {
 			continue
 		}
+		// started_at 取真实 session 起始时刻（design Decision 1）：
+		//   优先 claude_code.session.count 的 captured_at；
+		//   回退同 batch 内该 session 最早的 captured_at。
+		// **不再用 time.Now()**——那是 export 到达 daemon 的时刻，会被后续
+		// batch 反复覆盖成"最后一次 export 时刻"（本次修复的根因）。
+		startMs, ok := sessionCountStarts[sid]
+		if !ok {
+			startMs = sessionStarts[sid]
+		}
+		if startMs == 0 {
+			// 理论不可达：sessionModels 的每个键都在 trackModel 里同步登记过
+			// sessionStarts。保底不写 started_at=0（1970）污染 db。
+			continue
+		}
 		result.Sessions = append(result.Sessions, Session{
 			ID:        sid,
-			StartedAt: time.Now(),
+			StartedAt: time.UnixMilli(startMs),
 			Provider:  "", // Claude Code 不推送 provider；ccl 留空
 			Cwd:       "", // Claude Code 不推送 cwd
 			Model:     model,
@@ -91,13 +114,19 @@ func ParseMetricsRequest(body []byte) (*ParseResult, error) {
 	return result, nil
 }
 
+// sessionCountMetricName 是 session 创建时刻的权威观测 metric 名。
+const sessionCountMetricName = "claude_code.session.count"
+
 // extractFromMetric 处理单个 Metric（Sum / Gauge / 其他类型）。
 //
 // sessionModels 由 caller 持有（跨 metric 累积）：首个非空 model 值留下。
+// sessionStarts / sessionCountStarts 同样由 caller 持有：累积每个 session 的
+// 最早 captured_at（后者只记 session.count metric）。
 func extractFromMetric(
 	m *metricpb.Metric,
 	resAttrs, scopeAttrs map[string]string,
 	sessionModels map[string]string,
+	sessionStarts, sessionCountStarts map[string]int64,
 	out *ParseResult,
 ) {
 	name := m.GetName()
@@ -108,6 +137,15 @@ func extractFromMetric(
 		if sid := mp.SessionID; sid != "" {
 			if cur, ok := sessionModels[sid]; !ok || cur == "" {
 				sessionModels[sid] = mp.Labels["model"]
+			}
+			ms := mp.CapturedAt.UnixMilli()
+			if cur, ok := sessionStarts[sid]; !ok || ms < cur {
+				sessionStarts[sid] = ms
+			}
+			if name == sessionCountMetricName {
+				if cur, ok := sessionCountStarts[sid]; !ok || ms < cur {
+					sessionCountStarts[sid] = ms
+				}
 			}
 		}
 		out.Metrics = append(out.Metrics, mp)

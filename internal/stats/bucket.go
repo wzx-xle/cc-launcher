@@ -2,13 +2,16 @@ package stats
 
 // Package stats 的时间桶聚合查询。
 //
-// 决策（stats-time-buckets design.md §D1-D6）：
+// 决策（stats-time-buckets design.md §D1-D6 + stats-session-start-time-fix
+// design Decision 4/5）：
 //   - 两条独立 SQL：sessions 计数 / tokens+cost 求和（避免 LEFT JOIN + NULL 行失真）
-//   - 双 key 策略：sessionsCount 用 s.started_at；tokensSum hourly 用 m.captured_at,
-//     daily 用 s.started_at。两者字符串 key 形式都是 "HH:00" / "YYYY-MM-DD",
-//     merge 阶段按 string key 匹配 —— 每行同时拿到"s.started_at 视角 sessions"
-//     和"对应 hour/days 视角 tokens",hourly 长 session 跨小时时 token 仍按
-//     真实采集小时归属（spec 第 D6 明确要求）
+//   - **归桶键分工**（不是双 key 策略）：sessionsCount 用 s.started_at（"该时段
+//     开始了多少个 session"）；tokensSum 用 m.captured_at（"该时段消耗了多少
+//     token"，hourly 与 daily 统一）。两者字符串 key 形式都是 "HH:00" /
+//     "YYYY-MM-DD"，merge 阶段按 string key 匹配 —— 每行同时拿到"sessions 计数"
+//     和"按消费时刻归集的 tokens"，两个量语义独立、不可混为一谈。
+//   - 窗口过滤：sessions 计数用 s.started_at >= sinceMs；tokens 用
+//     m.captured_at >= sinceMs（按消费时刻划窗）
 //   - "hour" kind = currentHour+1 行（0..currentHour，含当前 partial）
 //   - "day" kind = N 行 daily（todayStart → sinceMs 推算）
 //   - 缺失桶补 0（不返回稀疏切片）
@@ -16,6 +19,7 @@ package stats
 import (
 	"database/sql"
 	"fmt"
+	"math"
 	"os"
 	"time"
 
@@ -49,7 +53,8 @@ type BucketRow struct {
 // 参数：
 //   - dbPath：SQLite 文件路径；不存在 → ErrNoDatabase 包裹
 //   - kind ∈ {"hour", "day"}；其它值 → 报错
-//   - sinceMs：sessions.started_at 下界（UnixMilli,本地时区零点）
+//   - sinceMs：窗口下界（UnixMilli,本地时区零点）。sessions 计数按
+//     s.started_at >= sinceMs 过滤；tokens+cost 按 m.captured_at >= sinceMs 过滤
 //   - nowFn func() time.Time：nil = fallback time.Now；非 nil = 注入 clock
 //     （测试 / 跨包 deterministic,与 collector.Store.WithClock / stats.Query.Clock
 //      模式对齐,见 spec/stats-query "stats query accepts an optional clock"）
@@ -176,19 +181,17 @@ GROUP BY bucket
 
 // queryBucketTokensSum 走 sessions LEFT JOIN metrics,按桶 key SUM 6 字段。
 //
-// 决策（stats-time-buckets §D6 + tasks §1.2 双 key 策略）：
-//   - hourly kind：用 m.captured_at（让 token 归属到被采集的小时,符合 spec 文本）
-//   - daily kind：用 s.started_at（daily 跨日概率低,与 sessions 计数对齐）
+// 决策（design Decision 4 + 5）：归桶键与窗口过滤**统一**用 m.captured_at
+// （按消费时刻归集），hourly / daily 语义一致：
+//   - 跨天 session 的 token 按实际消费日分布到各天，不再全堆在 session 起始那天
+//   - 窗口过滤 m.captured_at >= ?：窗口外没有活动的 session 不参与
+//     （LEFT JOIN 退化为 INNER JOIN 语义）
 //
-// 与 queryBucketSessionsCount 的 hour bucket key 都是 "HH:00" 字符串,
-// 故 merge 阶段仍按 string key 匹配。两 SQL 的"小时"语义不同（前者:session
-// 起始;后者:metric 抓取）,但字符串 key 形式相同 —— merge 后每行 sessions 数
-// (s.started_at 视角)+ tokens(captured_at 视角)各自归位,符合"每桶聚合"直觉。
+// 注意与 queryBucketSessionsCount 的区别：sessions 计数仍按 s.started_at 归桶
+// （"该时段开始了多少个 session"），与 token 桶（"该时段消耗了多少 token"）
+// 是两个独立的量，各自语义正确，不可混为一谈。
 func queryBucketTokensSum(db *sql.DB, kind string, sinceMs int64) (tokensSumMap, error) {
-	tsCol := "s.started_at"
-	if kind == "hour" {
-		tsCol = "m.captured_at"
-	}
+	const tsCol = "m.captured_at"
 	bucketExpr := bucketStrftimeExpr(kind, tsCol)
 	sqlStr := fmt.Sprintf(`
 SELECT %s AS bucket,
@@ -199,7 +202,7 @@ SELECT %s AS bucket,
     COALESCE(SUM(CASE WHEN m.name = 'claude_code.cost.usage' THEN m.value END), 0.0) AS cost
 FROM sessions s
 LEFT JOIN metrics m ON m.session_id = s.id
-WHERE s.started_at >= ?
+WHERE m.captured_at >= ?
 GROUP BY bucket
 `, bucketExpr)
 
@@ -250,8 +253,8 @@ type bucketSlot struct {
 //   - kind="hour":rows = currentHour+1（0..currentHour,partial 当前小时末尾加 "*"）
 //   - kind="day": rows = (todayStart - sinceMs)/86400000 + 1
 //
-// sinceMs 必须对齐到本地时区午夜(由 runStats 在调 QueryBucketSummary 前保证);
-// 否则 day count 可能偏 1。本函数不做容错——caller 责任。
+// sinceMs 必须对齐到本地时区午夜(由 QueryStats 在调 QueryBucketSummary 前保证,
+// 见 design Decision 6);否则 day count 可能偏 1。本函数不做容错——caller 责任。
 func bucketSkeleton(kind string, now time.Time, todayStartMs int64, sinceMs int64) []bucketSlot {
 	switch kind {
 	case "hour":
@@ -275,8 +278,11 @@ func bucketSkeleton(kind string, now time.Time, todayStartMs int64, sinceMs int6
 		return out
 	case "day":
 		todayStart := time.UnixMilli(todayStartMs)
-		// sinceMs → todayStart 整 0 点的天数(含 today)
-		days := max(int((todayStartMs-sinceMs)/int64(24*time.Hour/time.Millisecond))+1, 1)
+		// sinceMs → todayStart 整 0 点的天数(含 today)。
+		// 用四舍五入而非向下取整：本地时区若有夏令时，"跨 N 个日历日"的两端
+		// 午夜相差 (N-1)*24h ± 1h，向下取整会少算一天（春季调时后少一桶）。
+		// Decision 6 让 since 对齐午夜后，days 恰好 = --day N 的 N。
+		days := max(int(math.Round(float64(todayStartMs-sinceMs)/float64(24*time.Hour/time.Millisecond)))+1, 1)
 		out := make([]bucketSlot, 0, days)
 		for i := days - 1; i >= 0; i-- {
 			dayStart := todayStart.AddDate(0, 0, -i)
