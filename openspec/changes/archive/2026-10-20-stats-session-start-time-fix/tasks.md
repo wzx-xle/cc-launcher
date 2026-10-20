@@ -62,10 +62,10 @@
 
 ## 7. CHANGELOG + tag (v0.14.0 minor)
 
-- [ ] 7.1 `CHANGELOG.md` `[Unreleased]` 段加 v0.14.0 段（Fixes：`sessions.started_at` 根因 + 归集口径修正；**Breaking-ish / Compatibility 段标注 detail 视图窗口语义变更**）
-- [ ] 7.2 `git commit -m "docs: CHANGELOG 加 v0.14.0 stats-session-start-time-fix 段"`
-- [ ] 7.3 `git tag -a v0.14.0 HEAD -m "v0.14.0: fix stats session start time and consumption-time aggregation"`
-- [ ] 7.4 一次推送：`git push origin main v0.14.0`
+- [x] 7.1 `CHANGELOG.md` `[Unreleased]` 段加 v0.14.0 段（Fixes：`sessions.started_at` 根因 + 归集口径修正；**Breaking-ish / Compatibility 段标注 detail 视图窗口语义变更**）
+- [x] 7.2 `git commit -m "docs: CHANGELOG 加 v0.14.0 stats-session-start-time-fix 段"`
+- [x] 7.3 `git tag -a v0.14.0 HEAD -m "v0.14.0: fix stats session start time and consumption-time aggregation"`
+- [x] 7.4 一次推送：`git push origin main v0.14.0`（tag 打完立即执行）
 - [ ] 7.5 **上线后实测验证**：跑 `ccl stats --day 7` 与 OTel 侧逐日对账，断言每日偏差倍数落在 1.0 ± 0.15 内（验收标准：design 记录的 0.07x / 4.76x 消失）
 
 ## 8. 收尾（可选，另开 change）

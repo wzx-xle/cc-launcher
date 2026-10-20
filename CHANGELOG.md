@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-10-20 — stats-session-start-time-fix
+
+### Fixes
+- **`sessions.started_at` 记的不是 session 起始时刻，而是"最后一次 OTLP export 到达 daemon 的时刻"**：`internal/collector/parser.go` 建 session 行时用 `time.Now()`（= batch 处理时刻），`internal/collector/store.go::insertSession` 用 `INSERT OR REPLACE` 每次 export 整行覆盖 → 最终 `started_at` = 该 session 最后一次 export 的时刻。实测本机 43/43 session 的 `MAX(metrics.captured_at) == sessions.started_at`（误差 < 1s），以 `claude_code.session.count` 的时间戳为真值时 **25/41（61%）** 的 session 偏晚，最大 **64,479 秒 ≈ 18 小时**。后果：① 跨天 session 的 token 在 daily 桶里全堆到最后活跃那天；② `WHERE s.started_at >= since` 按"最后 export 时刻"划窗 → 数天前开始、今天仍在跑的 session 把**全生命周期** token 一次性计入。与 Anthropic 侧逐日对账偏差**双向且巨大**（实测 0.07x ~ 4.76x，非系统性倍数）。修复：
+  - `parser.go`：`Session.StartedAt` 改取真实 session 起始时刻——优先 `claude_code.session.count` metric 的 `captured_at`（session 创建时刻的权威观测），无它时回退同 batch 内该 session 最早的 `captured_at`；**不再用 `time.Now()`**
+  - `store.go::insertSession`：`INSERT OR REPLACE` → `INSERT ... ON CONFLICT(id) DO UPDATE`，其中 `started_at = MIN(sessions.started_at, excluded.started_at)`（只降不升，后续 batch 永远推不前），其余列（`ended_at` / `provider` / `cwd` / `model`）保持"后续 batch 覆盖"语义
+  - `store.go`：新增 `backfillSessionStartTimes` + `PRAGMA user_version` 驱动的一次性历史回填（`COALESCE(session.count 的 MIN(captured_at), metrics 的 MIN(captured_at))`），修正**全部历史** db 的 `started_at`；没有任何 metric 的 session 行原样保留（不写 NULL、不删行）；回填幂等，每个 db 只执行一次
+- **daily 桶的归桶键从 `s.started_at` 改为 `m.captured_at`**（按**消费时刻**归集，与 hourly 统一）：跨天 session 的 token 按实际消费日分布到各天，不再全堆在开始那天——这是逐日偏差的主因。桶表 `SESSIONS` 列**仍按 `s.started_at` 归桶**（"该时段开始了多少个 session"），与 token / cost 列（"该时段消耗了多少"）是两个独立的量，语义各正、不可混为一谈
+- **detail 视图的窗口过滤从 `s.started_at >= since` 改为 `m.captured_at >= since`**：按用量发生时刻划窗，与 OTel 侧"按 API 调用发生时刻归集"口径一致；窗口外没有活动的 session 不再出现
+- **`--day N` 时 detail 的 `since` 对齐到最旧桶那天的本地 00:00**：原实现 detail 覆盖 `[now-Nd, now]`、桶覆盖 `[todayStart-(N-1)d, todayStart]`，两者错开约一天 → detail totals ≠ Σbucket rows。对齐后两者完全重合（`--day 7` 恰好 7 个 daily 桶）
+- **`bucketSkeleton` 的天数计算改四舍五入**：`(todayStartMs-sinceMs)/24h` 的向下取整在**有夏令时的本地时区**（春季调时）会少算一天、少一桶；四舍五入保证 `--day N` 恒定 N 个桶
+
+### Compatibility
+- **`ccl stats`（不带 `--day`）的 session 行语义变更：从"session 全生命周期用量"改为"窗口内用量"**——一行只累加 `captured_at` 落在窗口内的 metric。窗口前开始、窗口内仍在消耗的 session 仍会出现（`STARTED` 列仍显示真实起始时刻，可能早于窗口），但只显示窗口内消耗的 token；窗口外活动的 session 不再出现。理由：统计工具的默认视图应当是"这段时间用了多少"，而不是"这些 session 一辈子用了多少"；后者可由不带时间窗的独立查询提供（本次不做）。依赖旧口径做对照的脚本 / 手工数字需重算
+- **`--json` 的 `since` 字段值会变早**：`--day N` 时从"7 天前的同一时刻"改为"最旧桶那天的本地 00:00"（最多早 1 天）；不带 `--day` 时不变（仍是 7 天前，不做午夜对齐）
+- **db 列结构 / CLI flag / JSON 字段名 / 表格格式全部不变**；无 schema 迁移，只用 `PRAGMA user_version` 从 0 → 1 标记一次性回填已执行
+- **历史数据立即生效**：桶视图按 `metrics.captured_at` 归集，对**全部历史**立即正确；`sessions.started_at` 经 daemon 启动时的一次性回填修正（`STARTED` 列随之修正）
+
+### OpenSpec
+- archive `stats-session-start-time-fix` (2026-10-20)
+
 ## [0.13.3] - 2026-10-18 — release-notes-changelog-injection
 
 ### Features
