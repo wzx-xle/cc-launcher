@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixes
+- **release workflow 的 job 间竞态导致 Windows zip 挂不上 release**：`windows-amd64` job 的两个 body 注入步骤（inject CHANGELOG / append SHA256 marker）跑在 `upload release assets` **之前**，却假设 release 已存在——而 release 是由 5 个 matrix job 里**谁先跑完谁创建**（`softprops/action-gh-release` 在各 job 末尾）。v0.14.0 实测踩中：windows job 抢在其它 job 之前跑 → `gh api /releases/tags/v0.14.0` 404 → job 失败 → `upload release assets` 步骤**根本没执行** → release 上只有 4 个 tar.gz、**缺 `cc-launcher-windows-amd64.zip`**，body 为空。修复：
+  - 新增 `ensure release exists` 步骤（body 注入前显式保证 release 存在，`--verify-tag` 防建错 tag），body 注入不再依赖 job 间执行顺序
+  - `upload release assets` 步骤**前移到** body 注入之前——资产是核心产出，body 只是展示层；body 注入再失败也不影响资产上传
+  - 顺带确认 `softprops/action-gh-release` 更新已有 release 时 body 取 `workflowBody || existingReleaseBody`（未传 body 输入 → 保留已有 body）→ 其它 matrix job 后续 update 不会冲掉已注入的 CHANGELOG 段 / hash marker
+- **release body 的 CHANGELOG 段注入从来就没生效过**：`VERSION` 取自 `github.ref_name`（`v0.14.0`，**带 v**），提取正则是 `## \[v?` + version + `\]` → 只能匹配 `## [v0.14.0]`，而本仓 CHANGELOG 标题格式是 `## [0.14.0]` → **永远匹配不上** → v0.12.0 ~ v0.14.0 的注入全部静默 skip（用户打开 release 页面只看到一个 HTML 注释，看不到任何内容）。修复：先剥掉 version 的前导 `v`，`v?` 保留 → `## [0.14.0]` 与 `## [v0.14.0]` 两种写法都命中；且"文件在但段落找不到"从静默 skip 改为**直接 fail**（静默 skip 正是这个 bug 藏了三个版本的原因；`CHANGELOG.md` 文件本身不存在时仍 warning + skip）
+
 ## [0.14.0] - 2026-10-20 — stats-session-start-time-fix
 
 ### Fixes

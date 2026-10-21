@@ -120,15 +120,74 @@ jobs:
             ls -la
           fi
 
+      - name: upload release assets
+        # 资产上传放在 body 注入步骤**之前**:资产是 release 的核心产出,body
+        # (CHANGELOG 段 + hash marker)只是展示层。v0.14.0 实测因为 body 注入
+        # 步骤 404 失败 → job 中断 → 本步骤没执行 → Windows zip 没挂上。
+        # 放在前面后,body 注入再失败也只影响 body,不影响资产。
+        #
+        # softprops/action-gh-release 行为:release 不存在则创建;已存在则 update,
+        # 且 **body 用 `workflowBody || existingReleaseBody`**(本 action 未传 body
+        # 输入 → workflowBody 为空 → 保留已有 body)→ 其它 matrix job 后续 update
+        # 不会把 windows-amd64 job 注入的 CHANGELOG 段/hash marker 冲掉。
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/cc-launcher-${{ matrix.target.os }}-${{ matrix.target.arch }}.zip
+            dist/cc-launcher-${{ matrix.target.os }}-${{ matrix.target.arch }}.tar.gz
+          fail_on_unmatched_files: false
+
+      - name: ensure release exists (body 注入的前置条件)
+        # race 修复(v0.14.0 实测踩到): release 由各 matrix job 末尾的
+        # softprops/action-gh-release 步骤创建——**谁先跑完谁创建**。而
+        # windows-amd64 job 的 body 注入步骤跑在上传步骤**之前**,假设 release
+        # 已存在 → 其它 4 个 job 还没跑完时 `gh release edit` / `gh api` 直接
+        # 404 → job 失败 → 连累后面的 "upload release assets" 步骤不执行 →
+        # **Windows zip 挂不到 release 上**(v0.14.0 实测:release 只有 4 个
+        # tar.gz,缺 cc-launcher-windows-amd64.zip,body 空)。
+        #
+        # 这里显式保证 release 存在,后续注入步骤不再依赖 job 间执行顺序。
+        # --verify-tag:tag 必须已存在(避免 gh 在 tag 缺失时指向默认分支建 tag)。
+        if: matrix.target.os == 'windows' && matrix.target.arch == 'amd64'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "$VERSION" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "release $VERSION 已存在"
+            exit 0
+          fi
+          echo "release $VERSION 不存在,先创建(body 注入依赖它存在)"
+          if ! gh release create "$VERSION" \
+              --repo "${{ github.repository }}" \
+              --title "$VERSION" \
+              --notes "" \
+              --verify-tag; then
+            # 并发场景:其它 matrix job 可能刚创建了 → 409/422 可忽略
+            echo "WARNING: gh release create 失败(可能已被其它 job 并发创建),继续" >&2
+            gh release view "$VERSION" --repo "${{ github.repository }}" >/dev/null
+          fi
+
       - name: inject CHANGELOG [v0.X.Y] section to release body
         # release-notes-changelog-injection: 让 GitHub release 页面用户视觉
         # 看到 CHANGELOG 段(而非仅 hidden hash marker)。从仓库根 CHANGELOG.md
-        # 提取 ## [v0.X.Y] 段(H2 + 后续内容到下一个 ## [ 之前),用
+        # 提取 `## [0.X.Y]` 段(H2 + 后续内容到下一个 ## [ 之前),用
         # gh release edit --notes 写入(--notes 接 string inline;CHANGELOG
-        # 段 inline 远 < 64KB 命令行上限,不需要 file 形式)。提取不到 → stderr
-        # warning + skip(不 fail workflow;append hash step 仍会跑,marker 单独成 body)。
+        # 段 inline 远 < 64KB 命令行上限,不需要 file 形式)。
         # 仅 windows-amd64 跑(与 hash append step 同一 job,顺序执行,
         # 保证最终 body = CHANGELOG 段 + 空行 + hash marker)。
+        #
+        # v0.14.0 修 regex bug:VERSION 来自 github.ref_name = "v0.14.0"(带 v),
+        # 旧正则 `## \[v?` + version 只能匹配 `## [v0.14.0]`,而本仓 CHANGELOG
+        # 标题是 `## [0.14.0]` → **永远匹配不上** → v0.12.0 ~ v0.14.0 的
+        # CHANGELOG 注入全部静默 skip(用户打开 release 页面看不到任何内容)。
+        # 现在先剥掉 version 的前导 "v",`v?` 保留 → `## [0.14.0]` 与
+        # `## [v0.14.0]` 两种写法都命中。
+        #
+        # 提取不到段落 → **fail**(不再静默 skip):静默 skip 正是上面那个 bug
+        # 藏了三个版本的原因。CHANGELOG.md 文件本身不存在 → 仍然 warning+skip
+        # (没有 CHANGELOG 的仓库发版不该被卡住)。
         if: matrix.target.os == 'windows' && matrix.target.arch == 'amd64'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -139,11 +198,12 @@ jobs:
             echo "WARNING: CHANGELOG.md not found at repo root, skip changelog inject" >&2
             exit 0
           fi
-          # python re.search: '## [v0.X.Y]' 后所有内容(到下一个 '## [' 之前),
+          # python re.search: '## [0.X.Y]' 后所有内容(到下一个 '## [' 之前),
           # re.DOTALL 让 . 匹配换行。re.escape version 防 regex injection。
           CHANGELOG_SECTION=$(VERSION="$VERSION" python3 - <<'PYEOF'
           import os, re, sys
-          version = os.environ["VERSION"]
+          # ref_name 带 "v"(v0.14.0);CHANGELOG 标题不带("## [0.14.0]")→ 剥前导 v
+          version = os.environ["VERSION"].lstrip("v")
           with open("CHANGELOG.md", "r", encoding="utf-8") as f:
               body = f.read()
           # 跨 H3 (### ...) 到下一个 H2 (## [) 之前。[\s\S]*? 含换行,
@@ -151,14 +211,15 @@ jobs:
           # (不能用 [^#]*? —— H3 含 # 会阻断匹配)
           m = re.search(r"## \[v?" + re.escape(version) + r"\][\s\S]*?(?=\n## \[|\Z)", body, re.MULTILINE)
           if not m:
-              sys.stderr.write("WARNING: ## [" + version + "] section not found in CHANGELOG.md, skip inject\n")
-              sys.exit(0)
-          print(m.group(0).rstrip())
+              sys.stderr.write("ERROR: ## [" + version + "] section not found in CHANGELOG.md\n")
+              sys.exit(1)
+          # rstrip + 不带尾换行(避免 body 里多出空行)
+          sys.stdout.write(m.group(0).rstrip())
           PYEOF
           )
           if [ -z "$CHANGELOG_SECTION" ]; then
-            echo "WARNING: extracted CHANGELOG section for $VERSION is empty, skip" >&2
-            exit 0
+            echo "ERROR: extracted CHANGELOG section for $VERSION is empty" >&2
+            exit 1
           fi
           gh release edit "$VERSION" \
               --repo "${{ github.repository }}" --notes "$CHANGELOG_SECTION"
@@ -195,11 +256,3 @@ jobs:
           gh release edit "${{ github.ref_name }}" \
               --repo "${{ github.repository }}" --notes "$NEW_BODY"
           echo "appended sha256 marker to release ${{ github.ref_name }} body"
-
-      - name: upload release assets
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            dist/cc-launcher-${{ matrix.target.os }}-${{ matrix.target.arch }}.zip
-            dist/cc-launcher-${{ matrix.target.os }}-${{ matrix.target.arch }}.tar.gz
-          fail_on_unmatched_files: false
