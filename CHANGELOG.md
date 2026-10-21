@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Features
+- **Windows 上也能完成发布流程的最后一步**（`bin/bump-scoop.ps1`，与 `bin/bump-version.ps1` 对称）：scoop 用户就是 Windows 用户，但发布流程的"更新 scoop manifest"这步只有 bash 版（`build.sh bump-scoop`），而它依赖两个 Windows 上默认没有的东西——`zip` 命令（Git Bash 不带）和 `python3`（Windows 自带的 `python3.exe` 是 Microsoft Store 的 App Execution Alias，会弹商店）。新增 PowerShell 版，**只用内置能力**（`Invoke-RestMethod`），不需要 Git Bash / python3 / gh；hash 同样取自 release body 的 `sha256` marker（不打本地 zip——它是 verify-only，且本地 zip 的 hash 物理上不可能等于 release 的）。**刻意不用 `gh`**：gh 没有官方 Windows 版，Windows 用户得靠 scoop/choco 装；python 更通用
+- **`build.sh bump-scoop` 的 stdout 之前不是纯 JSON**：`cross_build` 的"==> 交叉编译 …"日志走 stdout，混进了 manifest 输出 → `> cc-launcher.json` 写出来的不是合法 JSON（以前靠人工裁剪）。现在两脚本统一契约：**stdout 只出 manifest JSON，进度/警告/错误全走 stderr**；两平台 stdout **字节完全一致**（同一 md5）
+- **README 补 Windows 开发章节 + 澄清"打包"的三层含义**（本地编译产物 ✅ / 发到 GitHub Release 的 zip 只有 CI 能做且本地复现不了 / 更新 scoop manifest）：Windows 用户按需求选工具（写代码直接用 `go build`/`go test`，不必装 Git Bash；打 tag 用 `bin/bump-version.ps1`；bump scoop 用 `bin/bump-scoop.ps1`）
 - **release 流程有了可测试的分层验证手段**（`docs/release-smoke-test.md`）：此前 release 逻辑全部埋在 `.github/workflows/release.yml` 的 inline python/shell 里**零测试覆盖**，且仓库**PR 阶段零 CI**——2026-10-21 一次发版连续踩三个 workflow bug，每个都要"推 tag → 现场炸 → 手工修 release"。现在：
   - `internal/release`（新包）：CHANGELOG 版本段提取 + SHA256 marker 解析，带单测覆盖 2026-10-21 实际踩到的每个坑（版本号 `v` 前缀 / 正则缺行首锚点误匹配正文 / CHANGELOG 写法与提取器漂移 / marker 新旧两种格式）；`cmd/release-notes` 是给 workflow 与 `build.sh` 共用的 CLI，**消除两处解析逻辑各自漂移**
   - `.github/workflows/ci.yml`（新）：push main / 提 PR 自动跑 `go build` / `go vet` / `go test ./...` / **多时区 `go test`** / `go test -tags smoke ./...` + `actionlint` + **用仓库真实 `CHANGELOG.md` 跑一遍提取器**（CHANGELOG 写法漂移的哨兵）

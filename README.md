@@ -247,6 +247,36 @@ cd ~/work/proj-b && ccl
 # 编译
 ./build.sh build
 
+### "打包" 指哪一层
+
+三件事常被混称为"打包"，实际责任方不同：
+
+| 层 | 产物 | 谁来做 | 本地能复现吗 |
+|---|---|---|---|
+| **编译** | `.exe` / `tar.gz` | 任何人：`./build.sh windows`（只出 .exe）、`./build.sh release`（5 个平台） | ✓ |
+| **发到 GitHub Release** | `cc-launcher-windows-amd64.zip`（scoop 用户下载的就是它） | **只有 CI**（Linux runner 上 `zip -X` 打包） | ✗ 设计如此：Go build 产物含 GOMODCACHE state，fresh CI 与本地 cache 永远不 byte-level 一致（差 ~58KB / ~22K region） |
+| **更新 scoop manifest** | `bucket/cc-launcher.json` | `bump-scoop`：取 release body 里的 `sha256` marker（**不是**本地 zip 的 hash） | ✓（但要等 CI 跑完） |
+
+所以：**本地编译产物 → 可以；本地复现 release 的 zip → 不行（也不需要）**；
+scoop manifest 的 hash 一律来自 release，不来自本地。
+
+### Windows 开发
+
+Windows 上分三种需求，所需工具不同：
+
+| 需求 | 需要什么 | 怎么做 |
+|---|---|---|
+| 写代码 / 跑测试 | **Go**（[go.dev/dl](https://go.dev/dl/)） | `go build ./...` / `go test ./...` —— Windows 上直接用 go 命令，**不必装 Git Bash** |
+| 交叉编译产物 | 同上 | `go build -trimpath -ldflags="-s -w" -o dist/cc-launcher-windows-amd64.exe ./cmd/cc-launcher/` |
+| 打 tag | git + **PowerShell** | `pwsh bin/bump-version.ps1 bump minor` |
+| 更新 scoop manifest | **PowerShell** | `pwsh bin/bump-scoop.ps1 v0.14.0` |
+
+`build.sh` 需要 **Git Bash**（Windows 默认没有 bash）。在 Git Bash 里可用的子命令：
+`build` / `install` / `local` / `run` / `test` / `contract` / `windows` / `release` / `clean`；
+**`bump-scoop` 在 Windows 上跑不了**（依赖 `zip` 命令和 `python3`，Git Bash 默认都没有）→
+用 `bin/bump-scoop.ps1`（纯 PowerShell 内置能力，不需要 Git Bash / python3 / gh）。
+两个脚本产出的 manifest JSON **字节完全一致**。
+
 # 编译并运行（带参数）
 ./build.sh run
 ```

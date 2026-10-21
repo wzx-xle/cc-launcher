@@ -9,7 +9,9 @@ Bump the wzx-xle/scoop-bucket manifest for a new cc-launcher release.
 
 **Input**: `/bump-scoop <version>` — version is the cc-launcher release tag (e.g. `v0.12.0`).
 
-**Pair**: this command produces the manifest JSON via `./build.sh bump-scoop <version>`. Run after `bump-version` has pushed the v* tag and GitHub Actions release workflow has finished.
+**Pair**: this command produces the manifest JSON via `./build.sh bump-scoop <version>` (POSIX) or `pwsh bin/bump-scoop.ps1 <version>` (Windows / PowerShell). Run after `bump-version` has pushed the v* tag and GitHub Actions release workflow has finished.
+
+**stdout contract**: both scripts write **only the manifest JSON to stdout**; all progress / warning / error output goes to stderr. So `> cc-launcher.json` captures a directly-usable file (the POSIX script used to print build logs to stdout — fixed 2026-10-21). The two platforms' stdout is **byte-identical** (same md5).
 
 **Prerequisites**:
 - `v*` tag pushed to `wzx-xle/cc-launcher`
@@ -28,6 +30,12 @@ Therefore the new flow fetches the release zip SHA256 from **GitHub release body
 
    ```bash
    rm -rf dist && ./build.sh bump-scoop v0.X.Y
+   ```
+
+   **On Windows** (no Git Bash / python3 / gh needed):
+
+   ```powershell
+   pwsh bin/bump-scoop.ps1 v0.X.Y
    ```
 
    The script:
@@ -102,6 +110,8 @@ Therefore the new flow fetches the release zip SHA256 from **GitHub release body
 - **Including an `arm64` block** in the manifest — breaks `scoop install` because the release no longer ships a windows/arm64 zip. Removed in commit `299a2a4`.
 - **Forgetting to restore `url.https://github.com/.insteadof`** after the push — leaves the local environment inconsistent. Always re-add both rules with `--add`.
 - **Pushing bucket to a non-GitHub remote** — bucket repo lives on GitHub only (`wzx-xle/scoop-bucket`); `git.wxyz.ren` mirror is for the cc-launcher source only and does not host the bucket. Verify the bucket repo's remote URL before `git push`.
+- **Using `gh` on Windows** — the `gh` CLI has no official Windows build (Windows users install it via scoop/chocolatey). `bin/bump-scoop.ps1` deliberately uses only PowerShell built-ins (`Invoke-RestMethod`); set `GITHUB_TOKEN` for the higher API rate limit.
+- **Redirecting the script's stdout into the bucket file without checking it starts with `{`** — both scripts now emit pure JSON on stdout, but older `build.sh` versions printed build logs there too.
 - **Using the local zip's SHA256 for the manifest hash** — local build's SHA256 **never matches** GitHub release asset's SHA256 (Go build action hash includes GOMODCACHE state; fresh CI vs incremental local cache always differ). Always use the value fetched from GitHub release body by `build.sh bump-scoop` (or the manual download fallback).
 - **Running bump-scoop before the release workflow's "append hash to release body" step completes** — the marker won't be in the release body yet, fetch will retry 3×5s then fail. Wait 30s and re-run, or check the release workflow status before running.
 - **Using the wrong username in the manifest URL** — use `wzx-xle` (GitHub) for this repo, not `wxyz` (Gitea). See memory `github-vs-gitea-usernames`.
@@ -109,6 +119,7 @@ Therefore the new flow fetches the release zip SHA256 from **GitHub release body
 **Related**
 
 - `build.sh bump-scoop` subcommand — produces local zip + fetches release hash via GitHub API
+- `bin/bump-scoop.ps1` — PowerShell 版（Windows 原生，只需 pwsh；不打本地 zip，只取 release 真值 hash）
 - `.github/workflows/release.yml` — produces the release assets + writes the marker into release body
 - memory `scoop-bucket-zip-hash-stability` — historical context (the "four conventions" no longer suffice for byte-level match)
 - memory `github-push-via-ssh-with-insteadof` — the SSH push workflow

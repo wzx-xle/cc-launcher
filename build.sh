@@ -94,11 +94,13 @@ run() {
 cross_build() {
     local goos="$1" goarch="$2" ext="${3:-}"
     local out="dist/${BINARY}-${goos}-${goarch}${ext}"
-    echo "==> 交叉编译 ${goos}/${goarch} ..."
+    # 日志走 stderr：bump-scoop 的 stdout 必须是**纯 manifest JSON**（可管道给
+    # scoop bucket 文件）——之前这两条走 stdout，污染了 JSON 输出。
+    echo "==> 交叉编译 ${goos}/${goarch} ..." >&2
     mkdir -p dist
     # shellcheck disable=SC2046
     GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="$(version_ldflags)" -o "$out" ./cmd/cc-launcher/
-    echo "==> 完成: $(pwd)/$out"
+    echo "==> 完成: $(pwd)/$out" >&2
 }
 
 windows() {
