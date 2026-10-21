@@ -122,10 +122,18 @@ git push origin --delete "v0.0.0-ci.${SHA}"
 TMPhome=$(mktemp -d)
 env -u TZ -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_BASE_URL \
     HOME="$TMPhome" \
+    GOCACHE="${GOCACHE:-$HOME/.cache/go-build}" \
+    GOMODCACHE="${GOMODCACHE:-$HOME/go/pkg/mod}" \
     PATH="$(echo "$PATH" | tr ':' '\n' | grep -v "$(dirname "$(which claude)")" | paste -sd:)" \
     go test -count=1 ./...
 rm -rf "$TMPhome"
 ```
+
+⚠️ **别用 `env -i`**：它会连 `HOME` 一起清掉 → Go 的 module cache（GOMODCACHE
+默认在 `$HOME/go/pkg/mod`）变空 → 依赖拉不到 → 一堆包报 **"setup failed"**
+（编译失败，不是测试失败），看起来像炸了其实不是。上面的命令显式保留
+GOCACHE / GOMODCACHE，只把 **HOME 的内容**（`~/.cc-launcher` 真实数据）和
+PATH 里的 claude 拿掉。
 
 ## 已知不做的事
 
