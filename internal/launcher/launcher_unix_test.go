@@ -4,6 +4,7 @@ package launcher
 
 import (
 	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -39,9 +40,32 @@ func withFakeExec(t *testing.T) func() {
 	}
 }
 
+// withFakeClaude 在 PATH 前置一个假的 claude 可执行文件。
+//
+// 为什么需要：resolveClaude() 用 exec.LookPath("claude") 找命令。这两个测试
+// 断言的是 **env 转发**，跟 claude 装没装无关，但此前直接依赖"测试机上恰好
+// 装了 Claude Code"——开发者本机绿，CI 的干净 runner 上必红
+// （2026-10-21 首次接 CI 时立刻炸出来："未找到 claude 命令"）。
+//
+// 放一个假的进 PATH，测试就与外部环境无关（hermetic）：任何机器、任何 CI
+// 上跑结果一致。
+//
+// 用 t.Setenv 恢复 PATH（测试结束自动还原，且禁止与 t.Parallel 同用——
+// 这两个测试本来就不是 parallel）。
+func withFakeClaude(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "claude")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("写假 claude 失败: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
 // TestLaunch_Unix_EnvForwarded 覆盖 spec/launcher-provider-env §"Unix Launch
 // forwards Env to syscall.Exec" Scenario "opts.Env propagated verbatim"。
 func TestLaunch_Unix_EnvForwarded(t *testing.T) {
+	withFakeClaude(t)
 	defer withFakeExec(t)()
 
 	customEnv := []string{
@@ -77,6 +101,7 @@ func TestLaunch_Unix_EnvForwarded(t *testing.T) {
 // TestLaunch_Unix_NilEnvFallsBackToOsEnviron 覆盖 spec §"Caller omits Env field"
 // ——opts.Env=nil 时 Unix 退化为 os.Environ()，保留 legacy 行为。
 func TestLaunch_Unix_NilEnvFallsBackToOsEnviron(t *testing.T) {
+	withFakeClaude(t)
 	defer withFakeExec(t)()
 
 	err := Launch(Options{

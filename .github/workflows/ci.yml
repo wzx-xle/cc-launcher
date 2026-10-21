@@ -65,8 +65,7 @@ jobs:
         # （如标题带不带 "v"），这一步就会红。
         run: |
           set -euo pipefail
-          VERSION=$(grep -oE '^## \[v?[0-9]+\.[0-9]+\.[0-9]+\]' CHANGELOG.md \
-                    | head -1 | tr -d '#[]' | sed 's/^v//')
+          VERSION=$(go run ./cmd/release-notes changelog-latest CHANGELOG.md)
           echo "==> 检查 CHANGELOG 版本段提取: $VERSION"
           SECTION=$(go run ./cmd/release-notes changelog-section CHANGELOG.md "$VERSION")
           test -n "$SECTION"
