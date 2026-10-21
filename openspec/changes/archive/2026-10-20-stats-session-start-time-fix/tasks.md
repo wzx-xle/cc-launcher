@@ -68,6 +68,34 @@
 - [x] 7.4 一次推送：`git push origin main v0.14.0`（tag 打完立即执行）
 - [ ] 7.5 **上线后实测验证**：跑 `ccl stats --day 7` 与 OTel 侧逐日对账，断言每日偏差倍数落在 1.0 ± 0.15 内（验收标准：design 记录的 0.07x / 4.76x 消失）
 
+  > **2026-10-21 实测结果：未通过（per-day），总量口径通过。**记录如下，供后续 change 接手：
+  >
+  > **可验证的部分（通过）**
+  > - 根因确认：当前 db 里 **43/43** session 的 `started_at == MAX(metrics.captured_at)`（误差 < 1s），
+  >   即 `started_at` 确实被"最后一次 export 时刻"污染——修复方向正确。
+  > - **总量口径对齐**：本地 db 在 2026-09-29 ~ 2026-10-18 窗口内 token 合计 **458,248,742**，
+  >   OTel 侧导出（`logs/stats_otel.json`，iFlytek 网关）同窗口合计 **460,347,795**，
+  >   **ratio = 0.9957**（偏差 0.43%）→ 说明聚合没有重复计入、也没有丢量。
+  >
+  > **未通过的部分（per-day 偏差仍大）**
+  > - 逐日 ratio 仍在 0.03x ~ 5.3x 之间波动（例：10-14 = 5.28x、10-08 = 0.03x），
+  >   未落入 1.0 ± 0.15。试过 4 种归集口径均无法匹配：
+  >   `session.count 真实起始日` / `MIN(captured_at) 日` / 污染的 `started_at 日`（旧口径） /
+  >   `captured_at 日`（本 change 新口径），以及本地时区 vs UTC 两种日界——全部不匹配。
+  > - **根因不在 cc-launcher 的聚合逻辑**，而在两侧数据集不同源：
+  >   - `logs/stats_otel.json` 是 2026-10-18 抓取的网关导出（claude-opus-5-5[1m] 等 **Anthropic** 模型，
+  >     33 个 session，含 53.2M cache_creation token）；
+  >   - 当前 `~/.cc-launcher/telemetry.db` 已被重建，**只含 MiniMax-M3 / DeepSeek 用量**
+  >     （**cache_creation 恒为 0**、45 个 session，与上面 33 个 session id **零交集**）；
+  >   - 网关导出只有聚合值、没有 per-session / per-call 明细，无法反推它的日归属规则。
+  > - 结论：当前无法用手上这两份数据完成逐日对账。**需要一份两侧观测到同一批 session 的新数据集**
+  >   （daemon 升级到 v0.14.0 后重新抓一份网关导出）才能判定 per-day 口径是否真的对齐。
+  >
+  > **另注（运维）**：本机 daemon 仍是旧二进制（`~/workspace/golang/cc-launcher/cc-launcher serve`，
+  > 09-30 启动，uptime 20 天）。它不会执行新回填，且旧 `INSERT OR REPLACE` 会继续把
+  > `started_at` 写成 export 时刻。**升级 daemon 后需重启一次**，回填才会跑（`PRAGMA user_version` 0 → 1）。
+
+
 ## 8. 收尾（可选，另开 change）
 
 - [ ] 8.1 评估是否需要 `ccl stats --all-time`（session 全生命周期用量视图）——design Open Question 1
