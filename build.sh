@@ -233,6 +233,12 @@ pack_windows_zip_for_scoop() {
     # package 步骤共用）→ 行尾 CRLF。曾经的 heredoc 版本是 LF，且两份实现
     # 各写各的（漂移来源）。
     go run ./cmd/release-notes windows-shim > "$stage/ccl.cmd"
+    # 就地断言 CRLF（.cmd 是 cmd.exe 读的批处理文件）——与 release workflow 的
+    # package 步骤同一道断言，防"绕过 cmd/release-notes 又手写一份 shim"
+    if ! grep -q $'\r' "$stage/ccl.cmd"; then
+        echo "ERROR: ccl.cmd 不是 CRLF 行尾（cmd.exe 读批处理文件要 CRLF）" >&2
+        return 1
+    fi
     [ -f README.md ] && cp README.md "$stage/"
     [ -f LICENSE ] && cp LICENSE "$stage/"
     # 固定所有源文件 mtime 到 epoch 0（对齐 release workflow）
