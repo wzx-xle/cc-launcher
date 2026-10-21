@@ -1,4 +1,4 @@
-# bump-version.ps1 — 推进 semver 版本号（v0.x.y）
+﻿# bump-version.ps1 — 推进 semver 版本号（v0.x.y）
 #
 # 用法: pwsh bin/bump-version.ps1 <子命令> [参数]
 #
@@ -30,6 +30,10 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+# 编码设置：确保中文输出在 PS 5.1/7+ 都正确显示
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
 
 function Show-Usage {
     @"

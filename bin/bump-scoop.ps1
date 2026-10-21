@@ -1,4 +1,4 @@
-# bump-scoop.ps1 — 算出 scoop manifest 需要的 Windows zip SHA256，并输出 manifest JSON
+﻿# bump-scoop.ps1 — 算出 scoop manifest 需要的 Windows zip SHA256，并输出 manifest JSON
 #
 # 用法: pwsh bin/bump-scoop.ps1 <version>
 #
@@ -39,6 +39,10 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+# 编码设置：确保中文输出在 PS 5.1/7+ 都正确显示
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
 
 $Repo = "wzx-xle/cc-launcher"
 $AssetName = "cc-launcher-windows-amd64.zip"

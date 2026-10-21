@@ -1,0 +1,38 @@
+# .gitattributes — Git 属性配置
+#
+# 编码说明：
+#   PowerShell 脚本（.ps1）需要 UTF-8 with BOM
+#   Windows PowerShell 5.1 默认用 Windows-1252 读取无 BOM 的 UTF-8 文件
+#   导致中文注释乱码 → 语法错误。添加 BOM 后，PS 5.1/7+ 都能正常解析。
+#
+#   注意：Git 的 working-tree-encoding 不支持 UTF-8-BOM，BOM 需要手动添加。
+#   本文件仅标记行尾格式，BOM 由开发者手动维护（已在脚本开头添加编码设置）。
+
+# PowerShell 脚本：CRLF 行尾（Windows 标准）
+*.ps1 text eol=crlf
+
+# Go 源代码：UTF-8 无 BOM，LF 行尾（跨平台标准）
+*.go text eol=lf
+
+# Shell 脚本：UTF-8 无 BOM，LF 行尾（bash 标准）
+*.sh text eol=lf
+
+# Markdown 文档：UTF-8 无 BOM，LF 行尾（跨平台标准）
+*.md text eol=lf
+
+# JSON 配置：UTF-8 无 BOM，LF 行尾
+*.json text eol=lf
+
+# Windows 批处理：CRLF 行尾（cmd.exe 要求）
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# 二进制文件：不进行文本转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.exe binary
+*.dll binary
+*.zip binary
