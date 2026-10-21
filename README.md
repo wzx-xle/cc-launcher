@@ -277,6 +277,15 @@ Windows 上分三种需求，所需工具不同：
 用 `bin/bump-scoop.ps1`（纯 PowerShell 内置能力，不需要 Git Bash / python3 / gh）。
 两个脚本产出的 manifest JSON **字节完全一致**。
 
+Windows 上写 manifest 文件用 `-OutFile`（**不要**用 `>` 重定向）：
+
+```powershell
+pwsh bin/bump-scoop.ps1 v0.14.0 -OutFile cc-launcher.json
+```
+
+PowerShell 5.1 的 `>` 走 `Out-File`，默认编码是 **UTF-16LE** → 写出来的不是 UTF-8 JSON。
+`-OutFile` 由脚本自己按 UTF-8 无 BOM + LF 落盘，PS 5.1 / 7+ 结果一致。
+
 # 编译并运行（带参数）
 ./build.sh run
 ```

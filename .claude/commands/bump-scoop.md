@@ -11,7 +11,13 @@ Bump the wzx-xle/scoop-bucket manifest for a new cc-launcher release.
 
 **Pair**: this command produces the manifest JSON via `./build.sh bump-scoop <version>` (POSIX) or `pwsh bin/bump-scoop.ps1 <version>` (Windows / PowerShell). Run after `bump-version` has pushed the v* tag and GitHub Actions release workflow has finished.
 
-**stdout contract**: both scripts write **only the manifest JSON to stdout**; all progress / warning / error output goes to stderr. So `> cc-launcher.json` captures a directly-usable file (the POSIX script used to print build logs to stdout — fixed 2026-10-21). The two platforms' stdout is **byte-identical** (same md5).
+**stdout contract**: both scripts write **only the manifest JSON to stdout**; all progress / warning / error output goes to stderr. So `> cc-launcher.json` captures a directly-usable file (the POSIX script used to print build logs to stdout — fixed 2026-10-21). The two platforms' stdout is **byte-identical** (same md5 `031a2c95…`).
+
+**Windows / PowerShell caveats** (found on a real Windows box 2026-10-21):
+
+- **PowerShell 5.1 的 `>` 重定向产出 UTF-16LE**（`Out-File` 默认编码 Unicode）→ `pwsh script.ps1 > manifest.json` 在 PS 5.1 上写出来的不是 UTF-8 JSON。**用 `-OutFile` 参数**：`pwsh bin/bump-scoop.ps1 v0.14.0 -OutFile manifest.json` → 脚本自己按 UTF-8 **无 BOM** + LF 写盘，与 bash 版字节完全一致（PS 5.1 / 7+ 都一样）。
+- **.ps1 文件必须带 UTF-8 BOM**：PS 5.1 读无 BOM 的 .ps1 按 Windows-1252 解码 → 中文注释乱码 → 语法错误。PS 7 默认 UTF-8 无 BOM，**所以在 PS 7 上测测不出来**。仓库用 `.gitattributes`（`*.ps1 text eol=crlf`）固定行尾，BOM 由 `internal/release/psscript_test.go` 守卫（CI 会红）。
+- **在 Linux 上用普通工具编辑 .ps1 会破坏 BOM/CRLF**（Python 的通用换行转换会把 CRLF 变 LF）→ 编辑后跑 `go test ./internal/release/ -run TestPowerShellScripts`。
 
 **Prerequisites**:
 - `v*` tag pushed to `wzx-xle/cc-launcher`

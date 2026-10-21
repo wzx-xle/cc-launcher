@@ -35,6 +35,13 @@ param(
     [Parameter(Position=0)]
     [string]$Version = "",
 
+    # 写 manifest 到文件（UTF-8 **无 BOM** + LF）。
+    # 为什么要有这个参数：PowerShell 5.1 的 `>` 重定向走 Out-File，默认编码是
+    # **UTF-16LE**（带 BOM）——直接 `> manifest.json` 在 PS 5.1 上产出的是
+    # UTF-16 文件，不是 UTF-8 JSON。PS 7 的 `>` 才是 UTF-8 无 BOM。
+    # 用本参数则两版本都得到同一份字节。
+    [string]$OutFile = "",
+
     [int]$Retries = 3
 )
 
@@ -179,6 +186,21 @@ $manifest = @"
 }
 "@
 
+# 归一换行：脚本文件本身在 Windows 上是 CRLF（.gitattributes: *.ps1 eol=crlf），
+# here-string 的内容会跟着带 CRLF → 与 bash 版产出的 manifest 字节不一致。
+# 统一归成 LF：两平台字节完全一致，且 JSON 用 LF 更通用。
+$manifest = $manifest -replace "`r`n", "`n"
+
 # stdout 只留 manifest JSON（可管道给 scoop bucket 文件）；进度信息走 stderr
 [Console]::Error.WriteLine("==> release zip (manifest): sha256=$hash")
+
+if ($OutFile) {
+    # 显式 UTF-8 **无 BOM**（PowerShell 5.1 的 -Encoding utf8 会带 BOM）
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    # 补末尾换行：bash 版用 heredoc，内容以 "}\n" 结尾；PowerShell 的 here-string
+    # 不含结尾换行 → 不补的话，文件与 bash 版差最后一个字节。
+    [System.IO.File]::WriteAllText($OutFile, $manifest + "`n", $utf8NoBom)
+    [Console]::Error.WriteLine("==> manifest 已写入 $OutFile（UTF-8 无 BOM + LF）")
+}
+
 Write-Output $manifest
