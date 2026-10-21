@@ -345,7 +345,7 @@ func TestBucket_Daily_KeyedByConsumptionTime(t *testing.T) {
 	}{{28, 100}, {29, 200}, {30, 300}} {
 		if err := store.WriteMetric(collector.Metric{
 			SessionID: "x", Name: "claude_code.token.usage", Value: d.val,
-			Labels: map[string]string{"type": "input"},
+			Labels:     map[string]string{"type": "input"},
 			CapturedAt: time.Date(2026, 9, d.day, 12, 0, 0, 0, time.Local),
 		}); err != nil {
 			t.Fatal(err)
