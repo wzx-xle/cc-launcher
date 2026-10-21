@@ -90,3 +90,6 @@ git push origin --delete "v0.0.0-ci.${SHA}"
   靠 dry-run 打印 + 人工核对。
 - **没有测试 `softprops/action-gh-release` 的 body 保留行为**——依赖第三方 action
   的实现细节，只能靠第 4 层真跑验证。
+- **`internal/cli` 的权限模式契约测试在 CI 上恒 skip**：它要真的调 `claude --help`
+  比对 choices，没装 Claude Code 的 runner 上 `t.Skip`。这条只能在本机 / 有
+  Claude Code 的环境跑（`go test ./internal/cli/ -run TestContract -v`）。
