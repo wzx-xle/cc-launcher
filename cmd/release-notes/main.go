@@ -12,6 +12,7 @@
 //
 //	release-notes changelog-section <changelog.md> <version>   打印版本对应的整段
 //	release-notes sha-marker                                   从 stdin 的 body 里打印 64 位 hex
+//	release-notes windows-shim                                 打印 ccl.cmd 的字节（CRLF）
 //
 // 失败一律非零退出 + stderr 报错（调用方应 fail，不该静默跳过）。
 package main
@@ -65,6 +66,11 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 			return err
 		}
 		_, err = fmt.Fprint(stdout, version)
+		return err
+
+	case "windows-shim":
+		// ccl.cmd 的字节（CRLF 行尾）——release workflow 与 build.sh 共用
+		_, err := fmt.Fprint(stdout, release.WindowsShim)
 		return err
 
 	case "sha-marker":

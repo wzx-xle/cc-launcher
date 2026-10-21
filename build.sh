@@ -215,15 +215,6 @@ except Exception as e:
     return 1
 }
 
-# ccl_cmd_shim 写 ccl.cmd shim：把 `ccl` 转发到同目录的 cc-launcher.exe。
-# 与 .github/workflows/release.yml 的 "zip (windows only)" 步骤保持一致。
-ccl_cmd_shim() {
-    cat <<'EOF'
-@echo off
-"%~dp0cc-launcher.exe" %*
-EOF
-}
-
 # pack_windows_zip_for_scoop VERSION ARCH：本机打 zip + 算 SHA256。
 # 与 .github/workflows/release.yml "zip (windows only)" 步骤 byte-level 对齐：
 #   - touch -d @0 固定 4 个源文件 mtime 到 epoch 0
@@ -238,7 +229,10 @@ pack_windows_zip_for_scoop() {
     trap "rm -rf '$stage'" EXIT
 
     cp "$exe" "$stage/cc-launcher.exe"
-    ccl_cmd_shim > "$stage/ccl.cmd"
+    # ccl.cmd 字节来自 cmd/release-notes（单一来源，与 release workflow 的
+    # package 步骤共用）→ 行尾 CRLF。曾经的 heredoc 版本是 LF，且两份实现
+    # 各写各的（漂移来源）。
+    go run ./cmd/release-notes windows-shim > "$stage/ccl.cmd"
     [ -f README.md ] && cp README.md "$stage/"
     [ -f LICENSE ] && cp LICENSE "$stage/"
     # 固定所有源文件 mtime 到 epoch 0（对齐 release workflow）

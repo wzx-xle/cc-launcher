@@ -101,10 +101,12 @@ jobs:
 
             # ccl.cmd shim：把 `ccl` 命令转发到 `cc-launcher.exe`
             # 这是 wrapper 不是二进制；用 cmd 的 %~dp0 取自身目录，绝对路径避免 PATH 干扰
-            cat > ccl.cmd <<'EOF'
-          @echo off
-          "%~dp0cc-launcher.exe" %*
-          EOF
+            #
+            # 字节来自 cmd/release-notes（单一来源，与本机 build.sh 共用）→
+            # 行尾是 **CRLF**（.cmd 是 cmd.exe 读的批处理文件，Windows 惯例；
+            # 之前这里是 bash heredoc 写的 LF，且从未在真 Windows 上验证过）。
+            # go run 需要在 module 内 → 当前 cwd 是 dist/，用 ../ 前缀。
+            go run ../cmd/release-notes windows-shim > ccl.cmd
 
             # 固定 4 个源文件 mtime 到 epoch 0 + 用 UTC 打包 + 剥 NTFS extra field：
             # 三个变量统一后，本机 build.sh bump-scoop 同样处理，hash byte-level 一致
