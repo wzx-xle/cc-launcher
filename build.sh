@@ -139,11 +139,29 @@ fetch_release_zip_hash_gh_api() {
     local repo="wzx-xle/cc-launcher"
     local body hash i api_response
 
+    # 认证 token(可选):GitHub REST API **未认证时限流 60 req/hr**。本机出口 IP 是
+    # 共享的(公司/运营商 NAT),额度经常被打满 → 未认证调用直接返回
+    # "API rate limit exceeded" → bump-scoop 必失败(2026-10-21 实测)。
+    # 有 token 时用认证额度(5000/hr)。优先级:
+    #   GITHUB_TOKEN / GH_TOKEN 环境变量 → gh CLI 已登录的 token → 匿名。
+    local token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+    if [ -z "$token" ] && command -v gh >/dev/null 2>&1; then
+        token=$(gh auth token 2>/dev/null || echo "")
+    fi
+    local auth_header=""
+    if [ -n "$token" ]; then
+        auth_header="Authorization: Bearer ${token}"
+    fi
+
     for attempt in 1 2 3; do
         # GitHub API responses with rate-limit error have message key but no body.
         # Python parse catches JSON errors. Use python for robust parsing.
+        # User-Agent 显式给(GitHub API 拒绝空 UA);auth_header 为空时展开成空串,
+        # token 不含空格 → 词分割安全(不引号展开)。
         api_response=$(curl -sS \
             -H "Accept: application/vnd.github+json" \
+            -H "User-Agent: cc-launcher-build.sh" \
+            ${auth_header:+-H "$auth_header"} \
             "https://api.github.com/repos/${repo}/releases/tags/${version}" \
             2>/dev/null) || {
             echo "fetch attempt ${attempt}: curl failed (network); retry in 5s..." >&2
@@ -175,10 +193,14 @@ except Exception as e:
         # 文件名替换 `auto-hash` token。regex 通用化为 `sha256:[^:]+:`,向前兼容
         # 旧 `auto-hash` marker(v0.12.0 ~ v0.13.2) + 新 `cc-launcher-windows-amd64.zip`
         # marker(v0.13.3+)。[^:]+ 匹配任意非冒号字符串,避免绑死具体文件名。
-        # 用 lookahead (?=\s*-->) 而不是 consume \s*--> —— \K reset *up to
-        # that point*, 不 reset *之后 match 的内容*. Consume 形式会把 "-->"
-        # 一起 capture 进 stdout, 让 hash 解析多 3 bytes.
-        hash=$(printf '%s' "$body" | grep -oP 'sha256:[^:]+:\K[a-f0-9]{64}(?=\s*-->)' || true)
+        #
+        # 用 `grep -o` + BRE 区间 `\{64\}`(不是 `grep -oP`):GNU grep 才有 -P,
+        # macOS 自带 BSD grep 不支持 → 之前在 macOS 上这步恒失败。\K lookahead
+        # 同样依赖 -P,一并去掉。
+        hash=$(printf '%s' "$body" \
+            | grep -o 'sha256:[^:]*:[a-f0-9]\{64\}' \
+            | head -1 \
+            | sed 's/.*://' || true)
         if [ -n "$hash" ]; then
             echo "$hash"
             return 0
@@ -192,7 +214,8 @@ except Exception as e:
     echo "ERROR: fetch_release_zip_hash_gh_api 失败——3 次重试后仍未拿到 release body 的 sha256 marker" >&2
     echo "可能原因：" >&2
     echo "  1. release workflow 的 'append windows zip SHA256 to release body' step 还没跑" >&2
-    echo "  2. GitHub API rate limit exceeded (60/hr unauthenticated)" >&2
+    echo "  2. GitHub API rate limit exceeded —— 未认证 60/hr,本机共享出口 IP 很容易打满;" >&2
+    echo "     解法:装 gh 并 `gh auth login`(或设 GITHUB_TOKEN 环境变量)→ 额度提到 5000/hr" >&2
     echo "  3. 手动 fallback（需要下载 18 MB zip 拿真值——bumps-scoop-hash-trace 不自动跑 download）：" >&2
     echo "     curl -sSL https://github.com/${repo}/releases/download/${version}/cc-launcher-windows-amd64.zip -o /tmp/x.zip" >&2
     echo "     sha256sum /tmp/x.zip" >&2
