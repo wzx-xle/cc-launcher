@@ -225,13 +225,15 @@ jobs:
           #   - 段落到下一个 H2 之前（含全部 H3 子段）
           #   - 找不到 → 非零退出（不静默 skip）
           TARGET_VERSION="$VERSION"
-          if [ "$DRY_RUN" = "true" ]; then
+          if [ -n "$INPUT_VERSION" ]; then
+            # 显式指定版本：dry-run 用它校验；临时 tag 的全链路烟测也用它
+            # （临时 tag 如 v0.0.0-ci.xxx 在 CHANGELOG 里没有对应段）
+            TARGET_VERSION="$INPUT_VERSION"
+          elif [ "$DRY_RUN" = "true" ]; then
             # dry-run: ref_name 通常是分支名(main)→ 用 CHANGELOG 最新版本做校验
-            if [ -n "$INPUT_VERSION" ]; then
-              TARGET_VERSION="$INPUT_VERSION"
-            else
-              TARGET_VERSION=$(go run ./cmd/release-notes changelog-latest CHANGELOG.md)
-            fi
+            TARGET_VERSION=$(go run ./cmd/release-notes changelog-latest CHANGELOG.md)
+          fi
+          if [ "$DRY_RUN" = "true" ]; then
             echo "==> DRY-RUN: 校验 CHANGELOG 段提取（版本 $TARGET_VERSION），不写 release body"
           fi
           CHANGELOG_SECTION=$(go run ./cmd/release-notes changelog-section CHANGELOG.md "$TARGET_VERSION")

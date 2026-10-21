@@ -71,7 +71,16 @@ gh release delete "v0.0.0-ci.${SHA}" --repo wzx-xle/cc-launcher --yes
 git push origin --delete "v0.0.0-ci.${SHA}"
 ```
 
-**注意**：临时 tag 会真的建 release、真的上传 ~30 MB 资产，验完必须删。
+**注意两点**：
+1. 临时 tag 会真的建 release、真的上传 ~30 MB 资产，验完必须删。
+2. 临时 tag（`v0.0.0-ci.xxx`）在 CHANGELOG.md 里没有对应段 → inject 步骤会
+   fail。用 `version` input 指定一个 CHANGELOG 里存在的版本号，让整条链路走绿：
+
+   ```bash
+   gh workflow run release.yml --ref "v0.0.0-ci.${SHA}" -f dry_run=false -f version=v0.14.0
+   ```
+
+   （`version` 只影响"从 CHANGELOG 里取哪一段"，release 本身仍然建在那个 tag 上。）
 
 ## 什么时候必须做哪一层
 
