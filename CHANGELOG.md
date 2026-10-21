@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-10-21 — windows-release-tooling
+
 ### Features
 - **scoop 更新不再报"有进程在运行"**（改的是 `wzx-xle/scoop-bucket` 的 manifest）：scoop 卸载时用 `test_running_process` 检查**路径在 `scoop\apps\cc-launcher\` 下**的进程，有就直接报 `The following instances of "cc-launcher" are still running. Close them and try again.` —— 而 OTel daemon（`cc-launcher.exe serve`）是**常驻**的， exe 就在那个目录里 → 所以"每次更新都提示"。manifest 加 `pre_uninstall` hook（在 scoop 的进程检查**之前**执行）：先 `ccl serve --stop` 优雅停 daemon（顺带清 pid 文件），再强杀 app 目录里残留的 cc-launcher 进程（Windows 上 launcher 是父进程、`cmd.Run()` 等 claude 子进程 → 会话期间也在），最后 sleep 让文件句柄释放。⚠️ scoop 的 `pre_uninstall` 用的是**安装目录里存的 manifest 副本**（`installed_manifest`），不是 bucket 的当前 manifest → **v0.14.0 这一次更新仍需手动 `ccl serve --stop` 一次**，装上 v0.14.0 之后所有更新自动生效
 - **Windows 上也能完成发布流程的最后一步**（`bin/bump-scoop.ps1`，与 `bin/bump-version.ps1` 对称）：scoop 用户就是 Windows 用户，但发布流程的"更新 scoop manifest"这步只有 bash 版（`build.sh bump-scoop`），而它依赖两个 Windows 上默认没有的东西——`zip` 命令（Git Bash 不带）和 `python3`（Windows 自带的 `python3.exe` 是 Microsoft Store 的 App Execution Alias，会弹商店）。新增 PowerShell 版，**只用内置能力**（`Invoke-RestMethod`），不需要 Git Bash / python3 / gh；hash 同样取自 release body 的 `sha256` marker（不打本地 zip——它是 verify-only，且本地 zip 的 hash 物理上不可能等于 release 的）。**刻意不用 `gh`**：gh 没有官方 Windows 版，Windows 用户得靠 scoop/choco 装；python 更通用
@@ -28,6 +30,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   - 顺带确认 `softprops/action-gh-release` 更新已有 release 时 body 取 `workflowBody || existingReleaseBody`（未传 body 输入 → 保留已有 body）→ 其它 matrix job 后续 update 不会冲掉已注入的 CHANGELOG 段 / hash marker
 - **`build.sh bump-scoop` 的取 hash 链路在本机必失败**：`fetch_release_zip_hash_gh_api` 未认证调 GitHub REST API，而未认证限流是 **60 req/hr**、本机出口 IP 是共享的 → 额度经常被打满，返回 `API rate limit exceeded` → 3 次重试全失败 → 拿不到 marker → bump-scoop 直接退出。修复：自动取 token（`GITHUB_TOKEN`/`GH_TOKEN` 环境变量 → `gh auth token` → 匿名兜底）并带上 `Authorization` + 显式 `User-Agent`，认证额度 5000/hr；顺带把 marker 提取从 `grep -oP`（GNU 专有，macOS 自带 BSD grep 不支持 → 在 macOS 上恒失败）换成可移植的 `grep -o` + BRE 区间 `\{64\}`
 - **release body 的 CHANGELOG 段注入从来就没生效过**：`VERSION` 取自 `github.ref_name`（`v0.14.0`，**带 v**），提取正则是 `## \[v?` + version + `\]` → 只能匹配 `## [v0.14.0]`，而本仓 CHANGELOG 标题格式是 `## [0.14.0]` → **永远匹配不上** → v0.12.0 ~ v0.14.0 的注入全部静默 skip（用户打开 release 页面只看到一个 HTML 注释，看不到任何内容）。修复：先剥掉 version 的前导 `v`，`v?` 保留 → `## [0.14.0]` 与 `## [v0.14.0]` 两种写法都命中；且"文件在但段落找不到"从静默 skip 改为**直接 fail**（静默 skip 正是这个 bug 藏了三个版本的原因；`CHANGELOG.md` 文件本身不存在时仍 warning + skip）。正则另加**行首锚点**（`^## \[...` + 标题后必须行尾/空格）——否则 CHANGELOG 正文里出现的字面量（例：本文档自己描述这个 bug 时写的 `## [v0.14.0]`）会被当成标题，抽出半段散文写进 release body
+
+### Compatibility
+- **Windows zip 的内容变了**（`ccl.cmd` 从 LF 改成 CRLF）→ **zip 的 SHA256 与 v0.14.0 不同**。scoop manifest 的 hash 一律取 release body 的 `sha256` marker → 更新 manifest 时自动带上新 hash，无需人工干预；但**任何按 v0.14.0 的 hash 做校验的地方（缓存、镜像源）都会失配**
+- **`build.sh bump-scoop` 的 stdout 契约变了**：之前 stdout 里混着 `==> 交叉编译 …` 的进度日志，manifest JSON 只能靠人工裁剪才能用；现在 **stdout 只有 manifest JSON**，进度/警告/错误全走 stderr。解析旧 stdout 输出的脚本需要改成只取 stdout
+- **`ccl` 本身的 CLI flag / 输出格式 / db schema 全部未变**；本版本只影响**发布产物内容**与**发布工具链**，不影响 ccl 的运行时行为
 
 ## [0.14.0] - 2026-10-20 — stats-session-start-time-fix
 
