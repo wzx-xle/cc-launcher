@@ -206,10 +206,13 @@ jobs:
           version = os.environ["VERSION"].lstrip("v")
           with open("CHANGELOG.md", "r", encoding="utf-8") as f:
               body = f.read()
-          # 跨 H3 (### ...) 到下一个 H2 (## [) 之前。[\s\S]*? 含换行,
-          # (?=\n## \[|\Z) 锚下一个 H2 行首。re.MULTILINE 让 ^ 匹配行首。
-          # (不能用 [^#]*? —— H3 含 # 会阻断匹配)
-          m = re.search(r"## \[v?" + re.escape(version) + r"\][\s\S]*?(?=\n## \[|\Z)", body, re.MULTILINE)
+          # 行首锚点 ^ (re.MULTILINE)+ 标题后必须行尾或空格 → 只认**真正的 H2 标题**。
+          # 没有锚点时会误匹配 CHANGELOG 正文里出现的字面量(比如本文件自己的
+          # "## [v0.14.0]" 说明文字)→ 抽出一段散文当标题段写进 release body。
+          # 跨 H3 (### ...) 到下一个 H2 (## [) 之前;[\s\S]*? 含换行,
+          # (?=^## \[|\Z) 锚下一个 H2 行首。
+          pat = r"^## \[v?" + re.escape(version) + r"\](?=[ \t]|$)[\s\S]*?(?=^## \[|\Z)"
+          m = re.search(pat, body, re.MULTILINE)
           if not m:
               sys.stderr.write("ERROR: ## [" + version + "] section not found in CHANGELOG.md\n")
               sys.exit(1)
