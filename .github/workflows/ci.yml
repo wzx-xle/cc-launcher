@@ -1,0 +1,83 @@
+name: ci
+
+# PR / 分支 push 期的基本检查。
+#
+# 为什么需要：此前 .github/workflows/ 只有 release.yml（tag push 才跑），
+# **PR 阶段零检查**——仓库里 22 个 Go 测试文件从来不会自动跑，`go test ./...`
+# 只在开发者本地跑过。2026-10-21 release workflow 连续踩了三个 bug
+# （job 间竞态 / CHANGELOG 提取正则 / 未认证 API 限流），而 release 逻辑当时
+# 埋在 YAML inline python 里，**没有任何测试能覆盖**。
+#
+# 现在 release 相关逻辑抽进 internal/release（含单测），本 workflow 负责：
+#   1. Go 代码的编译 / vet / 单测（含 smoke tag）+ release 逻辑单测
+#   2. release workflow 文件本身的语法检查（actionlint）
+#   3. 用仓库真实 CHANGELOG.md 跑一遍提取器（自检"CHANGELOG 写法"与"提取器
+#      约定"不漂移）—— 这一条就是 2026-10-21 第一个 bug 的哨兵
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: go test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.4'
+
+      - name: build
+        run: go build ./...
+
+      - name: vet
+        run: go vet ./...
+
+      - name: test
+        run: go test ./...
+
+      - name: test (smoke)
+        run: go test -tags smoke ./...
+
+  release-tooling:
+    name: release tooling
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.4'
+
+      - name: actionlint
+        uses: docker://rhysd/actionlint:1.7.7
+        with:
+          args: .github/workflows/release.yml
+
+      - name: CHANGELOG 提取器自检（真实 CHANGELOG.md）
+        # 用仓库真实 CHANGELOG 跑一遍提取器：拿最新的版本号，提取对应段，
+        # 段必须非空且以 H2 标题开头。CHANGELOG 写法与提取器约定一旦漂移
+        # （如标题带不带 "v"），这一步就会红。
+        run: |
+          set -euo pipefail
+          VERSION=$(grep -oE '^## \[v?[0-9]+\.[0-9]+\.[0-9]+\]' CHANGELOG.md \
+                    | head -1 | tr -d '#[]' | sed 's/^v//')
+          echo "==> 检查 CHANGELOG 版本段提取: $VERSION"
+          SECTION=$(go run ./cmd/release-notes changelog-section CHANGELOG.md "$VERSION")
+          test -n "$SECTION"
+          case "$SECTION" in
+            "## ["*) echo "OK: 提取到 ${#SECTION} 字符" ;;
+            *) echo "FAIL: 提取结果不以 H2 标题开头"; exit 1 ;;
+          esac
+
+      - name: release-notes CLI 自检
+        run: |
+          set -euo pipefail
+          echo '<!-- sha256:cc-launcher-windows-amd64.zip:244ce9e2382c336afab3e1cd57c9c8d0d3957746b97e8b513b6a7bb53f043036 -->' \
+            | go run ./cmd/release-notes sha-marker
+          echo

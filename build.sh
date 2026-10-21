@@ -188,19 +188,12 @@ except Exception as e:
         }
 
         # Extract SHA256 from <!-- sha256:<filename>:HEX --> marker.
-        # release-notes-changelog-injection change: marker 格式从
-        # `<!-- sha256:auto-hash:HEX -->` 改为 `<!-- sha256:cc-launcher-windows-amd64.zip:HEX -->`,
-        # 文件名替换 `auto-hash` token。regex 通用化为 `sha256:[^:]+:`,向前兼容
-        # 旧 `auto-hash` marker(v0.12.0 ~ v0.13.2) + 新 `cc-launcher-windows-amd64.zip`
-        # marker(v0.13.3+)。[^:]+ 匹配任意非冒号字符串,避免绑死具体文件名。
-        #
-        # 用 `grep -o` + BRE 区间 `\{64\}`(不是 `grep -oP`):GNU grep 才有 -P,
-        # macOS 自带 BSD grep 不支持 → 之前在 macOS 上这步恒失败。\K lookahead
-        # 同样依赖 -P,一并去掉。
-        hash=$(printf '%s' "$body" \
-            | grep -o 'sha256:[^:]*:[a-f0-9]\{64\}' \
-            | head -1 \
-            | sed 's/.*://' || true)
+        # 解析走 internal/release 的 Go 实现（cmd/release-notes CLI）——与 release
+        # workflow 注入 CHANGELOG 段用的是**同一份逻辑**。此前这里内联 grep、
+        # workflow 里内联 python,两处各写各的,谁改谁坏(2026-10-21 连续踩坑)。
+        # marker 格式从 `sha256:auto-hash:HEX`(v0.12.0~v0.13.2)到
+        # `sha256:cc-launcher-windows-amd64.zip:HEX`(v0.13.3+),实现两种都认。
+        hash=$(printf '%s' "$body" | go run ./cmd/release-notes sha-marker 2>/dev/null || true)
         if [ -n "$hash" ]; then
             echo "$hash"
             return 0

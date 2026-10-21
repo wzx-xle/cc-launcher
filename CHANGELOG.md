@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Features
+- **release 流程有了可测试的分层验证手段**（`docs/release-smoke-test.md`）：此前 release 逻辑全部埋在 `.github/workflows/release.yml` 的 inline python/shell 里**零测试覆盖**，且仓库**PR 阶段零 CI**——2026-10-21 一次发版连续踩三个 workflow bug，每个都要"推 tag → 现场炸 → 手工修 release"。现在：
+  - `internal/release`（新包）：CHANGELOG 版本段提取 + SHA256 marker 解析，带单测覆盖 2026-10-21 实际踩到的每个坑（版本号 `v` 前缀 / 正则缺行首锚点误匹配正文 / CHANGELOG 写法与提取器漂移 / marker 新旧两种格式）；`cmd/release-notes` 是给 workflow 与 `build.sh` 共用的 CLI，**消除两处解析逻辑各自漂移**
+  - `.github/workflows/ci.yml`（新）：push main / 提 PR 自动跑 `go build` / `go vet` / `go test ./...` / `go test -tags smoke ./...` + `actionlint` + **用仓库真实 `CHANGELOG.md` 跑一遍提取器**（CHANGELOG 写法漂移的哨兵）
+  - `release.yml` 的 `workflow_dispatch` 从**半残**改成真能用的 dry-run：新增 `dry_run`（默认 true）/ `version` 两个 input，dry-run 完整构建 + 打包 + 算 hash + 提取 CHANGELOG 段并全部打印，**不创建 release、不上传资产、不改 release body**（此前 dispatch 时 `ref_name` = 分支名 → `gh release create main --verify-tag` 必挂，"手动触发测试"这条路是断的）
+
 ### Fixes
 - **release workflow 的 job 间竞态导致 Windows zip 挂不上 release**：`windows-amd64` job 的两个 body 注入步骤（inject CHANGELOG / append SHA256 marker）跑在 `upload release assets` **之前**，却假设 release 已存在——而 release 是由 5 个 matrix job 里**谁先跑完谁创建**（`softprops/action-gh-release` 在各 job 末尾）。v0.14.0 实测踩中：windows job 抢在其它 job 之前跑 → `gh api /releases/tags/v0.14.0` 404 → job 失败 → `upload release assets` 步骤**根本没执行** → release 上只有 4 个 tar.gz、**缺 `cc-launcher-windows-amd64.zip`**，body 为空。修复：
   - 新增 `ensure release exists` 步骤（body 注入前显式保证 release 存在，`--verify-tag` 防建错 tag），body 注入不再依赖 job 间执行顺序

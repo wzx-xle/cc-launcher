@@ -2,11 +2,20 @@ name: release
 
 # 触发条件：
 #   - tag push（v*）——正式发版
-#   - workflow_dispatch ——手动触发，用于 dry-run / 测试
+#   - workflow_dispatch ——手动触发，默认 dry-run（只构建 + 校验，不碰 release）
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'dry-run：只构建 + 校验（CHANGELOG 段提取 / zip hash），不创建或修改 release'
+        type: boolean
+        default: true
+      version:
+        description: 'dry-run 时用于校验的版本号（留空 = 取 CHANGELOG.md 里最新的版本段）'
+        type: string
+        default: ''
 
 permissions:
   contents: write  # 创建 release 所需
@@ -15,6 +24,10 @@ jobs:
   build:
     name: build (${{ matrix.target.os }}-${{ matrix.target.arch }})
     runs-on: ubuntu-latest
+    env:
+      # dry-run 判定：只有手动触发且勾了 dry_run 才算 dry-run。
+      # tag push 永远是真实发版（DRY_RUN=false）。
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && 'true' || 'false' }}
     strategy:
       fail-fast: false
       matrix:
@@ -130,6 +143,9 @@ jobs:
         # 且 **body 用 `workflowBody || existingReleaseBody`**(本 action 未传 body
         # 输入 → workflowBody 为空 → 保留已有 body)→ 其它 matrix job 后续 update
         # 不会把 windows-amd64 job 注入的 CHANGELOG 段/hash marker 冲掉。
+        #
+        # dry-run(手动触发)跳过:不产生任何 release / 资产。
+        if: ${{ env.DRY_RUN != 'true' }}
         uses: softprops/action-gh-release@v2
         with:
           files: |
@@ -148,7 +164,7 @@ jobs:
         #
         # 这里显式保证 release 存在,后续注入步骤不再依赖 job 间执行顺序。
         # --verify-tag:tag 必须已存在(避免 gh 在 tag 缺失时指向默认分支建 tag)。
-        if: matrix.target.os == 'windows' && matrix.target.arch == 'amd64'
+        if: matrix.target.os == 'windows' && matrix.target.arch == 'amd64' && env.DRY_RUN != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ github.ref_name }}
@@ -192,37 +208,42 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
           if [ ! -f CHANGELOG.md ]; then
             echo "WARNING: CHANGELOG.md not found at repo root, skip changelog inject" >&2
             exit 0
           fi
-          # python re.search: '## [0.X.Y]' 后所有内容(到下一个 '## [' 之前),
-          # re.DOTALL 让 . 匹配换行。re.escape version 防 regex injection。
-          CHANGELOG_SECTION=$(VERSION="$VERSION" python3 - <<'PYEOF'
-          import os, re, sys
-          # ref_name 带 "v"(v0.14.0);CHANGELOG 标题不带("## [0.14.0]")→ 剥前导 v
-          version = os.environ["VERSION"].lstrip("v")
-          with open("CHANGELOG.md", "r", encoding="utf-8") as f:
-              body = f.read()
-          # 行首锚点 ^ (re.MULTILINE)+ 标题后必须行尾或空格 → 只认**真正的 H2 标题**。
-          # 没有锚点时会误匹配 CHANGELOG 正文里出现的字面量(比如本文件自己的
-          # "## [v0.14.0]" 说明文字)→ 抽出一段散文当标题段写进 release body。
-          # 跨 H3 (### ...) 到下一个 H2 (## [) 之前;[\s\S]*? 含换行,
-          # (?=^## \[|\Z) 锚下一个 H2 行首。
-          pat = r"^## \[v?" + re.escape(version) + r"\](?=[ \t]|$)[\s\S]*?(?=^## \[|\Z)"
-          m = re.search(pat, body, re.MULTILINE)
-          if not m:
-              sys.stderr.write("ERROR: ## [" + version + "] section not found in CHANGELOG.md\n")
-              sys.exit(1)
-          # rstrip + 不带尾换行(避免 body 里多出空行)
-          sys.stdout.write(m.group(0).rstrip())
-          PYEOF
-          )
+          # 提取逻辑走 internal/release 的 Go 实现（cmd/release-notes CLI）——
+          # 那份实现有单测（internal/release/notes_test.go），CI 的 `go test ./...`
+          # 会覆盖。此前这里内联 python，零测试覆盖，2026-10-21 连续踩了
+          # "版本前缀不匹配"（静默 skip 三个版本）+ "缺行首锚点误匹配正文"两个 bug。
+          # 行为约定见 internal/release/notes.go:
+          #   - 版本号带不带 "v" 都认（"v0.14.0" == "0.14.0"）
+          #   - 只认**行首**的 H2 标题（正文里出现的字面量不会被误当标题）
+          #   - 段落到下一个 H2 之前（含全部 H3 子段）
+          #   - 找不到 → 非零退出（不静默 skip）
+          TARGET_VERSION="$VERSION"
+          if [ "$DRY_RUN" = "true" ]; then
+            # dry-run: ref_name 通常是分支名(main)→ 用 CHANGELOG 最新版本做校验
+            if [ -n "$INPUT_VERSION" ]; then
+              TARGET_VERSION="$INPUT_VERSION"
+            else
+              TARGET_VERSION=$(go run ./cmd/release-notes changelog-latest CHANGELOG.md)
+            fi
+            echo "==> DRY-RUN: 校验 CHANGELOG 段提取（版本 $TARGET_VERSION），不写 release body"
+          fi
+          CHANGELOG_SECTION=$(go run ./cmd/release-notes changelog-section CHANGELOG.md "$TARGET_VERSION")
           if [ -z "$CHANGELOG_SECTION" ]; then
-            echo "ERROR: extracted CHANGELOG section for $VERSION is empty" >&2
+            echo "ERROR: extracted CHANGELOG section for $TARGET_VERSION is empty" >&2
             exit 1
+          fi
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "==> 将写入的 CHANGELOG 段（$(printf '%s' "$CHANGELOG_SECTION" | wc -c) 字符）:"
+            printf '%s\n' "$CHANGELOG_SECTION" | head -10
+            echo "..."
+            exit 0
           fi
           gh release edit "$VERSION" \
               --repo "${{ github.repository }}" --notes "$CHANGELOG_SECTION"
@@ -249,9 +270,14 @@ jobs:
           cd dist
           HASH=$(sha256sum cc-launcher-windows-amd64.zip | awk '{print $1}')
           echo "windows zip SHA256: $HASH"
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "==> DRY-RUN: 校验 hash 计算（不写 release body）"
+            echo "    将追加的 marker: <!-- sha256:cc-launcher-windows-amd64.zip:${HASH} -->"
+            exit 0
+          fi
           BODY=$(gh api -H "Accept: application/vnd.github+json" \
               "/repos/${{ github.repository }}/releases/tags/${{ github.ref_name }}" \
-              | python3 -c "import sys,json; print(json.load(sys.stdin)['body'] or '')")
+              --jq '.body // ""')
           # 保留已有 body (CHANGELOG 段由上一个 step 注入),append marker
           NEW_BODY="${BODY}
 
