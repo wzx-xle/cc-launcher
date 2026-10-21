@@ -384,6 +384,52 @@ func TestBucket_Daily_KeyedByConsumptionTime(t *testing.T) {
 	}
 }
 
+// TestBucketSkeleton_DSTSpringForward 验证**夏令时春季调时**当天，桶天数不偏一。
+//
+// 背景：days 的计算原本是 (todayStartMs-sinceMs)/24h 向下取整。本地时区若有
+// 夏令时，"跨 N 个日历日"的两端午夜相差 (N-1)*24h **±1h** —— 春季调时少一小时
+// → 向下取整少算一天 → --day N 少一个桶。改成四舍五入后恢复正确。
+//
+// 2026-03-01 00:00 EST → 2026-03-09 00:00 EDT 跨 8 个日历日，但实际只有
+// 8*24-1 = 191 小时（03-08 02:00 跳到 03:00）→ 191/24 = 7.958：
+//   - 向下取整 → 7 → days = 8（少一个桶，bug）
+//   - 四舍五入 → 8 → days = 9（正确）
+func TestBucketSkeleton_DSTSpringForward(t *testing.T) {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Skipf("本机无 tzdata,跳过夏令时场景: %v", err)
+	}
+
+	now := time.Date(2026, 3, 9, 17, 0, 0, 0, loc)
+	since := time.Date(2026, 3, 1, 0, 0, 0, 0, loc).UnixMilli()
+
+	rows := bucketSkeleton("day", now, startOfDayMillis(now), since)
+	if len(rows) != 9 {
+		t.Fatalf("春季调时跨 8 个日历日 → 应有 9 个 daily 桶,got %d", len(rows))
+	}
+	// 首尾日期也要对（桶是按日历日推的，不是按 24h 算的）
+	if rows[0].label != "03-01" {
+		t.Errorf("首桶 label: want %q, got %q", "03-01", rows[0].label)
+	}
+	if last := rows[len(rows)-1]; last.label != "03-09" {
+		t.Errorf("末桶 label: want %q, got %q", "03-09", last.label)
+	}
+}
+
+// TestBucketSkeleton_NormalDaysUnaffected 确认普通时区（非夏令时）天数没被改坏。
+func TestBucketSkeleton_NormalDaysUnaffected(t *testing.T) {
+	now := time.Date(2026, 9, 30, 17, 30, 0, 0, time.Local)
+	since := time.Date(2026, 9, 24, 0, 0, 0, 0, time.Local).UnixMilli()
+
+	rows := bucketSkeleton("day", now, startOfDayMillis(now), since)
+	if len(rows) != 7 {
+		t.Fatalf("跨 6 个日历日 → 应有 7 个 daily 桶,got %d", len(rows))
+	}
+	if rows[0].label != "09-24" {
+		t.Errorf("首桶 label: want %q, got %q", "09-24", rows[0].label)
+	}
+}
+
 // TestHumanizeTokens_Boundaries 覆盖 spec scenario "humanize 边界 case"。
 func TestHumanizeTokens_Boundaries(t *testing.T) {
 	cases := []struct {

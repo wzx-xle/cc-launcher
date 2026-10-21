@@ -92,6 +92,41 @@ git push origin --delete "v0.0.0-ci.${SHA}"
 | release 流程整体（含 gh API 调用） | 第 4 层 |
 | 业务代码（`internal/collector`、`internal/stats` …） | 第 2 层（CI 自动跑） |
 
+## 执行环境矩阵（"本机过、CI 挂"的坑都在这张表里）
+
+| | 开发者本机 | CI runner (ubuntu-latest) | 终端用户机器 |
+|---|---|---|---|
+| 时区 | Asia/Shanghai (+08) | **UTC** | 任意 |
+| `claude` CLI | 装了（`~/.nvm/.../claude`） | **没有** | 大概率有 |
+| HOME | `/home/zxwang`（有**真实** `~/.cc-launcher/telemetry.db`） | `/home/runner`（干净） | 有真实数据 |
+| GitHub API | 共享出口 IP → **未认证 60/hr 限流常被打满** | `GITHUB_TOKEN` 认证（5000/hr） | 同左 |
+| 工具链 | go + gh + scoop… | go + gh（无登录态） | 未必有 go |
+
+**由此产生的四条硬规则**（写测试 / 写脚本时照着做）：
+
+1. **测试不得依赖"本机恰好装了某程序"** —— 要用就造假的。
+   例：`internal/launcher` 的 env 转发测试 → 临时目录里放一个假 `claude` 放进 PATH
+   （`withFakeClaude`）。2026-10-21 首次接 CI 时就是这条被违反，CI 立刻红。
+2. **测试不得依赖真实 HOME 里的用户数据** —— 用 `t.TempDir()`；
+   涉及 `HOME/.cc-launcher` 的用 `sandboxHome(t)`（cmd 层）或直接传临时 db 路径
+   （internal 层）。
+3. **时区敏感逻辑必须多时区验证** —— CI 跑 UTC（runner 默认）+ Asia/Shanghai
+   （用户主时区）+ America/New_York（夏令时边界，只跑 internal/stats）。
+   本地复现：`TZ=America/New_York go test ./internal/stats/...`
+4. **调 GitHub API 必须带 token** —— 未认证额度 60/hr 且本机出口 IP 共享，
+   很容易被打满；用 `gh auth token`（见 [[github-api-needs-auth-token]]）。
+
+本地想复现 CI 的环境（一次性）：
+
+```bash
+TMPhome=$(mktemp -d)
+env -u TZ -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_BASE_URL \
+    HOME="$TMPhome" \
+    PATH="$(echo "$PATH" | tr ':' '\n' | grep -v "$(dirname "$(which claude)")" | paste -sd:)" \
+    go test -count=1 ./...
+rm -rf "$TMPhome"
+```
+
 ## 已知不做的事
 
 - **没有对 `dist/` 产物做端到端断言**（zip 内容、shim 可用性）——目前靠人工下载试。

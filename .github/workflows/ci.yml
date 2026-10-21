@@ -41,6 +41,18 @@ jobs:
       - name: test
         run: go test ./...
 
+      - name: test (TZ=Asia/Shanghai)
+        # 桶聚合按**本地时区**切日（strftime 'localtime'）→ 时区敏感。
+        # CI runner 是 UTC，用户多在 +08:00 → 两个时区都跑一遍，
+        # 防"本地绿、CI 挂"（或反过来）。见 docs/release-smoke-test.md 的环境矩阵。
+        run: TZ=Asia/Shanghai go test ./...
+
+      - name: test (TZ=America/New_York — 夏令时边界)
+        # 夏令时"春季调时"当天，跨 N 个日历日的两端午夜相差 (N-1)*24h-1h →
+        # 桶天数计算若向下取整会少一桶（bucketSkeleton 的四舍五入就是为此）。
+        # 时区最敏感的包是 internal/stats，全量跑太慢，这里只跑它。
+        run: TZ=America/New_York go test ./internal/stats/...
+
       - name: test (smoke)
         run: go test -tags smoke ./...
 
