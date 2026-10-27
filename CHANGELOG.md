@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.15.2] - 2026-10-27 — web-backfill-to-serve
+
+### Refactor
+- **`ccl web --backfill` 挪到 `ccl serve --backfill`**：`ccl web` 的 flag 此前是 `--rotate`（吊销 token）/ `--backfill`（回填历史 cwd）/ `--open`（开浏览器）——三个动作里**只有前两个跟看板有关**（`--backfill` 修的是 `sessions.cwd`，是 daemon 的数据维护动作，与看板页面无关，只是恰好共用同一个 `telemetry.db`）。用户想补历史数据却要先想到"web"这个看板入口，名字与动作对不上。现在 `ccl web` 只剩**关于看板本身**的三个动作（打印 URL / 吊销 / 打开），回填归位到 `ccl serve`
+  - `ccl serve` 现有 4 个 flag（`--stop` / `--restore` / `--status` / `--restart`）**全部是"一次性动作后立即返回"的 daemon 生命周期 / 维护动作**——`--backfill` 正好是同一类，进同一个互斥组语义一致，不引入新类别
+  - 为什么不是新增顶层 `ccl backfill`：那会让顶层命令从 5 个变成 6 个，与本次要解决的问题（顶层命令别 proliferate）背道而驰
+  - 为什么不是 `ccl stats --backfill`：`ccl stats` 是**只读**的查询面，回填是**写**动作；往只读命令里塞写操作会破坏"ccl stats 不写任何东西"的心智模型
+  - **顶层子命令数不变**（仍是 `serve / stats / web / provider / mode` 五个），看板的挂载方式、db schema、HTTP 契约全部不变
+
+### Tests
+- 新增 `cmd/cc-launcher/backfill_test.go`（常规测试，非 smoke）：`ccl serve --backfill --stop` / `--status` 报互斥错误（exit 非 0 + stderr 说明）；`ccl web --backfill` 报 unknown flag
+- smoke 测试同步：web 的补全候选断言改为 `--rotate / --open`（不再含 `--backfill`）；新增"web 补全不含 `--backfill`"、"serve 补全含 `--backfill`"两条
+- 真机验证：`ccl serve --backfill` 真跑两次，resolved / failed 计数一致（幂等）；`ccl web --backfill` exit 1 + "flag provided but not defined: -backfill"；`ccl web` / `ccl web --help` 不受影响
+
+### OpenSpec
+- archive `web-backfill-to-serve` (2026-10-27)
+
+### Compatibility
+- **破坏性变更**：`ccl web --backfill` 不再被识别（报 `flag provided but not defined: -backfill`，exit 1）。**不做别名兼容**——两个位置并存会让"到底哪个是对的"变成新的困惑源。新位置是 `ccl serve --backfill`（行为完全不变：不限量、幂等、不改 schema、打印 resolved / failed 计数）
+- `ccl serve` 的互斥 flag 组从 4 个变成 5 个（`--stop / --restore / --status / --restart / --backfill`）；`ccl serve --backfill --status` 现在报互斥错误（一个写数据一个读状态，确实不该同时给）
+- `ccl web --help` 与 `ccl __complete web ""` 的 flag 列表少一条 `--backfill`；`ccl serve --help` 与 `ccl __complete serve ""` 多一条 `--backfill`
+- db schema / 顶层子命令列表 / 看板的 URL 与鉴权方式全部不变
+
 ## [0.15.1] - 2026-10-27 — web-stats-group-fixes
 
 ### Fixes
@@ -31,7 +54,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **provider / 项目维度从"恒空"变成"有真值"**（本次最底层的变化）。Claude Code 的 OTel payload 里**没有** cwd 也没有 provider，所以 ccl 走两条路补：
   - **launch 上下文（主路径）**：`ccl` 启动 Claude Code 时把当次的 provider 名 / 工作目录 / provider 端点 host 写进**子进程环境**的 `OTEL_RESOURCE_ATTRIBUTES`（`ccl.provider` / `ccl.cwd` / `ccl.provider_endpoint`），Claude Code 的 OTel SDK 随 metrics 推送为 **resource attributes**，daemon 直接取。这是**逐次 launch 的真值**——provider 是"这次启动用的哪个 provider"的快照，不是"当前配置的 provider"。**刻意不写 `~/.claude/settings.json`**：那里的 `env` 会被所有 `claude` 进程继承，直接 `claude` 启动的会话会继承"上一次 ccl 的 cwd"，反而造出假数据
   - **jsonl 兜底**：payload 无 `ccl.cwd` 时（直接 `claude` 启动的会话、上下文机制出现之前的历史行），用 `session.id` 反查 `~/.claude/projects/*/<session-id>.jsonl`，**只取第一条带顶层 `cwd` 的记录**（prompt 内容不读、不存、不进日志），取到即停。查不到 → 留空（正常状态，不是错误）
-  - **历史回填**：daemon 启动时后台回填 `cwd = ''` 的行（每次启动最多 500 行，**不阻塞**端口监听），`ccl web --backfill` 可显式不限量补齐。回填是**数据驱动幂等**的（只处理空行，不用 `PRAGMA user_version` 一次性标记），跑两次结果一致，之后新建的空行仍可被后续回填补上
+  - **历史回填**：daemon 启动时后台回填 `cwd = ''` 的行（每次启动最多 500 行，**不阻塞**端口监听），`ccl serve --backfill` 可显式不限量补齐（v0.15.0 时该命令是 `ccl web --backfill`，v0.15.2 挪到 serve）。回填是**数据驱动幂等**的（只处理空行，不用 `PRAGMA user_version` 一次性标记），跑两次结果一致，之后新建的空行仍可被后续回填补上
 
 ### Fixes
 - **`ccl stats --by-provider --by-project`（组合）此前必然失败**：`buildSessionStatsSQL` 的 `groupExpr` 在多维分组时展开成**逗号分隔的两列**，`SELECT %s AS session_id` 因此多出一列，与 `rows.Scan` 的 11 个目标列对不上 → 扫描报错。改为**单列表达式**（`cwd × provider` 拼接）+ `GROUP BY s.cwd, s.provider`，组合分组现在真的能出多行
