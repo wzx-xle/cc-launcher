@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-10-27 — web-stats-group-fixes
+
+### Fixes
+- **看板的「会话数」在分组查询下报的是分组数，不是会话数**：`/api/stats` 的 `totals.sessions` 直接用了 `len(主查询行数)`——`group=provider` 时那是 provider 个数（实测 2），不是窗口内活动的会话数（实测 6）。`group=session`（默认）时两者恰好相同，所以这个 bug 只在用户主动切分组时暴露。修复：新增 `stats.CountSessionsInWindow`（按**消费时刻** `metrics.captured_at` 计数，与 detail 行的口径一致；窗口起点与主查询对齐），单独数一次
+- **看板的 provider 占比在 `group=project` / `group=model` 时归因错误**：占比原本复用主查询行里的 provider 列——这两种分组下每行是**一个分组**（一个 project / 一个 model），行的 provider 列只是该分组里**任意一个** provider，于是整个分组的用量被错误归到其中一个 provider 上（实测：`group=project` 时 provider 只剩 2 项、其中一项占比 100%）。修复：`group=project` / `group=model` 时单独跑一次按 provider 的聚合查询；`group=session`（每行一个 session，内存里按 provider 分组 == 真聚合）与 `group=provider`（主查询本身就是 provider 聚合）仍复用主查询，**不多查一次**
+  - 修复后四种分组下 provider 占比完全一致（口径与 CLI 的 `--by-provider` 一致）
+
+### Tests
+- 补两条 web 单测锁死上述两个 bug：`group=provider` 时 `totals.sessions` 必须是会话数（4）而不是分组数（3）；`group=project` 时 provider 占比必须有 3 项且份额之和为 1
+- 修测试库的样本：新增一条与 s1 同 project 但**不同 provider** 的 session，让"project 分组里的 provider 不唯一"这个前提成立（否则测试数据碰巧掩盖了 bug）
+
+### Compatibility
+- **db schema / CLI flag / JSON 字段名全部不变**；只改 `/api/stats` 的两个**数值口径**（`totals.sessions` 与 `providers[]` 的份额）——v0.15.0 的看板在这两项上是错的
+
 ## [0.15.0] - 2026-10-27 — web-usage-stats-ui
 
 ### Features
