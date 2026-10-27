@@ -12,7 +12,7 @@ TBD - created by archiving change cli-shell-completion. Update Purpose after arc
 
 #### Scenario: completing ccl serve flags
 - **WHEN** user invokes `ccl __complete serve ""` (completing inside `ccl serve`)
-- **THEN** stdout shows `ccl serve`'s flags (`--stop / --restore / --status / --restart / -h / --help`), one per line
+- **THEN** stdout shows `ccl serve`'s flags (`--stop / --restore / --status / --restart / --backfill / -h / --help`), one per line
 
 #### Scenario: completing ccl provider template name after --template
 - **WHEN** user invokes `ccl __complete provider --template ""`
@@ -24,7 +24,7 @@ TBD - created by archiving change cli-shell-completion. Update Purpose after arc
 
 #### Scenario: completing ccl stats flags
 - **WHEN** user invokes `ccl __complete stats ""`
-- **THEN** stdout shows the stats flags (`--day / --by-provider / --by-project / --by-model / --project / --model / --json / -h / --help`), one per line
+- **THEN** stdout shows the stats flags (`--day / --by-provider / --by-project / --by-model / --project / --model / --provider / --json / -h / --help`), one per line
 
 #### Scenario: position arguments for ccl provider <name> are NOT completed by ccl
 - **WHEN** user invokes `ccl __complete provider ""` (completing the position after `ccl provider`)
@@ -72,11 +72,11 @@ When `ccl serve` / `ccl stats` / `ccl provider` adds, removes, or renames a flag
 - **THEN** `ccl __complete ccl serve ""` automatically includes `--rotate-logs` in its output on the next invocation; no separate completion config file to update
 
 ### Requirement: completion respects the mutex of serve flags
-`ccl serve` has 4 mutually exclusive flags (`--stop / --restore / --status / --restart`). When the user has already typed one of them, `ccl __complete ccl serve <existing-flag> ""` MUST NOT suggest any of the other 3 (defensive — same mutex as runtime enforces).
+`ccl serve` has 5 mutually exclusive flags (`--stop / --restore / --status / --restart / --backfill`). When the user has already typed one of them, `ccl __complete ccl serve <existing-flag> ""` MUST NOT suggest any of the others (defensive — same mutex as runtime enforces).
 
 #### Scenario: completing serve flags after --stop is already given
 - **WHEN** user invokes `ccl __complete serve --stop ""`
-- **THEN** stdout is empty (the 4 flags are mutually exclusive; no further flag completion is meaningful)
+- **THEN** stdout is empty
 
 ### Requirement: tab completion is opt-in, not first-time
 The user MUST run `source <(ccl __init bash)` (or zsh equivalent) explicitly to enable completion. `ccl --help` / `ccl serve --help` SHOULD mention the option but MUST NOT enable it automatically.
@@ -90,11 +90,11 @@ The user MUST run `source <(ccl __init bash)` (or zsh equivalent) explicitly to 
 - **THEN** the help output mentions `source <(ccl __init bash)` (or zsh) under a "Tab completion" paragraph
 
 ### Requirement: completion covers the ccl web flags
-`ccl __complete web ""` MUST print the flags of the `ccl web` subcommand (`--rotate / --backfill / --open / -h / --help`), one per line, and MUST exit 0.
+`ccl __complete web ""` MUST print the flags of the `ccl web` subcommand (`--rotate / --open / -h / --help`), one per line, and MUST exit 0.
 
 #### Scenario: completing ccl web flags
 - **WHEN** user invokes `ccl __complete web ""`
-- **THEN** stdout shows `ccl web`'s flags (`--rotate / --backfill / --open / -h / --help`), one per line
+- **THEN** stdout shows `ccl web`'s flags (`--rotate / --open / -h / --help`), one per line
 
 #### Scenario: the web flag list stays in sync with the runtime flag set
 - **WHEN** developer adds a new flag to the `ccl web` flag set via `fs.Bool(...)` / `fs.String(...)`

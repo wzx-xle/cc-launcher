@@ -79,7 +79,9 @@ func TestSmoke_CompletionWebFlags(t *testing.T) {
 			t.Errorf("run(__complete, web, '') returned error: %v", err)
 		}
 	})
-	for _, want := range []string{"--rotate", "--backfill", "--open", "-h", "--help"} {
+	// --backfill 已挪到 ccl serve（web-backfill-to-serve §D1）——web 只剩
+	// --rotate / --open 两个关于看板本身的 flag。
+	for _, want := range []string{"--rotate", "--open", "-h", "--help"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("web 补全候选应含 %q, got:\n%s", want, out)
 		}
@@ -97,5 +99,66 @@ func TestSmoke_CompletionStatsIncludesProvider(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("stats 补全候选应含 %q, got:\n%s", want, out)
 		}
+	}
+}
+
+// TestSmoke_ServeBackfillStopMutex 断言 `ccl serve --backfill --stop` 报互斥错误。
+//
+// web-backfill-to-serve §D1：--backfill 进 serve 的互斥组（与另外四个一样是
+// "对 daemon 数据 / 状态的维护动作"）。
+func TestSmoke_ServeBackfillStopMutex(t *testing.T) {
+	sandboxHome(t)
+	var err error
+	_ = captureStderr(t, func() {
+		err = runServe([]string{"--backfill", "--stop"})
+	})
+	if err == nil {
+		t.Fatal("runServe --backfill --stop must return error (mutex violation)")
+	}
+}
+
+// TestSmoke_WebBackfillRemoved 断言 `ccl web --backfill` 不再被识别。
+//
+// 回填已挪到 `ccl serve --backfill`（web-backfill-to-serve §D4：不做别名兼容）。
+func TestSmoke_WebBackfillRemoved(t *testing.T) {
+	sandboxHome(t)
+	var err error
+	_ = captureStderr(t, func() {
+		err = runWeb([]string{"--backfill"})
+	})
+	if err == nil {
+		t.Fatal("ccl web --backfill 应报 unknown flag（回填已挪到 ccl serve --backfill）")
+	}
+	if !strings.Contains(err.Error(), "not defined") {
+		t.Errorf("错误信息应提到 flag 未定义, got %q", err.Error())
+	}
+}
+
+// TestSmoke_CompletionWebHasNoBackfill 断言 web 的补全候选里没有 --backfill。
+func TestSmoke_CompletionWebHasNoBackfill(t *testing.T) {
+	out := captureStdout(t, func() {
+		if err := run([]string{"__complete", "web", ""}); err != nil {
+			t.Errorf("run(__complete, web, '') returned error: %v", err)
+		}
+	})
+	if strings.Contains(out, "--backfill") {
+		t.Errorf("web 补全候选不应含 --backfill, got:\n%s", out)
+	}
+	for _, want := range []string{"--rotate", "--open"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("web 补全候选应含 %q, got:\n%s", want, out)
+		}
+	}
+}
+
+// TestSmoke_CompletionServeHasBackfill 断言 serve 的补全候选里有 --backfill。
+func TestSmoke_CompletionServeHasBackfill(t *testing.T) {
+	out := captureStdout(t, func() {
+		if err := run([]string{"__complete", "serve", ""}); err != nil {
+			t.Errorf("run(__complete, serve, '') returned error: %v", err)
+		}
+	})
+	if !strings.Contains(out, "--backfill") {
+		t.Errorf("serve 补全候选应含 --backfill, got:\n%s", out)
 	}
 }

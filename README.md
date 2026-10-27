@@ -380,7 +380,7 @@ Claude Code 的 OTel payload 里**没有** cwd，也没有 provider——它只�
 
 2. **jsonl 兜底（补历史 + 非 ccl 启动的会话）**：payload 里没有 `ccl.cwd` 时，daemon 用 `session.id` 反查 Claude Code 的会话记录 `~/.claude/projects/*/<session-id>.jsonl`，读其中第一条带顶层 `cwd` 字段的记录（**只取 cwd 一个字段**，prompt 内容不读、不存、不记日志）。查不到就留空——那是正常状态，不是错误。
 
-   daemon 启动时会在后台回填历史行（每次启动最多 500 行，**不阻塞**端口监听）；想一次补齐就跑 `ccl web --backfill`（不限量）。回填是**数据驱动幂等**的：只处理 `cwd = ''` 的行，跑两次结果一致，之后新建的空行仍可被后续回填补上。
+   daemon 启动时会在后台回填历史行（每次启动最多 500 行，**不阻塞**端口监听）；想一次补齐就跑 `ccl serve --backfill`（不限量）。回填是**数据驱动幂等**的：只处理 `cwd = ''` 的行，跑两次结果一致，之后新建的空行仍可被后续回填补上。
 
 **直接用 `claude`（而不是 `ccl`）启动的会话**：provider 恒为空、cwd 靠 jsonl 兜底（常常也查不到，因为 Claude Code 会清理旧会话）。这类会话在 CLI 与看板上显示为「未知」——ccl **不会**拿"当前配置的 provider"去回填历史会话，那是假数据。
 
@@ -391,9 +391,13 @@ Claude Code 的 OTel payload 里**没有** cwd，也没有 provider——它只�
 ```bash
 ccl web              # 确保 daemon 在跑，打印带 token 的看板 URL
 ccl web --rotate     # 轮换访问 token（旧 URL 与旧 session 立即失效）
-ccl web --backfill   # 触发历史 session 的 cwd 回填（不限量）
 ccl web --open       # 用系统默认浏览器打开看板
+
+ccl serve --backfill # 触发历史 session 的 cwd 回填（不限量）
 ```
+
+> 回填是 **daemon 的数据维护动作**（修 `sessions.cwd`），跟看板页面无关，所以放在
+> `ccl serve` 而不是 `ccl web`——`ccl web` 的 flag 全部是关于看板本身的。
 
 `ccl web` 会打印两个地址（本机 LAN IP + 127.0.0.1），例如：
 

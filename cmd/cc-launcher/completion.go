@@ -213,10 +213,11 @@ func completeAtTopLevel() {
 func completeAtServe(args []string) {
 	effective := trimTrailingEmpty(args)
 	serveMutex := map[string]bool{
-		"--stop":    true,
-		"--restore": true,
-		"--status":  true,
-		"--restart": true,
+		"--stop":     true,
+		"--restore":  true,
+		"--status":   true,
+		"--restart":  true,
+		"--backfill": true,
 	}
 	if serveMutex[lastToken(effective)] {
 		return

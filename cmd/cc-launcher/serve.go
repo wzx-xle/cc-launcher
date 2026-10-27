@@ -46,13 +46,17 @@ func runServe(args []string) error {
 	}
 
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
-	stopFlag, restoreFlag, statusFlag, restartFlag := registerServeFlags(fs)
+	stopFlag, restoreFlag, statusFlag, restartFlag, backfillFlag := registerServeFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		// flag.ErrHelp 已被上面的 wantsHelpOnly 截走；到这里的 error 是真解析错误。
 		return err
 	}
-	// 互斥检查：--stop / --restore / --status / --restart 任意两个同时为 true 即报错并打用法提示。
-	flags := []*bool{stopFlag, restoreFlag, statusFlag, restartFlag}
+	// 互斥检查：--stop / --restore / --status / --restart / --backfill 任意两个
+	// 同时为 true 即报错并打用法提示。
+	//
+	// --backfill 也在互斥组里（web-backfill-to-serve §D1）：它与另外四个一样是
+	// "对 daemon 数据 / 状态的维护动作"，都是一次性动作后立即返回。
+	flags := []*bool{stopFlag, restoreFlag, statusFlag, restartFlag, backfillFlag}
 	set := 0
 	for _, f := range flags {
 		if *f {
@@ -60,9 +64,9 @@ func runServe(args []string) error {
 		}
 	}
 	if set > 1 {
-		fmt.Fprintln(os.Stderr, "用法: ccl serve [--stop | --restore | --status | --restart]（互斥）")
+		fmt.Fprintln(os.Stderr, "用法: ccl serve [--stop | --restore | --status | --restart | --backfill]（互斥）")
 		fmt.Fprintln(os.Stderr, "详见 `ccl serve --help`")
-		return fmt.Errorf("--stop / --restore / --status / --restart 互斥；不可同时给")
+		return fmt.Errorf("--stop / --restore / --status / --restart / --backfill 互斥；不可同时给")
 	}
 
 	if *stopFlag {
@@ -80,6 +84,10 @@ func runServe(args []string) error {
 	if *restartFlag {
 		// restart flag: 热重启 daemon（见 restartDaemon 注释）。
 		return restartDaemon()
+	}
+	if *backfillFlag {
+		// backfill flag: 不限量的历史 cwd 回填（见 runBackfillInner 注释）。
+		return runBackfillInner()
 	}
 
 	// §2.5：未命中 --stop / --restore / --status / --restart → 走原 daemon 启动流程。
@@ -204,11 +212,12 @@ func runServe(args []string) error {
 // 为什么必须抽 helper：cli-shell-completion §D2 要求"flag 改动自动同步"——
 // 加新 flag 时（仅改 registerServeFlags）completion 自动跟随；若不抽，
 // `runServe` 加 flag 而 `completeAtServe` 漏改 → runtime 接受 / completion 提示脱节。
-func registerServeFlags(fs *flag.FlagSet) (stop, restore, status, restart *bool) {
+func registerServeFlags(fs *flag.FlagSet) (stop, restore, status, restart, backfill *bool) {
 	stop = fs.Bool("stop", false, "停 OTel daemon（等价于原 ccl stop）")
 	restore = fs.Bool("restore", false, "还原 ~/.claude/settings.json 到 ccl 之前的状态")
 	status = fs.Bool("status", false, "打印 daemon 状态摘要（pid / 端口可达 / db 文件大小 / session 数）")
 	restart = fs.Bool("restart", false, "热重启 daemon（SIGTERM 旧 daemon + fork 新 binary daemon）")
+	backfill = fs.Bool("backfill", false, "回填历史 session 的 cwd（不限量；查不到的保持未知项目）")
 	return
 }
 
@@ -299,7 +308,38 @@ func restartDaemon() error {
 	return nil
 }
 
-const serveHelp = `用法: ccl serve [--stop | --restore | --status | --restart]
+// runBackfillInner 是 `ccl serve --backfill` 的实现。
+//
+// 行为（web-backfill-to-serve §D1 / spec/daemon-lifecycle §"ccl serve
+// --backfill runs the historical cwd backfill"）：
+//   - **不限量**回填（daemon 启动时的自动回填每次最多 500 行）
+//   - 幂等：只处理 cwd = ” 的行，不改 schema
+//   - 打印 resolved / failed 计数；查不到的行是正常状态（不是错误）
+//
+// 独立进程直接操作 db 文件（WAL 模式下与 daemon 的写入并发安全）。
+func runBackfillInner() error {
+	stateBaseDir, err := stateDirOrError()
+	if err != nil {
+		return err
+	}
+	dbPath := filepath.Join(stateBaseDir, "telemetry.db")
+
+	resolver, err := newCwdResolver()
+	if err != nil {
+		return fmt.Errorf("定位 Claude Code 会话目录失败: %w", err)
+	}
+	resolved, failed, err := collector.BackfillCwdInFile(dbPath, resolver, 0)
+	if err != nil {
+		return fmt.Errorf("cwd 回填失败: %w", err)
+	}
+	fmt.Printf("cwd 回填完成: resolved=%d failed=%d\n", resolved, failed)
+	if failed > 0 {
+		fmt.Println("  failed 的行是查不到会话记录的历史会话（Claude Code 已清理），保持「未知项目」。")
+	}
+	return nil
+}
+
+const serveHelp = `用法: ccl serve [--stop | --restore | --status | --restart | --backfill]
 
 ccl 的 OTel daemon lifecycle and ccl settings restore 入口。
 
@@ -336,6 +376,15 @@ ccl 的 OTel daemon lifecycle and ccl settings restore 入口。
   Claude Code session 不受影响（OTel SDK 自动重连）。
   无旧 daemon 时等同于 fork 新 daemon。
   与 --stop / --restore / --status 互斥。
+
+--backfill
+  回填历史 session 的 cwd：把 sessions 表里 cwd 为空的行，用 Claude Code 的
+  会话记录（~/.claude/projects/*/<session-id>.jsonl 里的顶层 cwd 字段）补上。
+  与 daemon 启动时的自动回填不同，这里的回填**不限量**（自动回填每次启动
+  最多 500 行）。
+  幂等：只处理 cwd 为空的行，跑两次结果一致；查不到的行（Claude Code 已清理
+  的旧会话）保持「未知项目」，不是错误。
+  与 --stop / --restore / --status / --restart 互斥。
 
 -h, --help
   显示本帮助并退出。`
