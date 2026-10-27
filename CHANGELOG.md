@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-10-27 — web-usage-stats-ui
+
+### Features
+- **用量看板：浏览器里看 token / cost（`ccl web`）**。看板挂在 daemon **已监听的 :4318** 上（`/ui` + `/ui/<asset>` + `/api/stats`），**不新开端口、不新增进程**——页面随 daemon 生死，`ccl web` 负责把 daemon 拉起来。页面内容：KPI 卡片（各类 token / 总 cost / 会话数）、按时间桶的 token 堆叠柱 + cost 折线（**两个独立面板、两个独立 y 轴**，不做双轴图）、按项目 / 提供商 / 模型的 token 与 cost 占比、会话明细表（列与终端表一一对应）；支持窗口切换（24h / 7d / 30d / 90d）、三个维度的筛选、手动刷新、30s 自动刷新（可关）。前端资源用 `go:embed` 内嵌进二进制：**零新依赖**（无前端框架、无 CDN 图表库，图表是手写 inline SVG），离线可用。配色取自 dataviz 参考调色板并跑过 `validate_palette.js`（浅色 4 槽全项通过，aqua/yellow 对浅色底对比度 < 3:1 → 按 relief 规则配了「表格视图」切换与条形末端直接标数值）；浅色 / 深色两套**各自选定**（不是自动反色），系统偏好与页面内主题按钮都支持
+- **`ccl web` 子命令**：打印带 token 的看板 URL（本机 LAN IP + 127.0.0.1 两个，daemon 没跑会先 fork 并等就绪，daemon 起不来也照样打印 URL 并报告失败）；`--rotate` 轮换 token（旧 URL 与旧 session 立即失效）；`--backfill` 触发**不限量**的历史 cwd 回填；`--open` 用系统默认浏览器打开（`xdg-open` / `open` / `cmd start` 分平台）
+- **看板鉴权**：token 是 32 字节随机 hex（64 字符），存 `~/.cc-launcher/web-token`（权限 `0600`，原子写 tmp+rename，首次启动生成、已存在则原样保留）。访问 `/ui?token=<tok>` → 常量时间比对 → 种 HttpOnly + SameSite=Lax 的 session cookie → **302 重定向到不带 token 的 `/ui`**（token 不留在地址栏 / 浏览器历史 / Referer 里）。cookie 值是 `<签发时间>.<hex(HMAC-SHA256(key=token))>`，**不含 token 明文**，7 天有效；因为签名 key 就是 token，**轮换 token 即吊销全部旧 cookie**（daemon 每次请求重读 token 文件 → 轮换无需重启 daemon）
+- **`ccl stats` 新增 model 维度**：`--by-model`（按模型聚合）、`--model <子串>`（按模型过滤）、`--provider <子串>`（按提供商过滤）。三个过滤都在 **SQL 层**（`AND s.model LIKE ?` / `AND s.provider LIKE ?`），保证 totals == Σ rows（事后过滤聚合行做不到这点）。`--provider` / `--model` / `--project` 可任意组合
+- **provider / 项目维度从"恒空"变成"有真值"**（本次最底层的变化）。Claude Code 的 OTel payload 里**没有** cwd 也没有 provider，所以 ccl 走两条路补：
+  - **launch 上下文（主路径）**：`ccl` 启动 Claude Code 时把当次的 provider 名 / 工作目录 / provider 端点 host 写进**子进程环境**的 `OTEL_RESOURCE_ATTRIBUTES`（`ccl.provider` / `ccl.cwd` / `ccl.provider_endpoint`），Claude Code 的 OTel SDK 随 metrics 推送为 **resource attributes**，daemon 直接取。这是**逐次 launch 的真值**——provider 是"这次启动用的哪个 provider"的快照，不是"当前配置的 provider"。**刻意不写 `~/.claude/settings.json`**：那里的 `env` 会被所有 `claude` 进程继承，直接 `claude` 启动的会话会继承"上一次 ccl 的 cwd"，反而造出假数据
+  - **jsonl 兜底**：payload 无 `ccl.cwd` 时（直接 `claude` 启动的会话、上下文机制出现之前的历史行），用 `session.id` 反查 `~/.claude/projects/*/<session-id>.jsonl`，**只取第一条带顶层 `cwd` 的记录**（prompt 内容不读、不存、不进日志），取到即停。查不到 → 留空（正常状态，不是错误）
+  - **历史回填**：daemon 启动时后台回填 `cwd = ''` 的行（每次启动最多 500 行，**不阻塞**端口监听），`ccl web --backfill` 可显式不限量补齐。回填是**数据驱动幂等**的（只处理空行，不用 `PRAGMA user_version` 一次性标记），跑两次结果一致，之后新建的空行仍可被后续回填补上
+
+### Fixes
+- **`ccl stats --by-provider --by-project`（组合）此前必然失败**：`buildSessionStatsSQL` 的 `groupExpr` 在多维分组时展开成**逗号分隔的两列**，`SELECT %s AS session_id` 因此多出一列，与 `rows.Scan` 的 11 个目标列对不上 → 扫描报错。改为**单列表达式**（`cwd × provider` 拼接）+ `GROUP BY s.cwd, s.provider`，组合分组现在真的能出多行
+- **`ccl stats --help` / `ccl web --help` 此前会以 exit 1 收场并打印 Go flag 的 usage 列表**：`flag.ErrHelp` 被当成普通错误 return 出去了（`ccl stats --help` 一直如此）。现在自己接管 help：打印本命令的用法说明并 exit 0；flag package 的 usage 噪音改为丢弃（真解析错误仍原样返回）
+- **`sessions` 表新增 `provider_endpoint` 列**走**显式幂等迁移**：`PRAGMA user_version` 1 → 2，`ALTER TABLE ADD COLUMN`（先查列是否存在，存在则跳过）——只加列，不动其它列、不删行、不丢数据
+- **session 行的 `provider` / `cwd` / `provider_endpoint` 改成"空值不覆盖非空"**（`CASE WHEN excluded.<col> <> '' THEN excluded.<col> ELSE sessions.<col> END`）：后续不带 `ccl.*` 的 export 不会再把已知维度抹掉；后到的非空值能补上先前的空字段
+- **`providerName()` 的兜底先看 label `ccl.provider`**：resource attrs 已自动合进 metric 的 labels，历史数据（provider 还没写进 sessions 表时）也能显示 provider 名
+
+### Tests
+- 新增 `internal/launchctx`（percent-encode / 合并 / 端点 host 提取）+ 单测：空格 / 逗号 / 中文 / 超长四种路径，断言输出只含 unreserved 字符与合法 `%XX`、超长属性被省略、decode 后与原值逐字节一致、用户已有属性值保留且 ccl 同名 key 以 ccl 为准
+- 新增 `internal/sessiondir`（session id → cwd 反查）+ 单测：命中 cwd / 文件缺失 / 无 cwd 字段 / 损坏文件 / 路径穿越拒绝 / **断言 prompt 内容不进结果**；实现用 `json.Decoder` 的 token 流逐个跳过非 cwd 的值，不把整条记录反序列化进 map
+- 新增 `internal/web`（token / session cookie / API）+ 单测：token 文件首次生成（64 位 hex + 0600 权限）、已存在则原样保留、错 token → 401 且不种 cookie、正确 token → 302 + `Location` 不含 token、cookie 可访问 API、**轮换后旧 cookie 失效**、未知 window / group → 400、provider 过滤生效、`group=provider` 生效、**响应里不出现 labels 的值**（主机指纹 / arch / os 版本）
+- 新增 collector 单测：带 `ccl.*` 的 payload → session 行三字段落库；不带 `ccl.*` → 三字段为空且**不报错**；空值不覆盖非空；后到的非空值补上空字段；老库启动后新列存在、旧行不丢、重复启动不重复加列；resolver 解析成功才写 cwd、解析失败不影响写行、payload 带 `ccl.cwd` 时 resolver 结果不生效；回填只补空行、幂等、不改 schema
+- 新增 stats 单测：按 model 分组 / 按 model 过滤 / 过滤后 totals == 行和 / `--by-model` 与 `--model` 可组合 / 按 provider 过滤 / `--provider` 与 `--project` 可组合 / **`--by-provider --by-project` 组合可用**
+- 新增 cmd 层单测：注入 launch 上下文后 **settings.json 的 `env` 里不含 `ccl.*` 也不含 ccl 追加的 `OTEL_RESOURCE_ATTRIBUTES`**（用户的 key 原样保留）；settings.json 已设 `OTEL_RESOURCE_ATTRIBUTES` 时不注入并降级
+- 新增 smoke 测试：`ccl --help` 列出 `web`、`ccl web --help` 打印三个 flag、`ccl __complete ""` 含 `web`、`ccl __complete web ""` 输出 web 的 flag、`ccl __complete stats --` 含 `--provider`
+- **前端资源守卫**：`internal/web` 加两条测试——三个资源必须内嵌且非空；`app.js` 用 `node --check` 过语法检查（环境无 node 时跳过）。意义：看板完全由 JS 驱动，`app.js` 一旦有语法错误，页面会**静默空白**（HTML 正常返回、JS 不执行），没有任何 Go 单测能发现这类故障——本次就是靠这个守卫抓到了首个版本的语法错误
+- 真机端到端：注入上下文的真实 Claude Code 会话 → daemon 收到带 `ccl.provider` / `ccl.cwd` / `ccl.provider_endpoint` 的 payload → `telemetry.db` 里该 session 三个字段都是真值（percent-encode 正确解码回明文）
+- 浏览器实测（Playwright）：桌面 / 380px 窄屏均渲染正常，**窄屏页面不产生横向滚动**（宽表在自己的容器里滚）、浅色 / 深色主题均可读、30s 自动刷新实测生效（40s 内发出 2 次请求）、快速连切窗口时**迟到的旧响应不会覆盖当前视图**（AbortController）、`24h` 窗口给 24 个 hourly 桶、`--day` 语义的 daily 桶一致
+
+### OpenSpec
+- archive `web-usage-stats-ui` (2026-10-27)
+
+### Compatibility
+- **`ccl stats` 的 `PROJECT` / `PROVIDER` 列从"恒空"变为"有值"**（修复，非破坏）。变化来源：新会话来自 launch 上下文，旧会话来自 jsonl 兜底回填。**实测本机 48 条 session 里 31 条回填出了真实 cwd**（其余是 Claude Code 已清理的旧会话，按"未知项目"处理）。依赖旧输出（空 PROJECT 列）做对照的脚本需重算
+- **`ccl stats` 新增三个 flag**（`--by-model` / `--model` / `--provider`）；既有 flag 的语义与输出格式不变
+- **`ccl stats`（不带 `--day`）的 JSON 形状不变**：`ByModel` / `Model` / `Provider` 只进查询层，不进 JSON 输出
+- **db schema 变更**：`sessions` 表新增 `provider_endpoint TEXT NOT NULL DEFAULT ''`（`PRAGMA user_version` 1 → 2，幂等 `ALTER TABLE ADD COLUMN`）。旧 binary 读新库会忽略该列，新 binary 读旧库会自动补列——**不丢数据、不动其它列**
+- **新增文件 `~/.cc-launcher/web-token`**（权限 `0600`）：旧 binary 不认识它，留着无害
+- **新增顶层子命令 `ccl web`** + 顶层 `--help` 的子命令列表多一行；`ccl __complete` 的顶层候选多 `web`
+- **`ccl stats --help` / `ccl web --help` 现在 exit 0 并打印本命令的用法说明**（此前打印 Go flag 的 usage 列表并 exit 1）
+- ⚠️ **已知风险（既存，非本次引入）**：同一个 `:4318` 上的 **OTel ingest 端点（`/v1/metrics`）仍无鉴权**——daemon 绑 `0.0.0.0`，同局域网的任何设备都能往里灌伪造 metrics。本次只给 UI 路由加了 token 保护，ingest 端点保持原样
+- ⚠️ **provider 是"启动时的快照"**：provider 文件改名后，历史 session 仍显示旧名（标签语义，不是 bug）；**直接 `claude` 启动的会话 provider 恒空、显示「未知」**——ccl 不会拿"当前配置的 provider"去回填历史会话
+
 ## [0.14.1] - 2026-10-21 — windows-release-tooling
 
 ### Features
