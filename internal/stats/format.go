@@ -14,6 +14,7 @@ import (
 //   - "session"     → STARTED | PROJECT | PROVIDER | MODEL | IN | OUT | CACHE_CRE | CACHE_READ | COST
 //   - "project"     → PROJECT | IN | OUT | CACHE_CRE | CACHE_READ | COST
 //   - "provider"    → PROVIDER | IN | OUT | CACHE_CRE | CACHE_READ | COST
+//   - "model"       → MODEL | IN | OUT | CACHE_CRE | CACHE_READ | COST
 //   - "project+provider" → PROJECT | PROVIDER | IN | OUT | CACHE_CRE | CACHE_READ | COST
 //
 // 末尾追加总计行（TOTAL）。
@@ -22,6 +23,18 @@ func FormatTable(w io.Writer, r *Result) {
 	defer tw.Flush()
 
 	switch r.GroupBy {
+	case "model":
+		writeTable(tw, []string{"MODEL", "IN", "OUT", "CACHE_CRE", "CACHE_READ", "COST_USD"},
+			func(s SessionStats) []string {
+				return []string{
+					s.Model,
+					fmt.Sprintf("%d", s.InputTokens),
+					fmt.Sprintf("%d", s.OutputTokens),
+					fmt.Sprintf("%d", s.CacheCreate),
+					fmt.Sprintf("%d", s.CacheRead),
+					fmt.Sprintf("%.4f", s.CostUSD),
+				}
+			}, r.Sessions, r.Totals)
 	case "project":
 		writeTable(tw, []string{"PROJECT", "IN", "OUT", "CACHE_CRE", "CACHE_READ", "COST_USD"},
 			func(s SessionStats) []string {

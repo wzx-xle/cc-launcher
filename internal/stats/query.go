@@ -39,7 +39,10 @@ type Query struct {
 	Buckets    *int    // nil = 不启用桶聚合;非 nil = 启用,N ∈ [1,90]
 	ByProvider bool    // 按 provider 聚合
 	ByProject  bool    // 按 project 聚合
+	ByModel    bool    // 按 model 聚合（web-usage-stats-ui §D8）
 	Project    string  // 模糊匹配 session.cwd 子串
+	Model      string  // 模糊匹配 session.model 子串（SQL 层过滤）
+	Provider   string  // 模糊匹配 session.provider 子串（SQL 层过滤）
 	Clock      func() time.Time // nil = time.Now;非 nil = 注入 clock(测试 / 跨包 deterministic)
 }
 
@@ -154,9 +157,11 @@ func QueryStats(dbPath string, q Query) (*Result, error) {
 		groupBy = "project"
 	case q.ByProvider:
 		groupBy = "provider"
+	case q.ByModel:
+		groupBy = "model"
 	}
 
-	sqlStr, args := buildSessionStatsSQL(groupBy, q.Project, since)
+	sqlStr, args := buildSessionStatsSQL(groupBy, q, since)
 
 	rows, err := db.Query(sqlStr, args...)
 	if err != nil {
@@ -242,10 +247,12 @@ func QueryStats(dbPath string, q Query) (*Result, error) {
 //
 // SQLite 用 CAST(... AS INTEGER) 把 token SUM 转 int64；cost 保留 REAL。
 //
-// 注意：Claude Code 不在 OTel payload 里推 provider / cwd；sessions 表这两列恒为空。
-// 因此 --by-provider 实际退化为按 sessions 表的 provider 列（恒空）；功能仅对未来扩展有效。
-// 真实场景下用 --by-project 等替代。
-func buildSessionStatsSQL(groupBy, projectFilter string, since time.Time) (string, []any) {
+// 过滤全部在 **SQL 层**（web-usage-stats-ui §D8）：project / model / provider
+// 三个子串过滤都进 WHERE，保证 totals == Σ rows（事后过滤聚合行做不到这点）。
+//
+// provider / cwd 列来自 ccl 启动时写进 OTEL_RESOURCE_ATTRIBUTES 的 launch 上下文
+// （internal/launchctx）；没走 ccl 启动的会话这两列为空。
+func buildSessionStatsSQL(groupBy string, q Query, since time.Time) (string, []any) {
 	var groupExpr, groupClause string
 	args := []any{since.UnixMilli()}
 
@@ -256,8 +263,13 @@ func buildSessionStatsSQL(groupBy, projectFilter string, since time.Time) (strin
 	case "provider":
 		groupExpr = "COALESCE(s.provider, '')"
 		groupClause = "GROUP BY s.provider"
+	case "model":
+		groupExpr = "COALESCE(s.model, '')"
+		groupClause = "GROUP BY s.model"
 	case "project+provider":
-		groupExpr = "s.cwd, COALESCE(s.provider, '')"
+		// 单列表达式（不能是逗号分隔的两列——那会让 SELECT 多出一列，
+		// 与 Scan 的列数对不上）。
+		groupExpr = "COALESCE(s.cwd, '') || ' × ' || COALESCE(s.provider, '')"
 		groupClause = "GROUP BY s.cwd, s.provider"
 	default: // "session"
 		groupExpr = "s.id"
@@ -269,9 +281,17 @@ func buildSessionStatsSQL(groupBy, projectFilter string, since time.Time) (strin
 	// （LEFT JOIN 退化为 INNER JOIN 语义）。session 元信息（MIN(s.started_at) /
 	// model / cwd）不变——STARTED 列仍显示真实 session 起始（可能早于窗口）。
 	where := "WHERE m.captured_at >= ?"
-	if projectFilter != "" {
+	if q.Project != "" {
 		where += " AND s.cwd LIKE ?"
-		args = append(args, "%"+strings.ReplaceAll(projectFilter, "%", `\%`)+"%")
+		args = append(args, likeArg(q.Project))
+	}
+	if q.Model != "" {
+		where += " AND s.model LIKE ?"
+		args = append(args, likeArg(q.Model))
+	}
+	if q.Provider != "" {
+		where += " AND s.provider LIKE ?"
+		args = append(args, likeArg(q.Provider))
 	}
 
 	sql := fmt.Sprintf(`
@@ -320,6 +340,12 @@ func projectName(cwd string) string {
 }
 
 // providerName 优先 sessions.provider；为空则从最近一帧 metric labels 推断。
+//
+// labels 里的兜底 key 是 `ccl.provider`——ccl 启动时写进
+// OTEL_RESOURCE_ATTRIBUTES 的 launch 上下文会作为 resource attributes 随
+// payload 送回，而 resource attrs 会自动合进 metric 的 labels。
+// 注意这是**历史数据的兜底**：新写入的 session 行里 provider 列已有真值，
+// sessions.provider 优先。
 func providerName(sessProvider, labelsJSON string) string {
 	if sessProvider != "" {
 		return sessProvider
@@ -328,7 +354,17 @@ func providerName(sessProvider, labelsJSON string) string {
 	if err := json.Unmarshal([]byte(labelsJSON), &labels); err != nil {
 		return ""
 	}
+	if v := labels["ccl.provider"]; v != "" {
+		return v
+	}
 	return labels["provider"]
+}
+
+// likeArg 把子串过滤值转成 LIKE 的 pattern 参数。
+//
+// 转义 "%" —— 否则用户传 "%" 就变成通配符，与"子串匹配"的语义不符。
+func likeArg(substr string) string {
+	return "%" + strings.ReplaceAll(substr, "%", `\%`) + "%"
 }
 
 // sumSessions 把所有 SessionStats 按字段求和。

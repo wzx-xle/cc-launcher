@@ -8,7 +8,7 @@ TBD - created by archiving change cli-shell-completion. Update Purpose after arc
 
 #### Scenario: completing the top-level subcommand
 - **WHEN** user invokes `ccl __complete ""` (empty trailing argument = position under completion)
-- **THEN** stdout shows the top-level subcommands (`serve / stats / provider / mode`) plus the help flags (`-h / --help / help`), one per line
+- **THEN** stdout shows the top-level subcommands (`serve / stats / web / provider / mode`) plus the help flags (`-h / --help / help`), one per line
 
 #### Scenario: completing ccl serve flags
 - **WHEN** user invokes `ccl __complete serve ""` (completing inside `ccl serve`)
@@ -24,13 +24,13 @@ TBD - created by archiving change cli-shell-completion. Update Purpose after arc
 
 #### Scenario: completing ccl stats flags
 - **WHEN** user invokes `ccl __complete stats ""`
-- **THEN** stdout shows the stats flags (`--since / --by-provider / --by-project / --project / --json / -h / --help`), one per line
+- **THEN** stdout shows the stats flags (`--day / --by-provider / --by-project / --by-model / --project / --model / --json / -h / --help`), one per line
 
 #### Scenario: position arguments for ccl provider <name> are NOT completed by ccl
 - **WHEN** user invokes `ccl __complete provider ""` (completing the position after `ccl provider`)
 - **THEN** stdout is empty (no candidates); the user's shell will fall back to filename completion for `~/.cc-launcher/providers/`
 
-#### Scenario: position after ccl provider --delete is NOT completed
+#### Scenario: position arguments for ccl provider --delete are NOT completed by ccl
 - **WHEN** user invokes `ccl __complete provider --delete ""` (completing the provider name to delete)
 - **THEN** stdout is empty (provider name is user's file; shell filename fallback applies)
 
@@ -62,7 +62,7 @@ TBD - created by archiving change cli-shell-completion. Update Purpose after arc
 
 #### Scenario: top-level help does not list internal subcommands
 - **WHEN** user runs `ccl --help`
-- **THEN** the subcommand list shows `serve / stats / provider / mode` only; `__complete` / `__init` are absent
+- **THEN** the subcommand list shows `serve / stats / web / provider / mode` only; `__complete` / `__init` are absent
 
 ### Requirement: completion stays in sync with runtime flag set
 When `ccl serve` / `ccl stats` / `ccl provider` adds, removes, or renames a flag, the next `ccl __complete ccl <subcmd> ""` call MUST reflect the change WITHOUT regenerating any external script. This is automatic because completion uses `flag.NewFlagSet` reflection at runtime.
@@ -88,4 +88,15 @@ The user MUST run `source <(ccl __init bash)` (or zsh equivalent) explicitly to 
 #### Scenario: topHelp mentions the enable command
 - **WHEN** user runs `ccl --help`
 - **THEN** the help output mentions `source <(ccl __init bash)` (or zsh) under a "Tab completion" paragraph
+
+### Requirement: completion covers the ccl web flags
+`ccl __complete web ""` MUST print the flags of the `ccl web` subcommand (`--rotate / --backfill / --open / -h / --help`), one per line, and MUST exit 0.
+
+#### Scenario: completing ccl web flags
+- **WHEN** user invokes `ccl __complete web ""`
+- **THEN** stdout shows `ccl web`'s flags (`--rotate / --backfill / --open / -h / --help`), one per line
+
+#### Scenario: the web flag list stays in sync with the runtime flag set
+- **WHEN** developer adds a new flag to the `ccl web` flag set via `fs.Bool(...)` / `fs.String(...)`
+- **THEN** `ccl __complete web ""` automatically includes it on the next invocation, with no separate completion configuration to update
 

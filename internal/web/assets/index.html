@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:,">
+<title>ccl 用量看板</title>
+<link rel="stylesheet" href="/ui/style.css?v=__ASSET_VERSION__">
+</head>
+<body>
+<div class="wrap">
+
+  <header class="topbar">
+    <h1>ccl 用量看板</h1>
+    <span class="sub" id="generated-at"></span>
+    <span style="flex:1"></span>
+    <button class="btn ghost" id="theme-toggle" title="切换浅色 / 深色">◐ 主题</button>
+  </header>
+
+  <!-- 筛选行：单行，位于所有内容之上，统一作用于下方全部图表与表格 -->
+  <section class="filters" aria-label="筛选">
+    <div class="presets" role="group" aria-label="时间窗口">
+      <button type="button" class="preset" data-window="24h" aria-pressed="false">24 小时</button>
+      <button type="button" class="preset" data-window="7d" aria-pressed="true">7 天</button>
+      <button type="button" class="preset" data-window="30d" aria-pressed="false">30 天</button>
+      <button type="button" class="preset" data-window="90d" aria-pressed="false">90 天</button>
+    </div>
+    <label>项目<input type="text" id="f-project" placeholder="路径子串" autocomplete="off"></label>
+    <label>提供商<input type="text" id="f-provider" placeholder="名称子串" autocomplete="off"></label>
+    <label>模型<input type="text" id="f-model" placeholder="名称子串" autocomplete="off"></label>
+    <button type="button" class="btn" id="refresh">刷新</button>
+    <label><input type="checkbox" id="auto" checked> 自动刷新 30s</label>
+  </section>
+
+  <main id="content">
+
+    <section class="kpis" id="kpis" aria-label="总览"></section>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>用量趋势</h2>
+        <button type="button" class="btn ghost" id="trend-toggle" aria-pressed="false">表格视图</button>
+      </div>
+      <div class="legend" id="legend"></div>
+      <div class="chart" id="trend"></div>
+      <div class="table-wrap" id="trend-table" hidden></div>
+    </section>
+
+    <section class="grid3">
+      <div class="card">
+        <h2>按项目占比</h2>
+        <div class="chart" id="share-project"></div>
+      </div>
+      <div class="card">
+        <h2>按提供商占比</h2>
+        <div class="chart" id="share-provider"></div>
+      </div>
+      <div class="card">
+        <h2>按模型占比</h2>
+        <div class="chart" id="share-model"></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>会话明细</h2>
+      <div class="table-wrap" id="sessions"></div>
+    </section>
+
+  </main>
+</div>
+
+<div class="tooltip" id="tooltip" hidden></div>
+<script src="/ui/app.js?v=__ASSET_VERSION__"></script>
+</body>
+</html>

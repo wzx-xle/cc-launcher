@@ -5,12 +5,14 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"cc-launcher/internal/config"
 	"cc-launcher/internal/stats"
+	"cc-launcher/internal/web"
 )
 
 // statsHelp 是 `ccl stats --help` 的输出。
@@ -24,9 +26,27 @@ const statsHelp = `用法: ccl stats [选项]
     --day <N>              时间桶聚合:1 表示今天 24 小时 hourly,N(1-90) 表示最近 N 天 daily
     --by-provider          按 provider 聚合（一个 provider 一行）
     --by-project           按 project 聚合（cwd basename 一行）
+    --by-model             按 model 聚合（一个 model 一行）
     --project <子串>       按 cwd 子串过滤（如 cc-launcher）
+    --model <子串>         按 model 子串过滤（如 MiniMax）
+    --provider <子串>      按 provider 子串过滤（如 minimax）
     --json                 输出 JSON（pipeable to jq）
     -h, --help             显示本帮助并退出`
+
+// statsFlags 是 stats 子命令的 flag 集合。
+//
+// 抽成 struct 而非一串指针返回值：flag 数量在增长（web-usage-stats-ui 加了
+// --by-model / --model / --provider），一串裸返回值容易接错位置。
+type statsFlags struct {
+	day        *int
+	byProvider *bool
+	byProject  *bool
+	byModel    *bool
+	project    *string
+	model      *string
+	provider   *string
+	asJSON     *bool
+}
 
 // registerStatsFlags 把 stats 子命令的 flag 注册到 fs，返回值供 runStats 与
 // cmd/cc-launcher/completion.go::completeAtStats 共用。
@@ -41,13 +61,17 @@ const statsHelp = `用法: ccl stats [选项]
 //
 // default 是 0 还是 -1 的取舍:Go flag Int 无法区分"未传"与"显式 0"。
 // 但 --day 0 是非法值（必须 ≥1），0 即非法,默认 -1 同时承担"未传"+"非法"标识。
-func registerStatsFlags(fs *flag.FlagSet) (day *int, byProvider, byProject, asJSON *bool, project *string) {
-	day = fs.Int("day", -1, "时间桶聚合:1 表示今天 24 小时 hourly,N(1-90) 表示最近 N 天 daily（缺省 -1 = 旧 detail 行为）")
-	byProvider = fs.Bool("by-provider", false, "按 provider 聚合")
-	byProject = fs.Bool("by-project", false, "按 project 聚合")
-	project = fs.String("project", "", "按 cwd 子串过滤")
-	asJSON = fs.Bool("json", false, "输出 JSON")
-	return
+func registerStatsFlags(fs *flag.FlagSet) statsFlags {
+	var f statsFlags
+	f.day = fs.Int("day", -1, "时间桶聚合:1 表示今天 24 小时 hourly,N(1-90) 表示最近 N 天 daily（缺省 -1 = 旧 detail 行为）")
+	f.byProvider = fs.Bool("by-provider", false, "按 provider 聚合")
+	f.byProject = fs.Bool("by-project", false, "按 project 聚合")
+	f.byModel = fs.Bool("by-model", false, "按 model 聚合")
+	f.project = fs.String("project", "", "按 cwd 子串过滤")
+	f.model = fs.String("model", "", "按 model 子串过滤")
+	f.provider = fs.String("provider", "", "按 provider 子串过滤")
+	f.asJSON = fs.Bool("json", false, "输出 JSON")
+	return f
 }
 
 // statsExitFn 是 ccl stats 的退出钩子。
@@ -62,22 +86,23 @@ var statsExitFn = func(code int) { os.Exit(code) }
 //   - --day 校验：<1 或 >90 → stderr + statsExitFn(2)（Go flag parse error 约定）
 //   - q.Buckets：day != 0 ? &day : nil（QueryStats 内部据此启用桶聚合）
 //   - 输出分支 4 种：
-//       (1) JSON 输出 result（BucketRows/BucketTotals 由 QueryStats 自动填,omitempty）
-//       (2) --day 未启用 + 明细非空：旧 detail 表（向后兼容）
-//       (3) --day 未启用 + 明细空：(no data in window since ...)
-//       (4) --day 启用 + 明细非空：detail 表 + 空行 + 桶聚合表
-//       (5) --day 启用 + 明细空：(no data in window ...) + 桶聚合表（无空行,跟 hint 紧凑）
+//     (1) JSON 输出 result（BucketRows/BucketTotals 由 QueryStats 自动填,omitempty）
+//     (2) --day 未启用 + 明细非空：旧 detail 表（向后兼容）
+//     (3) --day 未启用 + 明细空：(no data in window since ...)
+//     (4) --day 启用 + 明细非空：detail 表 + 空行 + 桶聚合表
+//     (5) --day 启用 + 明细空：(no data in window ...) + 桶聚合表（无空行,跟 hint 紧凑）
+//
 // runStats 是 `ccl stats` 入口。
 //
 // 决策（stats-time-buckets §2.2）：
 //   - --day 校验：<1 或 >90 → stderr + statsExitFn(2)（Go flag parse error 约定）
 //   - q.Buckets：day != 0 ? &day : nil（QueryStats 内部据此启用桶聚合）
 //   - 输出分支 4 种：
-//       (1) JSON 输出 result（BucketRows/BucketTotals 由 QueryStats 自动填,omitempty）
-//       (2) --day 未启用 + 明细非空：旧 detail 表（向后兼容）
-//       (3) --day 未启用 + 明细空：(no data in window since ...)
-//       (4) --day 启用 + 明细非空：detail 表 + 空行 + 桶聚合表
-//       (5) --day 启用 + 明细空：(no data in window ...) + 桶聚合表（无空行,跟 hint 紧凑）
+//     (1) JSON 输出 result（BucketRows/BucketTotals 由 QueryStats 自动填,omitempty）
+//     (2) --day 未启用 + 明细非空：旧 detail 表（向后兼容）
+//     (3) --day 未启用 + 明细空：(no data in window since ...)
+//     (4) --day 启用 + 明细非空：detail 表 + 空行 + 桶聚合表
+//     (5) --day 启用 + 明细空：(no data in window ...) + 桶聚合表（无空行,跟 hint 紧凑）
 //
 // 真实生产调用走 runStats（无 clock 注入,fallback time.Now）；
 // smoke test 走 runStatsWithQuery(stats.Query{Clock: ...}, args) 注入 mock clock,
@@ -94,32 +119,37 @@ func runStats(args []string) error {
 // 只关心 Clock 注入,不污染 CLI flag 行为。
 func runStatsWithQuery(base stats.Query, args []string) error {
 	fs := flag.NewFlagSet("stats", flag.ContinueOnError)
-	day, byProvider, byProject, asJSON, project := registerStatsFlags(fs)
+	// 自己处理 help 与错误文案：flag package 默认会把 "Usage of stats:" 打到
+	// stderr 并返回 flag.ErrHelp —— 那样 `ccl stats --help` 会以 exit 1 收场，
+	// 且用户看到的是 flag 列表而不是本命令的用法说明。
+	fs.SetOutput(io.Discard)
+	fl := registerStatsFlags(fs)
 	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	for _, a := range fs.Args() {
-		if a == "-h" || a == "--help" {
+		if errors.Is(err, flag.ErrHelp) {
 			fmt.Println(statsHelp)
 			return nil
 		}
+		return err
 	}
 
 	// --day 越界校验（决策 §2.2）。用 stderr + statsExitFn(2) 走 Go flag parse error 约定;
 	// 不通过 fmt.Errorf 返回(那会走 main 的"错误: ..."包装,跟 Go flag 标准不一致)。
-	if *day != -1 && (*day < 1 || *day > 90) {
-		fmt.Fprintf(os.Stderr, "--day 必须在 1 到 90 之间, got: %d\n", *day)
+	if *fl.day != -1 && (*fl.day < 1 || *fl.day > 90) {
+		fmt.Fprintf(os.Stderr, "--day 必须在 1 到 90 之间, got: %d\n", *fl.day)
 		statsExitFn(2)
 	}
 
 	q := stats.Query{
-		ByProvider: *byProvider,
-		ByProject:  *byProject,
-		Project:    *project,
+		ByProvider: *fl.byProvider,
+		ByProject:  *fl.byProject,
+		ByModel:    *fl.byModel,
+		Project:    *fl.project,
+		Model:      *fl.model,
+		Provider:   *fl.provider,
 		Clock:      base.Clock, // 仅 Clock 来自 base 注入,其它字段以 CLI flag 为准
 	}
-	if *day > 0 {
-		d := *day
+	if *fl.day > 0 {
+		d := *fl.day
 		q.Buckets = &d
 	}
 
@@ -135,7 +165,7 @@ func runStatsWithQuery(base stats.Query, args []string) error {
 		return err
 	}
 
-	if *asJSON {
+	if *fl.asJSON {
 		out, err := json.MarshalIndent(result, "", "  ")
 		if err != nil {
 			return err
@@ -144,7 +174,7 @@ func runStatsWithQuery(base stats.Query, args []string) error {
 		return nil
 	}
 
-	if *day == -1 {
+	if *fl.day == -1 {
 		// 旧 ccl stats 行为:detail 明细,不回溯桶聚合
 		if len(result.Sessions) == 0 {
 			fmt.Printf("(no data in window since %s)\n", result.Since.Format("2006-01-02"))
@@ -176,6 +206,8 @@ func groupByLabel(g string) string {
 		return "project (cwd basename)"
 	case "project+provider":
 		return "project × provider"
+	case "model":
+		return "model"
 	}
 	return g
 }
@@ -350,6 +382,13 @@ func runStatusInner() error {
 	default:
 		fmt.Println("   daemon: not running")
 		fmt.Println("           port :4318 unreachable")
+	}
+
+	// 看板 URL（token 缺失就生成一份——`ccl web` 读同一个文件）
+	if tok, err := web.LoadOrCreateToken(filepath.Join(stateBaseDir, web.TokenFileName)); err == nil {
+		fmt.Printf("       web: http://127.0.0.1:4318/ui?token=%s\n", tok)
+	} else {
+		fmt.Printf("       web: token 不可用（%v）\n", err)
 	}
 
 	// db 行（缺失不算 error）

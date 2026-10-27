@@ -8,15 +8,17 @@ TBD - created by archiving change usage-monitoring-via-otel. Update Purpose afte
 
 The table's time window MUST be defined by **when the usage occurred**, not by when the session began: a session row MUST appear only if the session recorded at least one metric whose `captured_at` falls within the window, and the token / cost columns for that row MUST sum only the metrics captured within the window. A session that started before the window but kept consuming tokens inside it MUST appear, with the tokens it consumed inside the window. The `STARTED` column MUST still report the session's real start time (which MAY precede the window).
 
-Default window is the last 7 days. The table MUST include a `PROJECT` column derived from `filepath.Base(session.cwd)`.
+Default window is the last 7 days. The table MUST include a `PROJECT` column derived from `filepath.Base(session.cwd)`. The `PROJECT` column MUST be empty for sessions whose working directory could not be resolved.
+
+The window MUST be derived, not settable by an explicit start-date flag: without `--day` the window starts 7 days before the query time, and with `--day N` it starts at the local midnight of the oldest bucket day. There MUST NOT be a `--since` flag.
 
 #### Scenario: stats table is readable
 - **WHEN** user runs `ccl stats` after one Claude Code session
 - **THEN** stdout contains a table with columns: `STARTED`, `PROJECT`, `PROVIDER`, `MODEL`, `IN`, `OUT`, `CACHE_CRE`, `CACHE_READ`, `COST`, with at least one row for that session
 
-#### Scenario: stats supports --since filter
-- **WHEN** user runs `ccl stats --since 2026-09-20`
-- **THEN** only sessions started on or after that date appear
+#### Scenario: the window is derived rather than settable by a start date
+- **WHEN** user runs `ccl stats` without `--day`
+- **THEN** the window starts 7 days before the query time; there is no `--since` flag, and passing `--since` is rejected as an unknown flag
 
 #### Scenario: stats --by-provider aggregates
 - **WHEN** user runs `ccl stats --by-provider`
@@ -133,4 +135,56 @@ The `--json` output and CLI behavior MUST be byte-identical whether the caller s
 #### Scenario: smoke test a_day7_text_has_7_buckets_and_total no longer depends on real today
 - **WHEN** `TestStatsTimeBuckets` injects a fixed clock `now = 2026-09-30 17:30 local` into BOTH `collector.OpenStore(WithClock)` AND `stats.Query{Clock: ...}`, then runs `ccl stats --day 7`
 - **THEN** the bucket table contains daily labels `09-24, 09-25, 09-26, 09-27, 09-28, 09-29, 09-30` regardless of real-world today's date; the test passes on any day of the year
+
+### Requirement: ccl stats groups and filters by model
+`ccl stats` MUST support aggregating by model and filtering by model, alongside the existing provider and project dimensions.
+
+`--by-model` MUST produce one row per distinct model, with the summed input / output / cache-creation / cache-read tokens and cost across the sessions of that model. `--model <substring>` MUST restrict the result to sessions whose model contains the substring, and MUST apply the restriction to the totals as well as to the rows.
+
+The filter MUST be applied at the query level (not by post-filtering already-aggregated rows), so that the reported totals equal the sum of the reported rows.
+
+#### Scenario: --by-model aggregates by model
+- **WHEN** user runs `ccl stats --by-model` and sessions exist with 2 distinct models
+- **THEN** the table has 2 rows (one per model) with aggregated tokens / cost for that model, and the `MODEL` column shows the model name
+
+#### Scenario: --model filters by substring
+- **WHEN** user runs `ccl stats --model MiniMax`
+- **THEN** only sessions whose model contains `MiniMax` appear
+
+#### Scenario: the model filter applies to the totals
+- **WHEN** user runs `ccl stats --model MiniMax --json`
+- **THEN** the `totals` object's token and cost fields equal the sum of the `sessions` array's corresponding fields
+
+#### Scenario: --by-model and --model are combinable
+- **WHEN** user runs `ccl stats --by-model --model MiniMax`
+- **THEN** the table has one row per distinct model matching the filter, and no row for a model outside the filter
+
+### Requirement: ccl stats reports and filters by the session's provider
+`ccl stats` MUST report, for each session, the provider that session ran on, and MUST support filtering by provider.
+
+The provider of a session MUST be the provider recorded when the session was launched. It MUST NOT be the provider that is currently configured, because that would attribute past sessions to a provider they did not use.
+
+`--provider <substring>` MUST restrict the result to sessions whose provider contains the substring, and MUST apply the restriction to the totals as well as to the rows, at the query level.
+
+A session whose provider is unknown MUST be reported with an empty provider, and MUST NOT be attributed to any configured provider.
+
+#### Scenario: the provider column carries the launching provider
+- **WHEN** a session was launched through `ccl` with the provider `minimax`, and `ccl stats` is run
+- **THEN** the session's `PROVIDER` column shows `minimax`
+
+#### Scenario: --provider filters by substring
+- **WHEN** user runs `ccl stats --provider mini`
+- **THEN** only sessions whose provider contains `mini` appear, and the totals reflect only those sessions
+
+#### Scenario: the provider filter applies to the totals
+- **WHEN** user runs `ccl stats --provider minimax --json`
+- **THEN** the `totals` object's token and cost fields equal the sum of the `sessions` array's corresponding fields
+
+#### Scenario: a session without a provider stays unattributed
+- **WHEN** a session was not launched through `ccl` and no provider was recorded for it
+- **THEN** its `PROVIDER` column is empty, and `--provider` filters never match it
+
+#### Scenario: --provider and --project are combinable
+- **WHEN** user runs `ccl stats --provider minimax --project cc-launcher`
+- **THEN** only sessions matching both conditions appear, and the totals reflect only those sessions
 

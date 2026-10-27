@@ -39,9 +39,16 @@ type Server struct {
 
 // ServerOptions 配置 NewServer。
 type ServerOptions struct {
-	Addr     string // 监听地址，默认 ":4318"
-	Store    *Store
-	Forward  *Forwarder // 可为 nil（禁用 forwarder）。metrics-only：logs/traces 不再走 forwarder
+	Addr    string // 监听地址，默认 ":4318"
+	Store   *Store
+	Forward *Forwarder // 可为 nil（禁用 forwarder）。metrics-only：logs/traces 不再走 forwarder
+
+	// Mount 是可选的路由挂载入口（web-usage-stats-ui §D2）。
+	//
+	// 采集层与展示层解耦：**collector 不 import internal/web**，看板路由由
+	// cmd 层注入（cmd/cc-launcher/serve.go 调 web.NewServer(...).Mount）。
+	// 未来若要第二个 UI 入口，也只需要在 cmd 层多挂一次。
+	Mount func(mux *http.ServeMux)
 }
 
 // NewServer 构造 HTTP server，但不启动。调 Start() 才真正 listen。
@@ -59,6 +66,9 @@ func NewServer(opts ServerOptions) *Server {
 	mux.HandleFunc("/v1/metrics", s.handleMetrics)
 	mux.HandleFunc("/v1/logs", s.handleAckOnly())
 	mux.HandleFunc("/v1/traces", s.handleAckOnly())
+	if opts.Mount != nil {
+		opts.Mount(mux)
+	}
 	s.srv = &http.Server{
 		Addr:              addr,
 		Handler:           mux,

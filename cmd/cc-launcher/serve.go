@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"cc-launcher/internal/collector"
+	"cc-launcher/internal/web"
 )
 
 // runServe 是 `ccl serve` 的入口。
@@ -107,8 +109,16 @@ func runServe(args []string) error {
 	}
 	_ = ln.Close()
 
-	// 开 SQLite。
-	store, err := collector.OpenStore(dbPath)
+	// 开 SQLite。注入 cwd resolver：payload 没带 ccl.cwd 时用 Claude Code 的
+	// 会话记录反查（session-cwd-enrichment）。
+	resolver, resolverErr := newCwdResolver()
+	var storeOpts []collector.OpenStoreOption
+	if resolverErr == nil {
+		storeOpts = append(storeOpts, collector.WithCwdResolver(resolver))
+	} else {
+		log.Printf("ccl serve: 定位 Claude Code 会话目录失败，cwd 兜底反查不可用: %v", resolverErr)
+	}
+	store, err := collector.OpenStore(dbPath, storeOpts...)
 	if err != nil {
 		return fmt.Errorf("开 db 失败: %w", err)
 	}
@@ -116,11 +126,25 @@ func runServe(args []string) error {
 	// 配 forwarder（auto-detect CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT）。
 	fwd := collector.NewForwarderFromEnv()
 
-	// 组装 HTTP server。
+	// 组装 HTTP server。看板路由由 cmd 层挂载（collector 不反向依赖 web，
+	// 见 collector.ServerOptions.Mount 与 design.md §D2）。
+	webSrv, err := web.NewServer(web.Options{
+		DBPath:    dbPath,
+		TokenPath: filepath.Join(stateBaseDir, web.TokenFileName),
+	})
+	if err != nil {
+		// 看板不可用不该阻断 daemon（OTel 采集是主路径）。
+		log.Printf("ccl serve: 看板初始化失败（/ui 不可用）: %v", err)
+	}
 	srv := collector.NewServer(collector.ServerOptions{
 		Addr:    ":4318",
 		Store:   store,
 		Forward: fwd,
+		Mount: func(mux *http.ServeMux) {
+			if webSrv != nil {
+				webSrv.Mount(mux)
+			}
+		},
 	})
 
 	// Signal handler：SIGTERM → graceful shutdown；SIGINT 同样。
@@ -137,6 +161,23 @@ func runServe(args []string) error {
 	}()
 
 	log.Printf("ccl serve: 监听 :4318（pid=%d），db=%s", os.Getpid(), dbPath)
+
+	// 后台回填历史 session 的 cwd：等 listener 就绪后再跑，**不阻塞**端口绑定
+	// （页面立即可用，回填逐步生效）。每次启动最多 500 行；剩余的留给下次
+	// 启动，或让用户跑 `ccl web --backfill` 显式补齐。
+	go func() {
+		if err := waitForDaemonReady(); err != nil {
+			log.Printf("ccl serve: 等 listener 就绪超时，跳过本次 cwd 回填: %v", err)
+			return
+		}
+		resolved, failed, err := store.BackfillCwd(500)
+		if err != nil {
+			log.Printf("ccl serve: cwd 回填失败: %v", err)
+			return
+		}
+		log.Printf("ccl serve: cwd 回填完成: resolved=%d failed=%d", resolved, failed)
+	}()
+
 	if err := srv.Start(ctx); err != nil && err != context.Canceled {
 		// Server 异常退出（端口阻塞等不该走到这里——前面已探）。
 		return fmt.Errorf("server 异常: %w", err)
@@ -204,7 +245,7 @@ func stateDirOrError() (string, error) {
 // restartDaemon 热重启 daemon：SIGTERM 旧 daemon + fork 新 binary daemon，等 :4318 端口就绪。
 //
 // 用途（升级 ccl 后）：旧 daemon 进程仍在跑旧 binary 的内存映射；直接 fork 出来的也是旧 binary
-//（磁盘 inode 替换不影响已映射进程）。必须先 SIGTERM 旧 daemon，让位端口，然后 fork 出去的新
+// （磁盘 inode 替换不影响已映射进程）。必须先 SIGTERM 旧 daemon，让位端口，然后 fork 出去的新
 // 子进程才会用新 binary（fork 那一刻 os.Executable() 拿的是已替换的磁盘路径）。
 //
 // Claude Code session 不受影响：daemon 重启期间 :4318 短暂不可用，OTel SDK 自动重连；

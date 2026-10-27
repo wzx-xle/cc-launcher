@@ -232,7 +232,9 @@ cd ~/work/proj-b && ccl
 │   └── bedrock.json
 ├── backups/                # settings.json 写前备份
 │   └── settings-2026-07-09T15-04-05.json
-└── state.json              # 运行时状态（激活提供商、权限偏好）
+├── state.json              # 运行时状态（激活提供商、权限偏好）
+├── telemetry.db            # 用量数据（SQLite / WAL）
+└── web-token               # 用量看板的访问 token（0600）
 ```
 
 ## 开发
@@ -342,7 +344,10 @@ ccl stats --day 7               # 最近 7 天 daily 桶聚合
 ccl stats --day 30              # 最近 30 天 daily 桶聚合
 ccl stats --by-provider         # 按提供商聚合
 ccl stats --by-project          # 按项目（cwd basename）聚合
+ccl stats --by-model            # 按模型聚合
 ccl stats --project cc-launcher # cwd 子串过滤
+ccl stats --model MiniMax       # model 子串过滤
+ccl stats --provider minimax    # provider 子串过滤
 ccl stats --json                # JSON 输出（pipeable to jq）
 ccl stats --json --day 7        # JSON 含 bucket_rows / bucket_totals 字段
 ```
@@ -354,6 +359,60 @@ ccl stats --json --day 7        # JSON 含 bucket_rows / bucket_totals 字段
 每桶一行 `BUCKET | SESSIONS | IN | OUT | CACHE_CRE | CACHE_READ | COST_USD | TOTAL_TOKENS`；末列 `TOTAL_TOKENS` 为本桶 token 合计（`humanizeTokens(IN+OUT+CACHE_CRE+CACHE_READ)`，例如 `2.50K` / `150` / `0`）。`--json --day N` 时 JSON 加 `bucket_rows` 数组 + `bucket_totals` 对象，字段都是原始 int64。不传 `--day` 时维持旧 detail-only 行为。
 
 `ccl stats` **不依赖 daemon 正在跑**——它直接打开 `~/.cc-launcher/telemetry.db` 读。db 文件用 SQLite WAL，所以 daemon 写和 ccl stats 读并发安全。
+
+### provider / 项目维度从哪来
+
+Claude Code 的 OTel payload 里**没有** cwd，也没有 provider——它只推 `session.id / model / type / start_type` 和 `host.arch / os.version / user.id` 这类机器信息。所以 ccl 用了两条路补这两个维度：
+
+1. **launch 上下文（主路径）**：`ccl` 启动 Claude Code 时，把当次的 provider 名、工作目录、provider 端点 host 写进**子进程环境**的 `OTEL_RESOURCE_ATTRIBUTES`：
+
+   | key | 值 |
+   |-----|-----|
+   | `ccl.provider` | provider 名（如 `minimax-m3.1-flash`） |
+   | `ccl.cwd` | 启动时的绝对工作目录 |
+   | `ccl.provider_endpoint` | provider 的 `ANTHROPIC_BASE_URL` 的 host（如 `api.minimax.cn`） |
+
+   Claude Code 的 OTel SDK 会把它们作为 **resource attributes** 随 metrics 推送，daemon 直接取。这是**逐次 launch 的真值**——provider 是"这次启动用的哪个 provider"的快照，不是"当前配置的 provider"。
+
+   值的编码有硬约束：Claude Code 按 `,` / `=` 拆属性，且**一个非法值会让整份属性 map 被丢弃**（不是只丢那一个）。所以 ccl 对所有值强制 percent-encode（unreserved 之外全编），编码后 > 255 字符的属性直接不注入。已存在的 `OTEL_RESOURCE_ATTRIBUTES`（用户自己设的）会被合并保留，ccl 的同名 key 以 ccl 为准。
+
+   ⚠️ `~/.claude/settings.json` 的 `env` 优先级**高于**进程环境。若你的 settings.json 里已经设了 `OTEL_RESOURCE_ATTRIBUTES`，ccl 会**警告并降级**（provider / 项目显示"未知"），**不会**擅自改你的 settings.json。
+
+2. **jsonl 兜底（补历史 + 非 ccl 启动的会话）**：payload 里没有 `ccl.cwd` 时，daemon 用 `session.id` 反查 Claude Code 的会话记录 `~/.claude/projects/*/<session-id>.jsonl`，读其中第一条带顶层 `cwd` 字段的记录（**只取 cwd 一个字段**，prompt 内容不读、不存、不记日志）。查不到就留空——那是正常状态，不是错误。
+
+   daemon 启动时会在后台回填历史行（每次启动最多 500 行，**不阻塞**端口监听）；想一次补齐就跑 `ccl web --backfill`（不限量）。回填是**数据驱动幂等**的：只处理 `cwd = ''` 的行，跑两次结果一致，之后新建的空行仍可被后续回填补上。
+
+**直接用 `claude`（而不是 `ccl`）启动的会话**：provider 恒为空、cwd 靠 jsonl 兜底（常常也查不到，因为 Claude Code 会清理旧会话）。这类会话在 CLI 与看板上显示为「未知」——ccl **不会**拿"当前配置的 provider"去回填历史会话，那是假数据。
+
+### 用量看板（浏览器）
+
+`ccl stats` 只有终端一条路。想在浏览器里看（投屏汇报、远程开发），用 `ccl web`：
+
+```bash
+ccl web              # 确保 daemon 在跑，打印带 token 的看板 URL
+ccl web --rotate     # 轮换访问 token（旧 URL 与旧 session 立即失效）
+ccl web --backfill   # 触发历史 session 的 cwd 回填（不限量）
+ccl web --open       # 用系统默认浏览器打开看板
+```
+
+`ccl web` 会打印两个地址（本机 LAN IP + 127.0.0.1），例如：
+
+```
+http://192.168.1.20:4318/ui?token=<64 位 hex>
+http://127.0.0.1:4318/ui?token=<64 位 hex>
+```
+
+首次访问 `/ui?token=...` 会校验 token → 种一个 HttpOnly session cookie → **302 重定向到不带 token 的 `/ui`**（token 不留在地址栏、不进浏览器历史、不随 Referer 泄漏）。之后靠 cookie 访问。
+
+看板本身挂在 daemon 已监听的 **:4318** 上，**不新开端口、不新增进程**——daemon 停了看板就没了（`ccl web` 会自动把 daemon 拉起来）。页面内容：KPI 卡片（各类 token / 总 cost / 会话数）、按时间桶的 token 堆叠柱 + cost 折线、按项目 / 提供商 / 模型的占比、会话明细表；支持窗口切换（24h / 7d / 30d / 90d）、三个维度的筛选、手动刷新与 30s 自动刷新。前端资源内嵌在二进制里（`go:embed`，零 CDN、零前端框架、图表是手写 SVG），离线可用。
+
+**鉴权与安全**：
+
+- token 是 32 字节随机 hex（64 字符），存在 `~/.cc-launcher/web-token`（权限 `0600`），首次启动自动生成、已存在则原样保留
+- session cookie 的值是 `HMAC-SHA256(key=token, msg="ccl-web-session-v1|<签发时间>")`，**不含 token 明文**；校验用常量时间比较，7 天过期
+- `--rotate` 轮换 token → 此前签发的所有 cookie 立即失效（cookie 的签名 key 就是 token）
+- API 响应是**字段白名单**：不透传 metric labels（那里有 `user.id` 主机指纹哈希、`host.arch`、`os.version`）
+- ⚠️ **已知风险**：同一个 `:4318` 上的 **OTel ingest 端点（`/v1/metrics`）没有鉴权**——daemon 绑 `0.0.0.0`，同局域网的任何设备都能往里灌伪造 metrics。这是**既存**风险（不是看板引入的），本次只给 UI 路由加了 token 保护。介意的话把 daemon 绑到 localhost 或用防火墙限制 `:4318` 的来源。
 
 ### 自动备份时机
 
@@ -367,7 +426,7 @@ ccl 会把每次 `settings.json` 写入前的快照存到 `~/.cc-launcher/backup
    - ✅ settings.json 不含 `env` 字段（用户从未用 OTel）
    - ❌ 常态启动（端点已是 ccl 默认值）—— **不**触发，避免 30 个轮转被瞬态版本耗光
 
-判断条件："OTEL 端点仍指向 ccl 默认值（兜底 `http://localhost:4318` 或 per-signal `http://localhost:4318/v1/metrics`）"则视为控制中，否则视为交接边界。
+判断条件："OTel 端点仍指向 ccl 默认值（兜底 `http://localhost:4318` 或 per-signal `http://localhost:4318/v1/metrics`）"则视为控制中，否则视为交接边界。
 
 `backups/` 里现在会有三类快照：恢复点、provider 切换点、控制权交接点——按时间戳排序即可选择回滚目标。
 
@@ -492,3 +551,4 @@ ccl serve --restart    # 旧 daemon graceful shutdown + fork 新 binary daemon �
 | `~/.cc-launcher/daemon.pid` | daemon 运行时 PID 文件 |
 | `~/.cc-launcher/state.json` | ccl 自身状态（active provider / permission mode） |
 | `~/.cc-launcher/backups/` | settings.json 自动备份轮转（最近 30 个） |
+| `~/.cc-launcher/web-token` | 用量看板的访问 token（32 字节随机 hex，权限 0600） |

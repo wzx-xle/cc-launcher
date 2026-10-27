@@ -11,6 +11,8 @@ import (
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	"google.golang.org/protobuf/proto"
+
+	"cc-launcher/internal/launchctx"
 )
 
 // ParseError 表示解析失败：HTTP 4xx（bad request），daemon 不应被击垮。
@@ -30,7 +32,9 @@ type ParseResult struct {
 //   - resource attrs: host.arch / os.type / os.version / service.name / service.version / terminal.type / user.id
 //   - datapoint attrs: session.id / model / type (input|output|cacheRead|cacheCreation) / start_type / query_source
 //   - session.id 出现在 datapoint attrs（不是 resource attrs）
-//   - provider / cwd Claude Code 推送中 **不存在**
+//   - provider / cwd Claude Code 自己**不推送**；由 ccl 在启动时写进子进程环境的
+//     OTEL_RESOURCE_ATTRIBUTES，Claude Code 的 OTel SDK 随 payload 送回
+//     （resource attrs 里的 ccl.provider / ccl.cwd / ccl.provider_endpoint）
 //   - 已知 metric names: claude_code.session.count / claude_code.token.usage /
 //     claude_code.cost.usage / claude_code.active_time.total
 //
@@ -51,8 +55,8 @@ func ParseMetricsRequest(body []byte) (*ParseResult, error) {
 	}
 
 	result := &ParseResult{}
-	sessionSeen := make(map[string]bool)
-	sessionModels := make(map[string]string) // session.id → model（首个非空值留下）
+	// sessionMetas: session.id → 本 batch 内观测到的元信息（各字段首个非空值留下）
+	sessionMetas := make(map[string]*sessionMeta)
 	// sessionStarts: session.id → 本 batch 内该 session 最早的 captured_at（UnixMilli）
 	sessionStarts := make(map[string]int64)
 	// sessionCountStarts: session.id → claude_code.session.count 的 captured_at（UnixMilli）
@@ -77,14 +81,14 @@ func ParseMetricsRequest(body []byte) (*ParseResult, error) {
 				if m == nil {
 					continue
 				}
-				extractFromMetric(m, resAttrs, scopeAttrs, sessionModels, sessionStarts, sessionCountStarts, result)
+				extractFromMetric(m, resAttrs, scopeAttrs, sessionMetas, sessionStarts, sessionCountStarts, result)
 			}
 		}
 	}
 
-	// 基于累计的 sessionModels 创建 session 行
-	for sid, model := range sessionModels {
-		if sid == "" || sessionSeen[sid] {
+	// 基于累计的 sessionMetas 创建 session 行
+	for sid, meta := range sessionMetas {
+		if sid == "" {
 			continue
 		}
 		// started_at 取真实 session 起始时刻（design Decision 1）：
@@ -97,21 +101,33 @@ func ParseMetricsRequest(body []byte) (*ParseResult, error) {
 			startMs = sessionStarts[sid]
 		}
 		if startMs == 0 {
-			// 理论不可达：sessionModels 的每个键都在 trackModel 里同步登记过
+			// 理论不可达：sessionMetas 的每个键都在 trackModel 里同步登记过
 			// sessionStarts。保底不写 started_at=0（1970）污染 db。
 			continue
 		}
 		result.Sessions = append(result.Sessions, Session{
-			ID:        sid,
-			StartedAt: time.UnixMilli(startMs),
-			Provider:  "", // Claude Code 不推送 provider；ccl 留空
-			Cwd:       "", // Claude Code 不推送 cwd
-			Model:     model,
+			ID:              sid,
+			StartedAt:       time.UnixMilli(startMs),
+			Provider:        meta.provider,
+			Cwd:             meta.cwd,
+			ProviderEndpoint: meta.endpoint,
+			Model:           meta.model,
 		})
-		sessionSeen[sid] = true
 	}
 
 	return result, nil
+}
+
+// sessionMeta 汇总单个 session 在一次 export 里观测到的元信息。
+//
+// 各字段取「首个非空值」：同一 session 后续 batch 再送一次（可能不带
+// ccl.* 属性）不会把已知值抹掉（spec/session-context-attrs「an empty value
+// does not overwrite a known one」）。
+type sessionMeta struct {
+	model    string
+	provider string
+	cwd      string
+	endpoint string
 }
 
 // sessionCountMetricName 是 session 创建时刻的权威观测 metric 名。
@@ -119,13 +135,13 @@ const sessionCountMetricName = "claude_code.session.count"
 
 // extractFromMetric 处理单个 Metric（Sum / Gauge / 其他类型）。
 //
-// sessionModels 由 caller 持有（跨 metric 累积）：首个非空 model 值留下。
+// sessionMetas 由 caller 持有（跨 metric 累积）：各字段首个非空值留下。
 // sessionStarts / sessionCountStarts 同样由 caller 持有：累积每个 session 的
 // 最早 captured_at（后者只记 session.count metric）。
 func extractFromMetric(
 	m *metricpb.Metric,
 	resAttrs, scopeAttrs map[string]string,
-	sessionModels map[string]string,
+	sessionMetas map[string]*sessionMeta,
 	sessionStarts, sessionCountStarts map[string]int64,
 	out *ParseResult,
 ) {
@@ -135,8 +151,24 @@ func extractFromMetric(
 		dpAttrs := mapToAttrs(dp.GetAttributes())
 		mp := dataPointToMetric(dp, name, resAttrs, scopeAttrs, dpAttrs)
 		if sid := mp.SessionID; sid != "" {
-			if cur, ok := sessionModels[sid]; !ok || cur == "" {
-				sessionModels[sid] = mp.Labels["model"]
+			meta := sessionMetas[sid]
+			if meta == nil {
+				meta = &sessionMeta{}
+				sessionMetas[sid] = meta
+			}
+			if meta.model == "" {
+				meta.model = mp.Labels["model"]
+			}
+			// launch 上下文：ccl 在启动 cc 时写进 OTEL_RESOURCE_ATTRIBUTES 的
+			// 三个键，由 Claude Code 的 OTel SDK 作为 resource attrs 送回。
+			if meta.provider == "" {
+				meta.provider = resAttrs[launchctx.KeyProvider]
+			}
+			if meta.cwd == "" {
+				meta.cwd = resAttrs[launchctx.KeyCwd]
+			}
+			if meta.endpoint == "" {
+				meta.endpoint = resAttrs[launchctx.KeyProviderEndpoint]
 			}
 			ms := mp.CapturedAt.UnixMilli()
 			if cur, ok := sessionStarts[sid]; !ok || ms < cur {

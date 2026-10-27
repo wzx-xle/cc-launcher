@@ -23,6 +23,7 @@ const topHelp = `用法: ccl [子命令] [选项]
     (无)              启动 TUI 引导：选提供商 → 选权限模式 → 启动 Claude Code
     serve             OTel daemon 模式（启动 / 停 daemon 或还原 settings.json；详见 ccl serve --help）
     stats             显示 token / cost 聚合（直读 SQLite，无需 daemon 在跑）
+    web               打印用量看板的访问 URL（浏览器里看 token / cost；详见 ccl web --help）
     provider          管理提供商（详见 ccl provider --help）
     mode              管理当前目录的权限模式（详见 ccl mode --help）
 
@@ -38,6 +39,7 @@ Tab completion:
 用量监控：
   - ccl 首次跑会拉起 OTel daemon（监听 :4318）
   - 跑过 Claude Code session 后用 ccl stats 查看
+  - 想在浏览器里看用 ccl web（会打印带 token 的看板 URL）
   - 不要 daemon 时跑 ccl serve --stop；要彻底清除注入用 ccl serve --restore
   - 隐私：daemon 不解析 logs/traces；本地 SQLite 永远没有 prompt 内容
 
@@ -75,6 +77,8 @@ func run(args []string) error {
 			return runServe(args[1:])
 		case "stats":
 			return runStats(args[1:])
+		case "web":
+			return runWeb(args[1:])
 		}
 	}
 
@@ -160,6 +164,7 @@ func runTUI(pm *provider.Manager, sm *state.Manager, cm *config.Manager) error {
 	// launcher.Options.Env。launcher 包在 Unix 透传给 syscall.Exec 第三参数，
 	// Windows 写到 cmd.Env（见 launcher-provider-env spec）。
 	var optsEnv []string
+	providerBaseURL := ""
 	if result.Provider != "" {
 		providerCfg, err := pm.Get(result.Provider)
 		if err != nil {
@@ -173,6 +178,9 @@ func runTUI(pm *provider.Manager, sm *state.Manager, cm *config.Manager) error {
 					continue
 				}
 				optsEnv = envutil.Upsert(optsEnv, k, s)
+				if k == "ANTHROPIC_BASE_URL" {
+					providerBaseURL = s
+				}
 			}
 		}
 	}
@@ -192,6 +200,10 @@ func runTUI(pm *provider.Manager, sm *state.Manager, cm *config.Manager) error {
 	if err := injectOTelEnv(cm); err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ 注入 OTel env 失败: %v\n", err)
 	}
+
+	// 注入 launch 上下文（provider / cwd / 端点 host → OTEL_RESOURCE_ATTRIBUTES）。
+	// 必须在 provider 选定之后、launcher.Launch 之前——上下文描述的是"这次启动"。
+	optsEnv = injectLaunchContext(cm, result.Provider, wd, providerBaseURL, optsEnv)
 
 	// 拉起 OTel daemon（按需；端口已占 → skip）
 	started, _ := ensureDaemonRunning()

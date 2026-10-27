@@ -1,0 +1,362 @@
+/* ccl 用量看板样式
+ *
+ * 配色取自 dataviz skill 的参考调色板（已跑 validate_palette.js 校验）：
+ *   浅色 4 槽：#2a78d6 / #eb6834 / #1baf7a / #eda100 —— 全部检查通过，
+ *   但 aqua / yellow 对浅色底对比度 < 3:1 → 触发 relief 规则（必须有可见标签
+ *   或表格视图）→ 趋势图提供「表格」切换，份额图在条形末端直接标数值。
+ *   深色 4 槽：#3987e5 / #d95926 / #199e70 / #c98500 —— 全项通过。
+ *
+ * 深浅两套都是**各自选定**的步进（不是自动反色），data-theme 覆盖优先于
+ * 系统偏好。
+ */
+
+:root {
+  color-scheme: light;
+
+  --page:            #f9f9f7;
+  --surface-1:       #fcfcfb;
+  --text-primary:    #0b0b0b;
+  --text-secondary:  #52514e;
+  --text-muted:      #898781;
+  --grid:            #e1e0d9;
+  --axis:            #c3c2b7;
+  --border:          rgba(11, 11, 11, 0.10);
+  --hover-wash:      rgba(11, 11, 11, 0.04);
+
+  --series-1: #2a78d6; /* 输入 token */
+  --series-2: #eb6834; /* 输出 token */
+  --series-3: #1baf7a; /* 缓存写入 */
+  --series-4: #eda100; /* 缓存读取 */
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --page:            #0d0d0d;
+    --surface-1:       #1a1a19;
+    --text-primary:    #f0efec;
+    --text-secondary:  #c3c2b7;
+    --text-muted:      #898781;
+    --grid:            #2c2c2a;
+    --axis:            #383835;
+    --border:          rgba(255, 255, 255, 0.10);
+    --hover-wash:      rgba(255, 255, 255, 0.06);
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --series-4: #c98500;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page:            #0d0d0d;
+  --surface-1:       #1a1a19;
+  --text-primary:    #f0efec;
+  --text-secondary:  #c3c2b7;
+  --text-muted:      #898781;
+  --grid:            #2c2c2a;
+  --axis:            #383835;
+  --border:          rgba(255, 255, 255, 0.10);
+  --hover-wash:      rgba(255, 255, 255, 0.06);
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--page);
+  color: var(--text-primary);
+  font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  /* 页面本身永不横向滚动——宽表格在自己的容器里滚 */
+  overflow-x: hidden;
+}
+
+.wrap {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 20px 16px 48px;
+}
+
+/* ---------- 顶栏 ---------- */
+
+.topbar {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.topbar h1 {
+  font-size: 17px;
+  font-weight: 600;
+  margin: 0;
+  letter-spacing: -0.01em;
+}
+.topbar .sub {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+/* ---------- 筛选行（单行，位于所有图表之上） ---------- */
+
+.filters {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  margin-bottom: 16px;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.filters .presets {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--page);
+  border-radius: 8px;
+}
+.presets button {
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 13px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.presets button:hover { background: var(--hover-wash); }
+.presets button[aria-pressed="true"] {
+  background: var(--surface-1);
+  color: var(--text-primary);
+  font-weight: 600;
+  box-shadow: 0 0 0 1px var(--border);
+}
+.filters label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+.filters input[type="text"] {
+  font: inherit;
+  font-size: 13px;
+  color: var(--text-primary);
+  background: var(--page);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  width: 9.5em;
+}
+.filters input[type="text"]:focus-visible {
+  outline: 2px solid var(--series-1);
+  outline-offset: 1px;
+}
+.btn {
+  font: inherit;
+  font-size: 13px;
+  color: var(--text-primary);
+  background: var(--page);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 12px;
+  cursor: pointer;
+}
+.btn:hover { background: var(--hover-wash); }
+.btn.ghost {
+  background: transparent;
+  color: var(--text-secondary);
+  padding: 3px 9px;
+  font-size: 12px;
+}
+
+/* ---------- KPI 卡片 ---------- */
+
+.kpis {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
+  gap: 10px;
+  margin-bottom: 16px;
+}
+.kpi {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+.kpi .label {
+  color: var(--text-secondary);
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+.kpi .value {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+.kpi.hero .value { font-size: 30px; }
+
+/* ---------- 卡片 ---------- */
+
+.card {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px 16px;
+  margin-bottom: 16px;
+}
+.card > h2 {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0 0 10px;
+}
+.card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.card-head h2 { margin: 0; }
+.grid3 {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+}
+.grid3 .card { margin-bottom: 0; }
+
+/* ---------- 图例 ---------- */
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-bottom: 8px;
+}
+.legend .item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.legend .swatch {
+  width: 11px;
+  height: 11px;
+  border-radius: 3px;
+  flex: none;
+}
+
+/* ---------- 图表容器 ---------- */
+
+.chart { width: 100%; }
+.chart svg { display: block; width: 100%; height: auto; }
+.chart .grid-line { stroke: var(--grid); stroke-width: 1; }
+.chart .axis-line { stroke: var(--axis); stroke-width: 1; }
+.chart .tick {
+  fill: var(--text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.chart .seg { transition: opacity .1s ease; }
+.chart .hit { fill: transparent; cursor: pointer; }
+.chart .hit:hover + .seg,
+.chart .seg:hover { opacity: .82; }
+
+/* ---------- 表格 ---------- */
+
+.table-wrap {
+  overflow-x: auto;              /* 宽表在自己的容器里横向滚，页面不滚 */
+  -webkit-overflow-scrolling: touch;
+  max-width: 100%;
+}
+table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 13px;
+}
+th, td {
+  text-align: left;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+th {
+  color: var(--text-secondary);
+  font-weight: 600;
+  font-size: 12px;
+}
+td.num, th.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+tbody tr:hover { background: var(--hover-wash); }
+tbody tr:last-child td { border-bottom: 0; }
+
+/* ---------- 空状态 ---------- */
+
+.empty {
+  color: var(--text-muted);
+  font-size: 13px;
+  padding: 28px 0;
+  text-align: center;
+}
+
+/* ---------- 重新取数时保留画面（降透明度，不闪骨架） ---------- */
+
+#content.loading { opacity: .55; transition: opacity .12s ease; }
+
+/* ---------- 提示气泡 ---------- */
+
+.tooltip {
+  position: fixed;
+  z-index: 20;
+  pointer-events: none;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--text-primary);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .16);
+  max-width: 240px;
+}
+.tooltip .tt-title {
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+.tooltip .tt-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  white-space: nowrap;
+}
+.tooltip .tt-key {
+  width: 14px;
+  height: 2px;
+  border-radius: 1px;
+  flex: none;
+  transform: translateY(-3px);
+}
+.tooltip .tt-val {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.tooltip .tt-name { color: var(--text-secondary); }
+
+@media (max-width: 640px) {
+  .wrap { padding: 14px 12px 36px; }
+  .filters input[type="text"] { width: 7.5em; }
+  .kpi .value { font-size: 19px; }
+}
