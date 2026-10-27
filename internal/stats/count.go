@@ -46,3 +46,56 @@ func CountSessionsByWindow(dbPath string, sinceMs int64) (total, sinceCount int6
 	}
 	return total, sinceCount, nil
 }
+
+// CountSessionsInWindow 返回"窗口内有活动的 session 数"。
+//
+// 与 CountSessionsByWindow 的区别：后者按 **started_at** 计数（"这个时段
+// 开始了多少个 session"），本函数按 **消费时刻**（metrics.captured_at）计数
+// ——与 QueryStats 的 detail 行口径一致（"窗口内有活动的 session 才出现"）。
+//
+// 过滤条件（project / model / provider）与 QueryStats 相同，保证数字对得上。
+func CountSessionsInWindow(dbPath string, q Query) (int64, error) {
+	if _, err := os.Stat(dbPath); err != nil {
+		if os.IsNotExist(err) {
+			return 0, ErrNoDatabase
+		}
+		return 0, fmt.Errorf("stat db 失败: %w", err)
+	}
+	db, err := sql.Open("sqlite", dbPath+"?mode=ro")
+	if err != nil {
+		return 0, fmt.Errorf("open db: %w", err)
+	}
+	defer db.Close()
+
+	since := q.now()
+	if q.Buckets != nil {
+		since = oldestBucketStart(since, *q.Buckets)
+	} else {
+		since = since.AddDate(0, 0, -7)
+	}
+
+	where := "WHERE m.captured_at >= ?"
+	args := []any{since.UnixMilli()}
+	if q.Project != "" {
+		where += " AND s.cwd LIKE ?"
+		args = append(args, likeArg(q.Project))
+	}
+	if q.Model != "" {
+		where += " AND s.model LIKE ?"
+		args = append(args, likeArg(q.Model))
+	}
+	if q.Provider != "" {
+		where += " AND s.provider LIKE ?"
+		args = append(args, likeArg(q.Provider))
+	}
+
+	var n int64
+	err = db.QueryRow(
+		`SELECT COUNT(DISTINCT s.id) FROM sessions s
+		 JOIN metrics m ON m.session_id = s.id `+where, args...,
+	).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count sessions in window: %w", err)
+	}
+	return n, nil
+}

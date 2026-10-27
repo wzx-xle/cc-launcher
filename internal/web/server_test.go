@@ -60,6 +60,10 @@ func makeTestDB(t *testing.T, path string) {
 		{"s1", "minimax", "/home/u/cc-launcher", "MiniMax-M2"},
 		{"s2", "deepseek", "/home/u/other", "deepseek-chat"},
 		{"s3", "", "", ""},
+		// s4 与 s1 同 project 但**不同 provider** —— 让 project 分组里的
+		// provider 不唯一，用来抓"provider 占比复用了分组行的 provider 列"
+		// （那会把整个 project 的用量归到其中任意一个 provider 上）。
+		{"s4", "deepseek", "/home/u/cc-launcher", "MiniMax-M2"},
 	}
 	for _, r := range rows {
 		if _, err := db.Exec(`INSERT INTO sessions (id, started_at, provider, cwd, model)
@@ -415,6 +419,33 @@ func TestAPI_GroupByProvider(t *testing.T) {
 	}
 	if len(data.Sessions) != 3 {
 		t.Fatalf("provider 分组应有 3 行（minimax/deepseek/未知）, got %d", len(data.Sessions))
+	}
+	// 会话数必须是**会话数**（4），不是分组数（3）
+	if data.Totals.Sessions != 4 {
+		t.Fatalf("totals.sessions 应为 4（窗口内活动会话数）, got %d", data.Totals.Sessions)
+	}
+}
+
+// TestAPI_ProviderShareUnderProjectGroup 断言 group=project 时 provider 占比
+// 仍是**真聚合**（不是"每个 project 分组归给其中一个 provider"）。
+func TestAPI_ProviderShareUnderProjectGroup(t *testing.T) {
+	ts, srv, _ := newTestServer(t)
+	jar, _ := newJar()
+	client := &http.Client{Jar: jar}
+	resp, _ := client.Get(ts.URL + "/ui?token=" + srv.Token())
+	resp.Body.Close()
+
+	data := fetchStats(t, client, ts.URL+"/api/stats?group=project")
+	if len(data.Providers) != 3 {
+		t.Fatalf("provider 占比应有 3 项（minimax/deepseek/未知）, got %d: %+v",
+			len(data.Providers), data.Providers)
+	}
+	var sum float64
+	for _, p := range data.Providers {
+		sum += p.TokenShare
+	}
+	if sum < 0.999 || sum > 1.001 {
+		t.Fatalf("provider 占比之和应为 1, got %v", sum)
 	}
 }
 

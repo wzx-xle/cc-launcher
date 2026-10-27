@@ -343,6 +343,40 @@ func (s *Server) handleAPIStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// provider 占比的口径必须与 CLI 的 --by-provider 一致（按 provider 真聚合）。
+	//
+	// 主查询的 provider 列能不能直接复用，取决于分组：
+	//   - group=session：每行一个 session，按 provider 在内存里分组 == 真聚合
+	//     （同一批 metric，只是切分方式不同）→ 直接复用，省一次查询
+	//   - group=provider：主查询本身就是 provider 聚合 → 直接复用
+	//   - group=project / model：每行是一个分组（一个 project / model），
+	//     行的 provider 列只是该分组里**任意一个** provider → 直接复用会
+	//     把多 provider 的分组错误归到其中一个 → 必须单独查一次
+	providerRows := mainRes.Sessions
+	if group == "project" || group == "model" {
+		byProvider := filter
+		byProvider.Buckets = &days
+		byProvider.ByProvider = true
+		providerRes, err := stats.QueryStats(s.opts.DBPath, byProvider)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		providerRows = providerRes.Sessions
+	}
+
+	// 会话数：**不能**用 len(mainRes.Sessions)——分组查询下那是"分组数"
+	//（group=provider 时是 provider 个数），不是会话数。单独数一次窗口内
+	// 有活动的 session（口径与 detail 行一致；Buckets 同样设上 → 窗口起点
+	// 与主查询对齐）。
+	countQ := filter
+	countQ.Buckets = &days
+	sessionCount, err := stats.CountSessionsInWindow(s.opts.DBPath, countQ)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
 	resp := apiResponse{
 		Window:      win.label,
 		Since:       mainRes.Since,
@@ -354,12 +388,12 @@ func (s *Server) handleAPIStats(w http.ResponseWriter, r *http.Request) {
 			CacheCreation: mainRes.Totals.CacheCreate,
 			CacheRead:     mainRes.Totals.CacheRead,
 			CostUSD:       mainRes.Totals.CostUSD,
-			Sessions:      len(mainRes.Sessions),
+			Sessions:      int(sessionCount),
 		},
 		Sessions:  toAPISessions(mainRes.Sessions),
 		Buckets:   toAPIBuckets(mainRes.BucketRows, win),
 		Projects:  sharesFrom(projRes.Sessions, "project", mainRes.Totals),
-		Providers: sharesFrom(mainRes.Sessions, "provider", mainRes.Totals),
+		Providers: sharesFrom(providerRows, "provider", mainRes.Totals),
 		Models:    sharesFrom(modelRes.Sessions, "model", mainRes.Totals),
 	}
 
