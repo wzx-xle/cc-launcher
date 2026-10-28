@@ -214,7 +214,7 @@ func runServe(args []string) error {
 // `runServe` 加 flag 而 `completeAtServe` 漏改 → runtime 接受 / completion 提示脱节。
 func registerServeFlags(fs *flag.FlagSet) (stop, restore, status, restart, backfill *bool) {
 	stop = fs.Bool("stop", false, "停 OTel daemon（等价于原 ccl stop）")
-	restore = fs.Bool("restore", false, "还原 ~/.claude/settings.json 到 ccl 之前的状态")
+	restore = fs.Bool("restore", false, "清理旧版 ccl 留在 ~/.claude/settings.json 里的 OTel 注入痕迹")
 	status = fs.Bool("status", false, "打印 daemon 状态摘要（pid / 端口可达 / db 文件大小 / session 数）")
 	restart = fs.Bool("restart", false, "热重启 daemon（SIGTERM 旧 daemon + fork 新 binary daemon）")
 	backfill = fs.Bool("backfill", false, "回填历史 session 的 cwd（不限量；查不到的保持未知项目）")
@@ -359,11 +359,13 @@ ccl 的 OTel daemon lifecycle and ccl settings restore 入口。
   超时则 ccl serve --stop 发 SIGKILL。找不到 daemon 时打"daemon not running"并 exit 0。
 
 --restore
-  读 ~/.claude/settings.json，还原 ccl 注入的 OTel env：
-    - CC_ORIG_<KEY> 还原到 <KEY>，删 CC_ORIG_*
-    - 删除 ccl 注入的默认值（如 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318）
+  清理**旧版 ccl** 留在 ~/.claude/settings.json 里的 OTel 注入痕迹：
+    - CC_ORIG_<KEY> / FORWORD_<KEY> 还原到 <KEY>，删掉备份键
+    - 删除旧版 ccl 注入的默认值（如 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318）
     - 其它用户自有的 env 键不动
-  不可逆：清掉后下次 ccl 启动会重新注入。
+  新版 ccl 通过 Claude Code 的 --settings 参数交付 OTel 配置，**不再改写
+  settings.json**——这里没有"当前接管"可撤销，只有旧版留下的痕迹要清理。
+  升级后第一次跑 ccl 会自动清理一次（幂等）。
   操作前会先备份当前 settings.json 到 ~/.cc-launcher/backups/settings-<时间戳>.json。
 
 --status

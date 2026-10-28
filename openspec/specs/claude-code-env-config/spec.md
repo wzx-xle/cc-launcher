@@ -3,95 +3,28 @@
 ## Purpose
 TBD - created by archiving change usage-monitoring-via-otel. Update Purpose after archive.
 ## Requirements
-### Requirement: ccl injects OTEL env into Claude Code settings with backup
-On every `ccl` invocation (before fork-if-needed and exec Claude Code), ccl MUST inspect `~/.claude/settings.json` and ensure the `env` map contains the 5 OTel keys. For each key that already has a user value, ccl MUST first save a backup to a `CC_ORIG_<KEY>` key, then apply the action below. For missing keys, ccl MUST add the default without a backup.
-
-The 5 keys and actions:
-
-| Key | If user has value | If missing |
-|---|---|---|
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | backup to `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT`; override to `http://localhost:4318` | add `http://localhost:4318` |
-| `OTEL_LOGS_EXPORTER` | backup to `CC_ORIG_OTEL_LOGS_EXPORTER`; **respect user's value** | add `otlp` (default; user can edit) |
-| `OTEL_METRICS_EXPORTER` | backup to `CC_ORIG_OTEL_METRICS_EXPORTER`; respect user's value | add `otlp` |
-| `OTEL_EXPORTER_OTLP_PROTOCOL` | backup to `CC_ORIG_OTEL_EXPORTER_OTLP_PROTOCOL`; respect user's value | add `http/protobuf` |
-| `CLAUDE_CODE_ENABLE_TELEMETRY` | backup to `CC_ORIG_CLAUDE_CODE_ENABLE_TELEMETRY`; respect user's value | add `1` |
-
-**Note**: ccl does NOT force-override `OTEL_LOGS_EXPORTER`. The local-privacy guarantee (no prompts in SQLite) comes from the daemon's architecture (it accepts /v1/logs but only forwards, never persists). User's original `OTEL_LOGS_EXPORTER=otlp` continues to work — logs reach the remote collector via forwarding.
-
-#### Scenario: settings.json has only OTel endpoint (typical user)
-- **WHEN** `~/.claude/settings.json` has only `OTEL_EXPORTER_OTLP_ENDPOINT=https://company-otel:4317`
-- **THEN** after ccl:
-  - `OTEL_EXPORTER_OTLP_ENDPOINT` = `http://localhost:4318`
-  - `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT` = `https://company-otel:4317`
-  - `OTEL_LOGS_EXPORTER` = `none` (newly added, no backup)
-  - `OTEL_METRICS_EXPORTER` = `otlp` (newly added)
-  - `OTEL_EXPORTER_OTLP_PROTOCOL` = `http/protobuf` (newly added)
-  - `CLAUDE_CODE_ENABLE_TELEMETRY` = `1` (newly added)
-
-#### Scenario: settings.json already has all 5 keys
-- **WHEN** user has manually configured every OTel key
-- **THEN** ccl backs up all 5 to `CC_ORIG_*` (only first time; if backups already present, don't overwrite); ccl force-overrides only `OTEL_LOGS_EXPORTER` to `none`; other 4 are preserved
-
-#### Scenario: settings.json already has CC_ORIG_* from prior ccl run
-- **WHEN** user runs `ccl` again and `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT` already exists
-- **THEN** ccl does NOT overwrite the backup (preserves the original saved value); only adds missing keys
-
-#### Scenario: user has OTEL_LOGS_EXPORTER=otlp (logs enabled) — ccl respects
-- **WHEN** user has `OTEL_LOGS_EXPORTER=otlp`
-- **THEN** ccl saves `CC_ORIG_OTEL_LOGS_EXPORTER=otlp` and **respects the value** (does NOT force to `none`); Claude Code pushes logs to wherever its OTEL_EXPORTER_OTLP_ENDPOINT points; if forwarding is configured, daemon forwards logs to backup endpoint
-
-#### Scenario: user sets OTEL_METRICS_EXPORTER to a non-otlp value (e.g. prometheus)
-- **WHEN** user has `OTEL_METRICS_EXPORTER=prometheus`
-- **THEN** ccl backs up as `CC_ORIG_OTEL_METRICS_EXPORTER=prometheus` and respects the value; Claude Code will use prometheus, ccl stats will be empty (user opted out)
-
-#### Scenario: env value points to a remote collector
-- **WHEN** user has `OTEL_EXPORTER_OTLP_ENDPOINT=https://otel-collector.example.com:4318`
-- **THEN** ccl backs it up to `CC_ORIG_*`; daemon sees the backup at startup and **enables forwarder** to that URL; metrics flow: Claude Code → daemon → remote collector (and locally to SQLite)
-
-#### Scenario: existing settings.json field order is preserved
-- **WHEN** ccl writes new keys to an existing settings.json with keys in order `[env, permissions, enabledPlugins, ...]`
-- **THEN** after write, the file still has the same key order with new keys appended in the env section, not inserted at the top of the file (ccl uses `internal/config/ordered.go` to preserve order)
-
-### Requirement: ccl serve --restore removes all CC_ORIG_* and ccl-injected defaults
-`ccl serve --restore` MUST read `~/.claude/settings.json` env field and:
-- For each `CC_ORIG_<KEY>` found: write `<KEY>` = `CC_ORIG_<KEY>` value; delete the `CC_ORIG_*` key
-- For each of the 5 OTel keys ccl would have injected as default: delete them if no backup exists (i.e., user never had them — they're purely ccl artifacts)
-- The settings.json file structure MUST be preserved otherwise
-
-#### Scenario: serve --restore recovers original user config
-- **WHEN** user runs `ccl serve --restore` and settings.json has `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT=https://company-otel:4317` (along with ccl's override to localhost:4318)
-- **THEN** settings.json ends up with `OTEL_EXPORTER_OTLP_ENDPOINT=https://company-otel:4317` and no `CC_ORIG_*` keys
-
-#### Scenario: serve --restore removes keys ccl added (no original)
-- **WHEN** user runs `ccl serve --restore` and settings.json has `OTEL_METRICS_EXPORTER=otlp` (ccl added it; user never had a value)
-- **THEN** the key is removed (since no `CC_ORIG_OTEL_METRICS_EXPORTER` exists)
-
-#### Scenario: serve --restore is idempotent
-- **WHEN** user runs `ccl serve --restore` twice
-- **THEN** the second run is a no-op; settings.json is unchanged
-
-#### Scenario: serve --restore keeps user-added non-ccl keys
-- **WHEN** user has `ANTHROPIC_BASE_URL=https://...` (a ccl-doesn't-touch key)
-- **THEN** `ccl serve --restore` does not modify it
-
-#### Scenario: settings.json does not exist
-- **WHEN** user runs `ccl serve --restore` and `~/.claude/settings.json` is missing
-- **THEN** ccl prints "no settings to restore" and exits 0
-
 ### Requirement: daemon auto-enables forwarder based on CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT
-On `ccl serve` startup, the daemon MUST inspect its own env for `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT`. If the value is set AND is not `http://localhost:4318` (or 127.0.0.1), the daemon MUST enable a forwarder that POSTs each parsed metric to that URL after persisting locally.
+On `ccl serve` startup, the daemon MUST inspect its own env for `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT` and for `FORWORD_OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`. If the per-signal variable is set, the daemon MUST forward to it; otherwise, if `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT` is set, the daemon MUST forward to that URL. If the selected URL is `http://localhost:4318` (or 127.0.0.1), the daemon MUST NOT enable a forwarder, so that the daemon does not forward to itself.
+
+The forwarding target MUST be the user's own endpoint, delivered by ccl into the daemon's process environment before the daemon is forked. The daemon MUST NOT read the endpoint from `~/.claude/settings.json` itself, and MUST NOT read it from the payload of an export.
+
+ccl MUST NOT set either variable to a placeholder value when the user has no endpoint configured; an unset variable means "no forwarding".
 
 #### Scenario: user has remote OTLP configured
-- **WHEN** daemon starts and `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT=https://company-otel:4317`
-- **THEN** daemon enables forwarder; each metric received via /v1/metrics is: (1) written to local SQLite (sync), (2) POSTed to remote in a goroutine (async, fire-and-forget)
+- **WHEN** the daemon starts with `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT=https://company-otel:4317`
+- **THEN** the daemon enables the forwarder; each metric received via /v1/metrics is: (1) written to local SQLite (sync), (2) POSTed to remote in a goroutine (async, fire-and-forget)
+
+#### Scenario: the per-signal target takes priority
+- **WHEN** the daemon starts with `FORWORD_OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=https://metrics:4318` and `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT=https://fallback:4317`
+- **THEN** the daemon forwards the metrics to `https://metrics:4318`
 
 #### Scenario: forwarder detects localhost (loop prevention)
-- **WHEN** daemon starts and `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318` (or 127.0.0.1)
-- **THEN** daemon does NOT enable forwarder; logs at startup "CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT points to localhost; forwarder disabled to prevent loop"
+- **WHEN** the daemon starts and `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318` (or 127.0.0.1)
+- **THEN** the daemon does NOT enable forwarder; logs at startup "CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT points to localhost; forwarder disabled to prevent loop"
 
 #### Scenario: no backup env present
-- **WHEN** daemon starts and `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT` is unset
-- **THEN** daemon does NOT enable forwarder; no log emitted
+- **WHEN** the daemon starts and `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT` is unset
+- **THEN** the daemon does NOT enable forwarder; no log emitted
 
 ### Requirement: forwarder auth comes from CC_FORWARD_AUTH_HEADER env
 The forwarder MUST check env `CC_FORWARD_AUTH_HEADER`. If set, every POST request MUST include it as a header. If unset, no auth header is sent. The daemon MUST NOT reuse `ANTHROPIC_AUTH_TOKEN` for forwarder auth.
@@ -127,38 +60,157 @@ Forwarder failures (non-2xx response, timeout > 5s, connection error) MUST be lo
 - **WHEN** forwarder is slow (but not timed out)
 - **THEN** daemon accepts new OTLP requests at full speed; local SQLite writes proceed normally
 
-### Requirement: ccl 文件级备份仅在控制权交接时触发
-在 `injectOTelEnv` 流程里（`SaveSettings` 前），ccl MUST 检测 `~/.claude/settings.json` 是否仍处于 ccl 当前控制之下；若不在，则调 `Manager.Backup()` 做一次文件级快照到 `~/.cc-launcher/backups/settings-<时间戳>.json`。若在 ccl 控制下，则 MUST NOT 触发 Backup（避免 backups/ 充斥同状态瞬态版本导致轮转耗光）。
+### Requirement: ccl delivers the OTel env to Claude Code through --settings
+On every `ccl` invocation (before launching Claude Code), ccl MUST compute the OTel environment for the child process and deliver it through Claude Code's `--settings` parameter, in the same settings object that carries the launch context.
 
-**判断函数** `isUnderCclControl(env map[string]any) bool`：ccl 当前控制 = 满足下列任一：
-- `env["OTEL_EXPORTER_OTLP_ENDPOINT"]` == `"http://localhost:4318"`（兜底端点被 ccl 改写）
-- `env["OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"]` == `"http://localhost:4318/v1/metrics"`（per-signal metrics 端点被 ccl 接管）
+ccl MUST NOT write any OTel key into `~/.claude/settings.json`. The settings file applies to every Claude Code process on the machine; a takeover written there would also redirect the sessions that `ccl` did not launch, and would leave two generations of the user's configuration in the file (the live value and a `CC_ORIG_*` backup).
 
-两者都不是 → ccl 当前不在控制 settings.json → 视为"控制权交接边界"，触发 Backup。
+The `--settings` `env` block is merged key by key with the settings file's own `env` block, and the `--settings` block takes precedence. Therefore delivering a key overrides the settings file's value for that key, and NOT delivering a key leaves the settings file's value in effect.
 
-**失败行为**：`Manager.Backup()` 返回错误时 ccl MUST 仅写 stderr 警告并继续 `injectOTelEnv` 主流程——不阻断 ccl 启动（与现有"Otl 注入失败仅警告"策略一致）。
+The 6 keys and their actions:
 
-#### Scenario: 首次 ccl 启动，settings.json 健康基线被备份
-- **WHEN** `~/.claude/settings.json` 的 `env` map 含 `OTEL_EXPORTER_OTLP_ENDPOINT=https://company-otel:4317`（用户原值，ccl 尚未注入），且不含 `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`
-- **THEN** 触发 `Manager.Backup()` 一次；`~/.cc-launcher/backups/` 下新增 `settings-<timestamp>.json`，内容是当前 settings.json（含用户原值）；之后 ccl 才执行应用级备份与端点改写
+| Key | The settings file has a user value | The settings file has no value |
+|---|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | deliver `http://localhost:4318` | deliver `http://localhost:4318` |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | deliver `http://localhost:4318/v1/metrics` | deliver `http://localhost:4318/v1/metrics` |
+| `OTEL_METRICS_EXPORTER` | do not deliver the key | deliver `otlp` |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | do not deliver the key | deliver `http/protobuf` |
+| `CLAUDE_CODE_ENABLE_TELEMETRY` | do not deliver the key | deliver `1` |
+| `OTEL_LOGS_EXPORTER` | do not deliver the key | do not deliver the key |
 
-#### Scenario: ccl 已在控制中（每次常规启动），跳过 Backup
-- **WHEN** `~/.claude/settings.json` 的 `env` map 含 `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318`（上轮 ccl 写入）
-- **THEN** `isUnderCclControl` 返回 true → 跳过 `Manager.Backup()`；`backups/` 文件数不变；ccl 继续按现有逻辑更新 keys
+"Respecting the user's value" means NOT delivering that key: the settings file's value then applies unchanged, and the user's explicit opt-out (for example `OTEL_METRICS_EXPORTER=prometheus`) survives.
 
-#### Scenario: 第三方覆盖 OTel 端点但 CC_ORIG_* 残留，触发 Backup
-- **WHEN** `~/.claude/settings.json` 的 `env` map 含 `OTEL_EXPORTER_OTLP_ENDPOINT=http://other-tool:4318`（第三方工具修改），且 `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT=https://company-otel:4317` 仍残留
-- **THEN** `isUnderCclControl` 返回 false → 触发 Backup 一次；`backups/` 新增一份反映"第三方覆盖后状态"；ccl 重新接管端点但**不**擦除 `CC_ORIG_*`（那是 `ccl serve --restore` 的工作）
+A "user value" is a value in the settings file's `env` block. The process environment does not count: ccl MUST deliver the default when the settings file has no value for the key, so that the process environment cannot silently change ccl's telemetry behavior.
 
-#### Scenario: per-signal metrics 接管路径识别为"ccl 控制中"
-- **WHEN** `~/.claude/settings.json` 的 `env` map 含 `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://localhost:4318/v1/metrics`（per-signal 接管），且 `OTEL_EXPORTER_OTLP_ENDPOINT` 是其他非 localhost 值
-- **THEN** `isUnderCclControl` 返回 true → 跳过 Backup
+ccl MUST NOT deliver `OTEL_LOGS_EXPORTER`. The daemon accepts logs without parsing or persisting them, and the local-privacy guarantee comes from the daemon's architecture, not from overriding the user's exporter choice.
 
-#### Scenario: settings.json 不存在（首跑场景）
-- **WHEN** `~/.claude/settings.json` 文件不存在
-- **THEN** `isUnderCclControl` 视为 false → `Manager.Backup()` 检查到文件不存在直接返回 nil（no-op）；ccl 继续正常创建新 settings.json
+The settings ccl delivers MUST contain only an `env` block; the settings file's own non-`env` settings (permissions, plugins, and the like) MUST remain in effect.
 
-#### Scenario: Backup 失败仅警告，不阻断 ccl 主流程
-- **WHEN** `Manager.Backup()` 返回错误（如 backupDir 无写权限、磁盘满）
-- **THEN** ccl 打印 stderr 一行警告（如 `injectOTelEnv: 备份 settings.json 失败: <err>`）但继续执行 `injectOTelEnv` 主流程；Claude Code 仍能正常启动
+#### Scenario: the endpoint is taken over without touching the settings file
+- **WHEN** `~/.claude/settings.json` has `OTEL_EXPORTER_OTLP_ENDPOINT=https://company-otel:4317` and the user runs `ccl`
+- **THEN** the settings ccl delivers contain `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318`, the metrics are received by the local daemon, and `~/.claude/settings.json` still contains `OTEL_EXPORTER_OTLP_ENDPOINT=https://company-otel:4317` with no `CC_ORIG_*` key
+
+#### Scenario: ccl supplies the whole OTel configuration on its own
+- **WHEN** `~/.claude/settings.json` contains no OTel key at all and the user runs `ccl`
+- **THEN** the settings ccl delivers contain `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318`, `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://localhost:4318/v1/metrics`, `OTEL_METRICS_EXPORTER=otlp`, `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf` and `CLAUDE_CODE_ENABLE_TELEMETRY=1`, and the metrics reach the local daemon
+
+#### Scenario: the user's exporter choice is respected
+- **WHEN** `~/.claude/settings.json` has `OTEL_METRICS_EXPORTER=prometheus` and the user runs `ccl`
+- **THEN** the settings ccl delivers do NOT contain `OTEL_METRICS_EXPORTER`, the settings file's value `prometheus` stays in effect, and no metrics are exported to the daemon (the user opted out)
+
+#### Scenario: the user's own settings keys keep working
+- **WHEN** `~/.claude/settings.json` has `OTEL_LOGS_EXPORTER=otlp` and the user runs `ccl`
+- **THEN** the settings ccl delivers do NOT contain `OTEL_LOGS_EXPORTER`, and the logs still reach the endpoint the user configured
+
+#### Scenario: the settings file's other settings are left alone
+- **WHEN** `ccl` launches Claude Code
+- **THEN** the settings ccl delivers contain only an `env` block, and the settings file's own non-`env` settings (such as permissions) remain in effect
+
+#### Scenario: the settings file is not modified
+- **WHEN** `ccl` launches Claude Code
+- **THEN** the `env` block of `~/.claude/settings.json` contains no key that ccl added, and its file content is byte-identical to its content before the launch
+
+### Requirement: ccl delivers the forwarding target to the daemon through its process environment
+The daemon MUST forward the metrics it receives to the user's own remote collector. ccl MUST obtain the forwarding target from the user's own endpoint configuration in `~/.claude/settings.json` and MUST hand it to the daemon through the daemon's process environment, by setting these variables in ccl's own process environment before the daemon is forked:
+
+- `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT` — the user's own fallback endpoint
+- `FORWORD_OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` — the user's own per-signal metrics endpoint
+
+ccl MUST NOT write these variables into `~/.claude/settings.json`. They describe the daemon's destination, not the child process's configuration.
+
+When the settings file still contains a legacy `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT` key (left by an earlier version of ccl, which had overwritten the live key), that value MUST be used as the user's fallback endpoint, in preference to the live key — the live key was already overwritten by that earlier version.
+
+A missing endpoint MUST leave the corresponding variable unset. ccl MUST NOT substitute a placeholder value.
+
+#### Scenario: the user's remote collector still receives the metrics
+- **WHEN** `~/.claude/settings.json` has `OTEL_EXPORTER_OTLP_ENDPOINT=https://company-otel:4317` and the user runs `ccl`
+- **THEN** the daemon receives the metrics via `http://localhost:4318` and forwards them to `https://company-otel:4317`
+
+#### Scenario: the per-signal endpoint wins over the fallback endpoint
+- **WHEN** `~/.claude/settings.json` has `OTEL_EXPORTER_OTLP_ENDPOINT=https://fallback:4317` and `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=https://metrics:4318`
+- **THEN** the daemon forwards the metrics to `https://metrics:4318`
+
+#### Scenario: no user endpoint means no forwarding
+- **WHEN** `~/.claude/settings.json` contains no OTel endpoint and the user runs `ccl`
+- **THEN** neither forwarding variable is set, and the daemon does not forward
+
+#### Scenario: a legacy backup key is preferred over the overwritten live key
+- **WHEN** `~/.claude/settings.json` has `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318` and `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT=https://company-otel:4317`
+- **THEN** the daemon forwards the metrics to `https://company-otel:4317`
+
+### Requirement: ccl cleans up legacy ccl artifacts from settings.json once
+ccl MUST NOT write to `~/.claude/settings.json` in its normal launch flow. A version of ccl that did write to it may have left artifacts behind: `CC_ORIG_*` and `FORWORD_*` backup keys, and OTel keys holding ccl's own values.
+
+On startup, ccl MUST run a one-time cleanup that removes those artifacts and restores the user's own values:
+
+- For each `CC_ORIG_<KEY>` or `FORWORD_<KEY>`: write the backup value back to `<KEY>` and delete the backup key — unless the backup value equals ccl's own default for that key, in which case the backup is ccl's own earlier injection of its default and the live key MUST be deleted instead.
+- For each managed OTel key that has no backup: delete it when its value equals ccl's own default for that key.
+- Every other key MUST be left untouched.
+
+The cleanup MUST only run when the settings file shows a ccl artifact: a `CC_ORIG_*` / `FORWORD_*` key, or a live `OTEL_EXPORTER_OTLP_ENDPOINT` equal to `http://localhost:4318`. Without such an artifact, ccl MUST NOT modify the settings file at all.
+
+The cleanup MUST run at most once. ccl MUST record that it has run, and MUST NOT run it again on later startups — the rules above compare values against ccl's defaults, and re-running them would delete values the user wrote after the cleanup.
+
+Before modifying the settings file, the cleanup MUST take a file-level snapshot through `config.Manager.Backup()`. A failure to take the snapshot MUST NOT block the launch: ccl MUST print a warning and continue.
+
+The cleanup MUST be idempotent: running it again when there is nothing left to clean MUST leave the settings file unchanged.
+
+#### Scenario: the user's endpoint is restored
+- **WHEN** `~/.claude/settings.json` has `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318` and `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT=https://company-otel:4317`
+- **THEN** after the cleanup the settings file has `OTEL_EXPORTER_OTLP_ENDPOINT=https://company-otel:4317` and no `CC_ORIG_*` key
+
+#### Scenario: a key ccl added without a backup is removed
+- **WHEN** `~/.claude/settings.json` has `OTEL_METRICS_EXPORTER=otlp` and no `CC_ORIG_OTEL_METRICS_EXPORTER`
+- **THEN** after the cleanup the key `OTEL_METRICS_EXPORTER` is removed
+
+#### Scenario: a self-backup does not restore ccl's own default
+- **WHEN** `~/.claude/settings.json` has `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318` and `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318` (the backup of ccl's own injection)
+- **THEN** after the cleanup the key `OTEL_EXPORTER_OTLP_ENDPOINT` and the backup key are both removed
+
+#### Scenario: a settings file without ccl artifacts is not touched
+- **WHEN** `~/.claude/settings.json` has `OTEL_METRICS_EXPORTER=otlp` and no `CC_ORIG_*` / `FORWORD_*` key and no `http://localhost:4318` endpoint
+- **THEN** the cleanup does not run and the settings file is unchanged
+
+#### Scenario: the cleanup runs only once
+- **WHEN** the user runs `ccl` twice
+- **THEN** the cleanup modifies the settings file on the first run only, and the second run leaves it unchanged
+
+#### Scenario: the user's own keys survive
+- **WHEN** `~/.claude/settings.json` has `ANTHROPIC_BASE_URL=https://api.example.com` and `permissions.allow` alongside a ccl artifact
+- **THEN** the cleanup leaves `ANTHROPIC_BASE_URL` and `permissions` unchanged
+
+#### Scenario: a snapshot failure does not block the launch
+- **WHEN** `config.Manager.Backup()` returns an error
+- **THEN** ccl prints a warning and continues, and Claude Code still starts
+
+### Requirement: ccl serve --restore removes legacy ccl artifacts from settings.json
+`ccl serve --restore` MUST remove the artifacts an earlier version of ccl left in `~/.claude/settings.json`, using the same rules as the one-time cleanup:
+
+- For each `CC_ORIG_<KEY>` or `FORWORD_<KEY>`: write the backup value back to `<KEY>` and delete the backup key — unless the backup value equals ccl's own default for that key, in which case the live key MUST be deleted instead.
+- For each managed OTel key that has no backup: delete it when its value equals ccl's own default for that key.
+- Every other key MUST be left untouched.
+
+The command MUST be idempotent, and MUST report what it removed. When the settings file does not exist, it MUST report that there is nothing to restore and exit successfully.
+
+The command MUST NOT be described as undoing a current takeover: ccl does not write its takeover into the settings file any more, so there is no live takeover to undo.
+
+#### Scenario: the original user config is recovered
+- **WHEN** the user runs `ccl serve --restore` and the settings file has `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT=https://company-otel:4317` and `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318`
+- **THEN** the settings file ends up with `OTEL_EXPORTER_OTLP_ENDPOINT=https://company-otel:4317` and no `CC_ORIG_*` key
+
+#### Scenario: keys ccl added are removed
+- **WHEN** the user runs `ccl serve --restore` and the settings file has `OTEL_METRICS_EXPORTER=otlp` (ccl added it; the user never had a value)
+- **THEN** the key is removed (since no `CC_ORIG_OTEL_METRICS_EXPORTER` exists)
+
+#### Scenario: the command is idempotent
+- **WHEN** the user runs `ccl serve --restore` twice
+- **THEN** the second run is a no-op; the settings file is unchanged
+
+#### Scenario: user-added non-ccl keys are kept
+- **WHEN** the user has `ANTHROPIC_BASE_URL=https://...` (a key ccl does not touch)
+- **THEN** `ccl serve --restore` does not modify it
+
+#### Scenario: the settings file does not exist
+- **WHEN** the user runs `ccl serve --restore` and `~/.claude/settings.json` is missing
+- **THEN** ccl prints "no settings to restore" and exits 0
 

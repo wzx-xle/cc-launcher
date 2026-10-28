@@ -1,13 +1,13 @@
 //go:build smoke
 
-// backup-on-control-handover §7.3-§7.6 sandbox smoke test +
+// otel-endpoints-via-settings §7.3-§7.6 sandbox smoke test +
 // flatten-stop-restore-into-serve §7.3-§7.7 + §9.6 / §9.8 sandbox smoke test。
 //
-// 在 sandbox tmpdir 上模拟真实 HOME，验证 backup 触发语义 + serve flag 行为：
-//   - §7.3 首跑 backup：pristine settings → ccl 启动 → 新增快照含原值
-//   - §7.4 控制中跳过：第二次启动 → backups/ 文件数不变
-//   - §7.5 第三方覆盖 backup：改 endpoint → ccl 启动 → 新增三方覆盖态快照
-//   - §7.6 restore 不受影响：跑 restoreOTelEnv（`ccl serve --restore` 内部）→ settings.json 还原到接管前
+// 在 sandbox tmpdir 上模拟真实 HOME，验证 OTel 交付/遗留清理语义 + serve flag 行为：
+//   - §7.3 无 ccl 痕迹 → ccl 不动用户的 settings.json（只读）
+//   - §7.4 旧版痕迹 → 一次性清理：还原用户原值 + 备份一次；第二次不再备份
+//   - §7.5 旧版 CC_ORIG_* 备份键 → 清理后用户原值回到 live 键
+//   - §7.6 restore 语义：还原用户原值 + 删备份键
 //   - 7.3 serve --help 包含 --stop / --restore 两条 flag 说明
 //   - 7.4 serve --stop daemon 不在 → "daemon not running"，exit 0
 //   - 7.5 serve --restore settings.json 不在 → "no settings to restore"，exit 0
@@ -34,6 +34,7 @@ import (
 
 	"cc-launcher/internal/collector"
 	"cc-launcher/internal/config"
+	"cc-launcher/internal/state"
 	"cc-launcher/internal/stats"
 )
 
@@ -60,6 +61,7 @@ func writeSettings(t *testing.T, path string, content map[string]any) {
 	}
 }
 
+// §7.3：没有 ccl 痕迹 → ccl **不改**用户的 settings.json（只读）。
 func TestSmoke_FirstRunBackup(t *testing.T) {
 	settingsPath, backupDir := smokeSandbox(t)
 
@@ -69,66 +71,68 @@ func TestSmoke_FirstRunBackup(t *testing.T) {
 			"OTEL_EXPORTER_OTLP_ENDPOINT": "https://company-otel:4317",
 		},
 	})
-
-	cm := config.NewManager(settingsPath, backupDir, 10)
-	if err := injectOTelEnv(cm); err != nil {
-		t.Fatalf("injectOTelEnv: %v", err)
-	}
-
-	// §7.3 断言：backups/ 新增快照含原值
-	entries, err := os.ReadDir(backupDir)
+	before, err := os.ReadFile(settingsPath)
 	if err != nil {
-		t.Fatalf("readDir backupDir: %v", err)
-	}
-	if len(entries) != 1 {
-		t.Fatalf("expected 1 backup after first run, got %d", len(entries))
-	}
-	data, _ := os.ReadFile(filepath.Join(backupDir, entries[0].Name()))
-	var backup map[string]any
-	if err := json.Unmarshal(data, &backup); err != nil {
 		t.Fatal(err)
 	}
-	env := backup["env"].(map[string]any)
-	if env["OTEL_EXPORTER_OTLP_ENDPOINT"] != "https://company-otel:4317" {
-		t.Errorf("first-run backup must capture user original endpoint, got %v", env["OTEL_EXPORTER_OTLP_ENDPOINT"])
+
+	cm := config.NewManager(settingsPath, backupDir, 10)
+	sm := state.NewManager(filepath.Join(filepath.Dir(backupDir)))
+	prepareOtelEnv(cm, sm)
+
+	after, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Errorf("ccl 不得修改用户的 settings.json:\nbefore=%s\nafter=%s", before, after)
+	}
+	// 没有痕迹 → 不该产生备份
+	if entries, _ := os.ReadDir(backupDir); len(entries) != 0 {
+		t.Errorf("无 ccl 痕迹时不该备份, got %d entries", len(entries))
 	}
 }
 
+// §7.4：旧版痕迹 → 一次性清理（备份一次 + 还原），第二次不再备份。
 func TestSmoke_InControlSkipsBackup(t *testing.T) {
 	settingsPath, backupDir := smokeSandbox(t)
 	cm := config.NewManager(settingsPath, backupDir, 10)
+	sm := state.NewManager(filepath.Join(filepath.Dir(backupDir)))
 
-	// 模拟"已注入"状态：endpoint 是 ccl 默认值
+	// 模拟旧版 ccl 的注入：endpoint 是 ccl 默认值
 	writeSettings(t, settingsPath, map[string]any{
 		"env": map[string]any{
 			"OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4318",
 		},
 	})
 
-	// 第一次 injectOTelEnv：应在控制下，不备份
-	if err := injectOTelEnv(cm); err != nil {
-		t.Fatalf("first injectOTelEnv: %v", err)
-	}
+	// 第一次：清理 → 备份一次 + 端点被清掉
+	prepareOtelEnv(cm, sm)
 	entries, _ := os.ReadDir(backupDir)
-	if len(entries) != 0 {
-		t.Errorf("in-control first run should NOT backup, got %d entries", len(entries))
+	if len(entries) != 1 {
+		t.Errorf("首次清理应备份 1 次, got %d entries", len(entries))
+	}
+	settings, _ := cm.LoadSettings()
+	envAny := settings["env"].(map[string]any)
+	if _, ok := envAny["OTEL_EXPORTER_OTLP_ENDPOINT"]; ok {
+		t.Errorf("旧版注入的端点应被清掉, got %v", envAny)
 	}
 
-	// §7.4 第二次启动（仍控制中）→ 文件数应仍为 0
-	if err := injectOTelEnv(cm); err != nil {
-		t.Fatalf("second injectOTelEnv: %v", err)
-	}
+	// 第二次：标志已记 → 不再备份
+	prepareOtelEnv(cm, sm)
 	entries, _ = os.ReadDir(backupDir)
-	if len(entries) != 0 {
-		t.Errorf("§7.4 in-control second run must NOT add backup, got %d entries", len(entries))
+	if len(entries) != 1 {
+		t.Errorf("第二次启动不该新增备份, got %d entries", len(entries))
 	}
 }
 
+// §7.5：旧版 CC_ORIG_* 备份键 → 清理后用户原值回到 live 键。
 func TestSmoke_ThirdPartyOverwriteTriggersBackup(t *testing.T) {
 	settingsPath, backupDir := smokeSandbox(t)
 	cm := config.NewManager(settingsPath, backupDir, 10)
+	sm := state.NewManager(filepath.Join(filepath.Dir(backupDir)))
 
-	// 模拟第三方覆盖：endpoint 是非 ccl 默认值 + CC_ORIG_* 残留
+	// 模拟旧版 ccl 留下的痕迹：live 被改写 + 备份键里是真原值
 	writeSettings(t, settingsPath, map[string]any{
 		"env": map[string]any{
 			"OTEL_EXPORTER_OTLP_ENDPOINT":        "http://other-tool:4318",
@@ -136,76 +140,68 @@ func TestSmoke_ThirdPartyOverwriteTriggersBackup(t *testing.T) {
 		},
 	})
 
-	if err := injectOTelEnv(cm); err != nil {
-		t.Fatalf("injectOTelEnv: %v", err)
-	}
+	prepareOtelEnv(cm, sm)
 
-	// §7.5 断言：backups/ 新增三方覆盖态快照
+	// 备份一份（清理前状态）
 	entries, err := os.ReadDir(backupDir)
 	if err != nil {
 		t.Fatalf("readDir: %v", err)
 	}
 	if len(entries) != 1 {
-		t.Fatalf("expected 1 backup after third-party overwrite, got %d", len(entries))
+		t.Fatalf("清理应备份 1 次, got %d", len(entries))
 	}
 	data, _ := os.ReadFile(filepath.Join(backupDir, entries[0].Name()))
 	var backup map[string]any
 	json.Unmarshal(data, &backup)
 	bEnv := backup["env"].(map[string]any)
 	if bEnv["OTEL_EXPORTER_OTLP_ENDPOINT"] != "http://other-tool:4318" {
-		t.Errorf("backup must reflect pre-takeover state (third-party endpoint), got %v", bEnv["OTEL_EXPORTER_OTLP_ENDPOINT"])
+		t.Errorf("备份应反映清理前的状态, got %v", bEnv["OTEL_EXPORTER_OTLP_ENDPOINT"])
 	}
 
-	// ccl 接管后 CC_ORIG_* 仍在
+	// 清理后：用户原值回到 live 键，备份键消失
 	settings, _ := cm.LoadSettings()
 	curEnv := settings["env"].(map[string]any)
-	if curEnv["OTEL_EXPORTER_OTLP_ENDPOINT"] != "http://localhost:4318" {
-		t.Errorf("ccl must take over endpoint, got %v", curEnv["OTEL_EXPORTER_OTLP_ENDPOINT"])
+	if curEnv["OTEL_EXPORTER_OTLP_ENDPOINT"] != "https://company-otel:4317" {
+		t.Errorf("用户原值应被还原, got %v", curEnv["OTEL_EXPORTER_OTLP_ENDPOINT"])
 	}
-	if curEnv["CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT"] != "https://company-otel:4317" {
-		t.Errorf("CC_ORIG_ must NOT be erased by injectOTelEnv, got %v", curEnv["CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT"])
+	if _, ok := curEnv["CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT"]; ok {
+		t.Errorf("备份键应被删除, got %v", curEnv)
 	}
 }
 
+// §7.6：`ccl serve --restore` 的清理语义（与自动迁移同一份实现）。
 func TestSmoke_RestoreUnaffected(t *testing.T) {
 	settingsPath, backupDir := smokeSandbox(t)
 	cm := config.NewManager(settingsPath, backupDir, 10)
 
-	// 模拟"已注入"状态：endpoint 是 ccl 默认值 + CC_ORIG_* 有原值
+	// 模拟旧版 ccl 的注入：endpoint 是 ccl 默认值 + CC_ORIG_* 有原值
 	writeSettings(t, settingsPath, map[string]any{
 		"env": map[string]any{
-			"OTEL_EXPORTER_OTLP_ENDPOINT":         "http://localhost:4318",
-			"CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT":  "https://company-otel:4317",
+			"OTEL_EXPORTER_OTLP_ENDPOINT":        "http://localhost:4318",
+			"CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT": "https://company-otel:4317",
 		},
 	})
 
-	// §7.6 调 restoreOTelEnv（等价于 `ccl serve --restore` 内部的 settings 重写）
+	// 调 cleanupLegacyOtelEnv（等价于 `ccl serve --restore` 内部的 settings 重写）
 	settings, err := cm.LoadSettings()
 	if err != nil {
 		t.Fatal(err)
 	}
 	envAny := settings["env"].(map[string]any)
-	envStr := make(map[string]string, len(envAny))
-	for k, v := range envAny {
-		if s, ok := v.(string); ok {
-			envStr[k] = s
-		}
-	}
-	restored := restoreOTelEnv(envStr)
-	settings["env"] = restored
+	cleaned, _ := cleanupLegacyOtelEnv(envAny)
+	settings["env"] = cleaned
 	if err := cm.SaveSettings(settings); err != nil {
 		t.Fatal(err)
 	}
 
-	// 验证 settings.json 等价于"首次 ccl 注入前 + restore 已清 CC_ORIG_ backup"
+	// 验证：用户原值回到 live 键 + 备份键被删
 	final, _ := cm.LoadSettings()
 	finalEnv := final["env"].(map[string]any)
-	// restore 语义：CC_ORIG_<KEY> 还原到 <KEY>，删 CC_ORIG_*
 	if finalEnv["OTEL_EXPORTER_OTLP_ENDPOINT"] != "https://company-otel:4317" {
-		t.Errorf("restore must restore user original to endpoint, got %v", finalEnv["OTEL_EXPORTER_OTLP_ENDPOINT"])
+		t.Errorf("restore 必须把用户原值还原到 endpoint, got %v", finalEnv["OTEL_EXPORTER_OTLP_ENDPOINT"])
 	}
 	if _, ok := finalEnv["CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT"]; ok {
-		t.Errorf("CC_ORIG_ backup must be removed after restore, got %v", finalEnv["CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT"])
+		t.Errorf("CC_ORIG_ 备份键必须在 restore 后消失, got %v", finalEnv["CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT"])
 	}
 }
 

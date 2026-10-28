@@ -32,6 +32,13 @@ func newTestConfigMgr(t *testing.T, settings map[string]any) (*config.Manager, s
 // parseSettingsJSON 解析 additional settings JSON，取出 env.OTEL_RESOURCE_ATTRIBUTES。
 func parseSettingsJSON(t *testing.T, s string) string {
 	t.Helper()
+	v, _ := parseSettingsEnv(t, s)[launchctx.EnvResourceAttributes].(string)
+	return v
+}
+
+// parseSettingsEnv 解析 additional settings JSON，返回 env 块。
+func parseSettingsEnv(t *testing.T, s string) map[string]any {
+	t.Helper()
 	var obj map[string]any
 	if err := json.Unmarshal([]byte(s), &obj); err != nil {
 		t.Fatalf("additional settings 不是合法 JSON: %v (%s)", err, s)
@@ -40,8 +47,32 @@ func parseSettingsJSON(t *testing.T, s string) string {
 	if env == nil {
 		t.Fatalf("additional settings 缺 env 块: %s", s)
 	}
-	v, _ := env[launchctx.EnvResourceAttributes].(string)
-	return v
+	return env
+}
+
+// TestInjectLaunchContext_MergesOtelEnv 断言 OTel 端点接管与 launch 上下文
+// **合并进同一个 --settings 对象**（otel-endpoints-via-settings：两条通道统一）。
+func TestInjectLaunchContext_MergesOtelEnv(t *testing.T) {
+	t.Setenv(launchctx.EnvResourceAttributes, "")
+
+	cm, _ := newTestConfigMgr(t, nil)
+	otelEnv := map[string]string{
+		keyEndpoint:        defaultEndpoint,
+		keyMetricsEndpoint: defaultMetricsEndpoint,
+	}
+	_, settingsJSON := injectLaunchContext(cm, "minimax", "/home/u/proj", "https://api.minimax.cn/anthropic", nil, otelEnv)
+
+	env := parseSettingsEnv(t, settingsJSON)
+	if env[keyEndpoint] != defaultEndpoint {
+		t.Errorf("%s 应在 --settings 里, got %v", keyEndpoint, env[keyEndpoint])
+	}
+	if env[keyMetricsEndpoint] != defaultMetricsEndpoint {
+		t.Errorf("%s 应在 --settings 里, got %v", keyMetricsEndpoint, env[keyMetricsEndpoint])
+	}
+	attrs, _ := env[launchctx.EnvResourceAttributes].(string)
+	if !strings.Contains(attrs, launchctx.KeyProvider+"=minimax") {
+		t.Errorf("launch 上下文也应在同一个 env 块里, got %q", attrs)
+	}
 }
 
 // TestInjectLaunchContext_WritesEnv 断言进程 env 与 optsEnv 都被注入了上下文。
@@ -50,7 +81,7 @@ func TestInjectLaunchContext_WritesEnv(t *testing.T) {
 
 	cm, _ := newTestConfigMgr(t, nil)
 	optsEnv := []string{"PATH=/usr/bin"}
-	got, _ := injectLaunchContext(cm, "minimax", "/home/u/proj", "https://api.minimax.cn/anthropic", optsEnv)
+	got, _ := injectLaunchContext(cm, "minimax", "/home/u/proj", "https://api.minimax.cn/anthropic", optsEnv, nil)
 
 	val := os.Getenv(launchctx.EnvResourceAttributes)
 	if val == "" {
@@ -77,7 +108,7 @@ func TestInjectLaunchContext_BuildsSettingsJSON(t *testing.T) {
 	t.Setenv(launchctx.EnvResourceAttributes, "")
 
 	cm, _ := newTestConfigMgr(t, nil)
-	_, settingsJSON := injectLaunchContext(cm, "minimax", "/home/u/proj", "https://api.minimax.cn/anthropic", nil)
+	_, settingsJSON := injectLaunchContext(cm, "minimax", "/home/u/proj", "https://api.minimax.cn/anthropic", nil, nil)
 	if settingsJSON == "" {
 		t.Fatal("未产出 additional settings JSON")
 	}
@@ -113,7 +144,7 @@ func TestInjectLaunchContext_MergesUserValue(t *testing.T) {
 			launchctx.EnvResourceAttributes: "team=platform",
 		},
 	})
-	_, settingsJSON := injectLaunchContext(cm, "minimax", "/home/u/proj", "", nil)
+	_, settingsJSON := injectLaunchContext(cm, "minimax", "/home/u/proj", "", nil, nil)
 	val := parseSettingsJSON(t, settingsJSON)
 
 	if !strings.Contains(val, "team=platform") {
@@ -133,7 +164,7 @@ func TestInjectLaunchContext_UserKeyWinsOverStale(t *testing.T) {
 			launchctx.EnvResourceAttributes: launchctx.KeyProvider + "=stale",
 		},
 	})
-	_, settingsJSON := injectLaunchContext(cm, "minimax", "/home/u/proj", "", nil)
+	_, settingsJSON := injectLaunchContext(cm, "minimax", "/home/u/proj", "", nil, nil)
 	val := parseSettingsJSON(t, settingsJSON)
 
 	if strings.Contains(val, "stale") {
@@ -155,7 +186,7 @@ func TestInjectLaunchContext_DoesNotTouchSettingsJSON(t *testing.T) {
 			"ANTHROPIC_AUTH_TOKEN": "sk-user-token",
 		},
 	})
-	injectLaunchContext(cm, "minimax", "/home/u/proj", "https://api.minimax.cn", []string{"PATH=/usr/bin"})
+	injectLaunchContext(cm, "minimax", "/home/u/proj", "https://api.minimax.cn", []string{"PATH=/usr/bin"}, nil)
 
 	data, err := os.ReadFile(settingsPath)
 	if err != nil {

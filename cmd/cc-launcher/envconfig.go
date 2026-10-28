@@ -1,160 +1,204 @@
 package main
 
 import (
-	"fmt"
-	"maps"
 	"strings"
 )
 
-// OTel env key 集合。
+// OTel env key 集合 + ccl 自己的默认值。
 //
-// 决策（见 design.md §15-16 + telemetry-config-compat change）：
-//   - 5 个 fallback key（CC_ORIG_<KEY>）保留：ccl 启动一段时间的用户不要被重命名造成双重历史
-//   - 1 个 per-signal metrics 端点用新 FORWORD_ 命名空间：用户原话要求"备份 key 也不要用 cc_orig，改叫 forword"
-//   - 用户原值一律尊重（备份即可）
-//   - OTEL_LOGS_EXPORTER：缺失时不主动注入（隐私靠 daemon 不解析 logs 保证）
-//   - 为什么 metrics per-signal 用新 FORWORD_ 而其他 fallback key 仍用 CC_ORIG_：避免双重历史（用户已有 CC_ORIG_*），
-//     且新命名空间更明显地标识"ccl 注入的备份"（FORWORD_<OTEL_KEY> 看起来像用户自己写的另一个端点 vs CC_ORIG_<KEY>）
+// **交付通道**（otel-endpoints-via-settings）：6 个 key 全部通过 Claude Code 的
+// `--settings` 参数的 env 块交付，ccl **不再写** ~/.claude/settings.json。
+//
+// 优先级（2026-10-28 真机实测）：**--settings > settings.json > 进程环境**；
+// env 块是**逐键深合并**（不是整体替换）。于是有两个动作：
+//
+//   - "交付某个键" = 覆盖 settings.json 里的同名键 → **接管**
+//   - "不交付某个键" = settings.json 里的值继续生效 → **尊重用户**
+//
+// "用户值"的定义域只有 settings.json 的 env 块，不含进程环境：旧实现把默认值
+// 写进 settings 文件，settings 文件优先级高于进程环境，效果等同于"进程环境里
+// 的值被默认值盖掉"；新实现直接在更高优先级的 --settings 里交付默认值，效果
+// 一致，但**不碰用户的文件**。
 const (
-	keyEndpoint         = "OTEL_EXPORTER_OTLP_ENDPOINT"
-	keyMetricsEndpoint  = "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT" // telemetry-config-compat 新增
-	keyLogsExporter     = "OTEL_LOGS_EXPORTER"
-	keyMetricsExport    = "OTEL_METRICS_EXPORTER"
-	keyProtocol         = "OTEL_EXPORTER_OTLP_PROTOCOL"
-	keyEnableTelemetry  = "CLAUDE_CODE_ENABLE_TELEMETRY"
+	keyEndpoint        = "OTEL_EXPORTER_OTLP_ENDPOINT"
+	keyMetricsEndpoint = "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
+	keyLogsExporter    = "OTEL_LOGS_EXPORTER"
+	keyMetricsExport   = "OTEL_METRICS_EXPORTER"
+	keyProtocol        = "OTEL_EXPORTER_OTLP_PROTOCOL"
+	keyEnableTelemetry = "CLAUDE_CODE_ENABLE_TELEMETRY"
 
-	defaultEndpoint         = "http://localhost:4318"
-	defaultMetricsEndpoint  = "http://localhost:4318/v1/metrics" // telemetry-config-compat 新增
-	defaultMetricsExporter  = "otlp"
-	defaultProtocol         = "http/protobuf"
-	defaultEnableTelemetry  = "1"
-	defaultLogsExporter     = "" // 不主动注入：缺失时不动；只备份用户已有值。
-	// 决策 16：本地隐私靠 daemon 不解析 logs 保证，不强制覆盖 OTEL_LOGS_EXPORTER。
+	defaultEndpoint        = "http://localhost:4318"
+	defaultMetricsEndpoint = "http://localhost:4318/v1/metrics"
+	defaultMetricsExporter = "otlp"
+	defaultProtocol        = "http/protobuf"
+	defaultEnableTelemetry = "1"
 )
 
-// otelEnvAction 描述单个 key 的处理策略。
-type otelEnvAction struct {
-	key             string
-	defaultValue    string // 缺失时注入的值；空 = 不注入
-	injectIfMissing bool   // 默认值非空时，是否缺失就注入
-	override        bool   // 用户已有值时是否改写为默认值（默认 false = 备份并尊重）
-	backupPrefix    string // 备份键前缀（默认 "CC_ORIG_"；per-signal metrics 用 "FORWORD_"）
+// daemon 转发目标变量名。
+//
+// 这两个变量**只存在于 ccl 的进程环境**（fork daemon 时被子进程继承），不再写
+// 进 settings.json。名字沿用旧版，是为了让 daemon 侧
+// （internal/collector/forwarder.go）与 otel-receiver spec 一个字都不用改。
+const (
+	envForwardMetricsEndpoint = "FORWORD_OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
+	envOrigEndpoint           = "CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT"
+)
+
+// 旧版 ccl 在 settings.json 里用的备份键前缀（**仅遗留清理用**）。
+const (
+	backupPrefixOrig    = "CC_ORIG_"
+	backupPrefixForword = "FORWORD_"
+)
+
+// otelKeyPolicy 描述单个 OTel key 的交付策略。
+type otelKeyPolicy struct {
+	key          string
+	defaultValue string // 缺失时交付的默认值；空 = 永不交付
+	// takeover 为 true 时：不管用户有没有写，ccl 都交付 defaultValue（接管端点）。
+	takeover bool
+	// backupPrefix 是旧版 ccl 用的备份键前缀，仅遗留清理用。
+	backupPrefix string
 }
 
-// otelActions 策略表。
+// otelKeyPolicies 是 6 个 key 的策略表。
 //
-// 注意：
-//   - OTEL_EXPORTER_OTLP_ENDPOINT 必须 override=true：ccl 把 endpoint 指向本地 daemon
-//     才能拦截 OTel 推送做 stats + forwarding。
-//   - OTEL_LOGS_EXPORTER 的 defaultValue 为空 + injectIfMissing=false → 缺失时不注入。
-//     决策 16 的精神：daemon 不解析 logs 已经保护隐私；不主动改用户行为。
-//   - OTEL_EXPORTER_OTLP_METRICS_ENDPOINT 仅 override；缺失时不注入（Claude Code 会 fallback 到
-//     OTEL_EXPORTER_OTLP_ENDPOINT）。backupPrefix="FORWORD_"（telemetry-config-compat 决策 2）。
-var otelActions = []otelEnvAction{
-	{key: keyEndpoint, defaultValue: defaultEndpoint, injectIfMissing: true, override: true, backupPrefix: "CC_ORIG_"},
-	{key: keyMetricsEndpoint, defaultValue: defaultMetricsEndpoint, injectIfMissing: false, override: true, backupPrefix: "FORWORD_"},
-	{key: keyLogsExporter, defaultValue: defaultLogsExporter, injectIfMissing: false, override: false, backupPrefix: "CC_ORIG_"},
-	{key: keyMetricsExport, defaultValue: defaultMetricsExporter, injectIfMissing: true, override: false, backupPrefix: "CC_ORIG_"},
-	{key: keyProtocol, defaultValue: defaultProtocol, injectIfMissing: true, override: false, backupPrefix: "CC_ORIG_"},
-	{key: keyEnableTelemetry, defaultValue: defaultEnableTelemetry, injectIfMissing: true, override: false, backupPrefix: "CC_ORIG_"},
+//   - 两个端点键 takeover=true：ccl 必须把导出接到本地 daemon 才能统计用量。
+//   - OTEL_LOGS_EXPORTER 的 defaultValue 为空 → **永不交付**：daemon 不解析
+//     logs（隐私靠 daemon 架构保证），不主动改用户对 logs exporter 的选择。
+//   - 其余三个（metrics exporter / protocol / telemetry 开关）不 takeover：
+//     用户自己写了就尊重（不交付这个键），没写才补默认值。
+var otelKeyPolicies = []otelKeyPolicy{
+	{key: keyEndpoint, defaultValue: defaultEndpoint, takeover: true, backupPrefix: backupPrefixOrig},
+	{key: keyMetricsEndpoint, defaultValue: defaultMetricsEndpoint, takeover: true, backupPrefix: backupPrefixForword},
+	{key: keyLogsExporter, defaultValue: "", takeover: false, backupPrefix: backupPrefixOrig},
+	{key: keyMetricsExport, defaultValue: defaultMetricsExporter, takeover: false, backupPrefix: backupPrefixOrig},
+	{key: keyProtocol, defaultValue: defaultProtocol, takeover: false, backupPrefix: backupPrefixOrig},
+	{key: keyEnableTelemetry, defaultValue: defaultEnableTelemetry, takeover: false, backupPrefix: backupPrefixOrig},
 }
 
-// backupKey 返回 "CC_ORIG_<KEY>"。
-func backupKey(k string) string { return "CC_ORIG_" + k }
-
-// isLocalhostEndpoint 判断 endpoint 是否指向 localhost（不拉 daemon 的判定）。
-func isLocalhostEndpoint(v string) bool {
-	return strings.Contains(v, "localhost") || strings.Contains(v, "127.0.0.1")
-}
-
-// backupAndInjectOTel 应用策略表到 env map，返回处理后的 map。
+// buildChildOtelEnv 按交付策略算出要通过 `--settings` 交付给子进程的 env 块。
 //
-// 语义：
-//   - 每个 key：
-//     - 若 key 已存在于 env：
-//       - 若 <backupPrefix><KEY> 不存在 → 备份原值到 <backupPrefix><KEY>
-//       - 若 <backupPrefix><KEY> 已存在 → 不动（避免覆盖用户备份）
-//     - 若 key 不存在：
-//       - 若 defaultValue 非空且 injectIfMissing → 注入默认值
-//       - 否则不动
-//   - 注入的默认值不会自动备份（因为用户从未设过该 key）
-//   - backupPrefix 由 otelEnvAction 指定：5 个 fallback key 用 "CC_ORIG_"，per-signal metrics
-//     端点用 "FORWORD_"（telemetry-config-compat 决策 2）
+// 返回的 map **只含 ccl 要交付的键**：
+//   - takeover 键：一定是 ccl 的默认值（接管）
+//   - 非 takeover 键：用户自己写了 → 不出现（settings.json 的值生效）；没写 → 补默认值
+//   - OTEL_LOGS_EXPORTER：永远不出现
 //
-// 入参 env 可为 nil；返回的新 map 不影响入参（拷贝）。
-func backupAndInjectOTel(env map[string]string) map[string]string {
-	out := make(map[string]string, len(env))
-	maps.Copy(out, env)
-
-	for _, act := range otelActions {
-		bk := act.backupPrefix + act.key
-		_, hasOrig := out[bk]
-
-		if cur, exists := out[act.key]; exists {
-			// 已设：备份（如未备份）+ 按 override 决定是否改写。
-			if !hasOrig {
-				out[bk] = cur
-			}
-			if act.override {
-				out[act.key] = act.defaultValue
-			}
-		} else {
-			// 未设：注入默认值（如策略允许）。
-			if act.injectIfMissing && act.defaultValue != "" {
-				out[act.key] = act.defaultValue
-			}
+// 入参是 settings.json 的 env 块（map[string]any，值不一定是 string）；只关心
+// "键在不在"，不关心值的类型。
+func buildChildOtelEnv(userEnv map[string]any) map[string]string {
+	out := make(map[string]string, len(otelKeyPolicies))
+	for _, p := range otelKeyPolicies {
+		if p.defaultValue == "" {
+			continue // OTEL_LOGS_EXPORTER：永不交付
 		}
+		if p.takeover {
+			out[p.key] = p.defaultValue
+			continue
+		}
+		if _, ok := userEnv[p.key]; ok {
+			continue // 用户自己写了 → 尊重（不交付这个键）
+		}
+		out[p.key] = p.defaultValue
 	}
-
 	return out
 }
 
-// restoreOTelEnv 反向操作：从 env map 移除 ccl 的痕迹，恢复原值。
+// resolveForwardTarget 从 settings.json 的 env 里取出**用户自己的端点**，作为
+// daemon 的转发目标。
 //
-// 语义（见 design.md §16 + spec "ccl serve --restore" + telemetry-config-compat）：
-//   - 对每个 backupPrefix_<KEY>：写 <KEY> = backupPrefix_<KEY> 值；删 backupPrefix_<KEY>
-//     （5 个 fallback 用 CC_ORIG_ 前缀；per-signal metrics 用 FORWORD_ 前缀）
-//   - 对 6 个 key 中的"ccl 注入的默认值"（无对应 backup）：删除该 key
-//     判断标准：backupPrefix_<KEY> 不存在 → ccl 是注入的
-//   - 其它 key：不动
+// 返回 (fallback, perSignal)；空串 = 用户没有配这个端点（不设环境变量）。
 //
-// 返回处理后的新 map；不影响入参。
-func restoreOTelEnv(env map[string]string) map[string]string {
-	out := make(map[string]string, len(env))
-	maps.Copy(out, env)
+// 遗留兼容：旧版 ccl 把 live 端点改写成 localhost，真正的用户原值被埋在
+// `CC_ORIG_*` 备份键里。清理还没跑（或没跑成功）时，备份键才是真值 → **备份键
+// 优先于 live 键**。
+func resolveForwardTarget(userEnv map[string]any) (fallback string, perSignal string) {
+	fallback = envString(userEnv, keyEndpoint)
+	perSignal = envString(userEnv, keyMetricsEndpoint)
 
-	for _, act := range otelActions {
-		bk := act.backupPrefix + act.key
-		orig, hasOrig := out[bk]
-		if hasOrig {
-			// 有备份 → 还原原值 + 删备份。
-			out[act.key] = orig
+	if orig := envString(userEnv, backupPrefixOrig+keyEndpoint); orig != "" {
+		fallback = orig
+	}
+	if orig := envString(userEnv, backupPrefixForword+keyMetricsEndpoint); orig != "" {
+		perSignal = orig
+	}
+	return fallback, perSignal
+}
+
+// hasCclArtifact 判断 env 里有没有**旧版 ccl 留下的痕迹**。
+//
+// 痕迹有两种：
+//   - `CC_ORIG_*` / `FORWORD_*` 备份键（旧版的备份机制留下的）
+//   - live 兜底端点被改写成 `http://localhost:4318`（旧版的接管写入）
+//
+// 没有痕迹 → ccl **不许**动用户的文件（清理只在有痕迹时才动手）。
+func hasCclArtifact(env map[string]any) bool {
+	for k := range env {
+		if strings.HasPrefix(k, backupPrefixOrig) || strings.HasPrefix(k, backupPrefixForword) {
+			return true
+		}
+	}
+	return envString(env, keyEndpoint) == defaultEndpoint
+}
+
+// cleanupLegacyOtelEnv 清掉旧版 ccl 留在 settings.json 里的痕迹，还原用户原值。
+//
+// 规则（对每个受管 key）：
+//
+//  1. 有备份键 `CC_ORIG_<KEY>` / `FORWORD_<KEY>`：
+//     - 备份值 == ccl 自己的默认值 → 这是**自我备份**（旧版 ccl 给自己注入的
+//       值做的备份），用户本来就没有这个键 → live 键也删掉
+//     - 否则 → 备份值写回 live 键（还原用户原值）
+//     - 备份键一律删除
+//  2. 没有备份键、且 live 值 == ccl 自己的默认值 → 是旧版 ccl 注入的默认值
+//     （用户从来没有过）→ 删除
+//
+// 其余键（用户的 ANTHROPIC_* / permissions / 非 string 值……）一律不动。
+//
+// 返回 (清理后的 env, 是否发生了变化)。入参不被修改。
+func cleanupLegacyOtelEnv(env map[string]any) (map[string]any, bool) {
+	out := make(map[string]any, len(env))
+	for k, v := range env {
+		out[k] = v
+	}
+
+	changed := false
+	for _, p := range otelKeyPolicies {
+		bk := p.backupPrefix + p.key
+		backup, hasBackup := out[bk]
+		live, hasLive := out[p.key]
+
+		if hasBackup {
 			delete(out, bk)
-		} else {
-			// 无备份 → 这 key 要么用户从未设过（ccl 注入的默认）、要么用户自有但 ccl 没动它。
-			// 我们区分：如果是 ccl 注入的默认值就删；否则保留。
-			cur, exists := out[act.key]
-			if exists && cur == act.defaultValue {
-				delete(out, act.key)
+			changed = true
+			backupStr, backupIsStr := backup.(string)
+			if p.defaultValue != "" && backupIsStr && backupStr == p.defaultValue {
+				// 自我备份：用户本来没有这个键。live 也正好是默认值 → 一起删；
+				// live 被用户改过 → 保留用户的值。
+				if hasLive && live == p.defaultValue {
+					delete(out, p.key)
+				}
+				continue
 			}
-			// 注意：如果用户自有值恰好等于 defaultValue（如 "otlp"），restore 会误删。
-			// 决策：可接受；这是 restore 的"全清"语义（spec 明确）。
+			// 还原用户原值
+			out[p.key] = backup
+			continue
+		}
+
+		// 无备份：live 等于 ccl 的默认值 → 是旧版注入的，用户从来没有过
+		if p.defaultValue != "" && hasLive && live == p.defaultValue {
+			delete(out, p.key)
+			changed = true
 		}
 	}
 
-	return out
+	return out, changed
 }
 
-// formatOTelSummary 打印一段人类可读的描述（用于日志/帮助）。
-func formatOTelSummary(env map[string]string) string {
-	var lines []string
-	for _, k := range []string{keyEndpoint, keyMetricsEndpoint, keyLogsExporter, keyMetricsExport, keyProtocol, keyEnableTelemetry} {
-		if v, ok := env[k]; ok {
-			lines = append(lines, fmt.Sprintf("  %s=%s", k, v))
-		}
+// envString 从 env map 里取字符串值；不存在或不是 string 时返回 ""。
+func envString(env map[string]any, key string) string {
+	if env == nil {
+		return ""
 	}
-	if len(lines) == 0 {
-		return "  (none)"
-	}
-	return strings.Join(lines, "\n")
+	s, _ := env[key].(string)
+	return s
 }

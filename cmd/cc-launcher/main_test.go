@@ -4,10 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -16,447 +14,292 @@ import (
 	"cc-launcher/internal/state"
 )
 
-// backup-on-control-handover §1.2 + §1.3：isUnderCclControl 主路径 + 边界 case。
-func TestIsUnderCclControl(t *testing.T) {
+// =============================================================================
+// otel-endpoints-via-settings：OTel 环境准备
+//
+// 核心不变量：**ccl 不写 ~/.claude/settings.json** —— 端点接管全靠 --settings。
+// =============================================================================
+
+// clearOtelEnvs 清理 prepareOtelEnv 会 Setenv 的转发目标变量，避免测试间污染。
+func clearOtelEnvs(t *testing.T) {
+	t.Helper()
+	for _, k := range []string{envOrigEndpoint, envForwardMetricsEndpoint} {
+		t.Setenv(k, "")
+	}
+}
+
+// newTestStateMgr 造一个 state.Manager（临时目录）。
+func newTestStateMgr(t *testing.T) *state.Manager {
+	t.Helper()
+	return state.NewManager(t.TempDir())
+}
+
+// TestPrepareOtelEnv_DoesNotTouchSettingsFile 断言 ccl 不改用户的 settings 文件。
+//
+// 这是本 change 的核心不变量：旧版 ccl 会把端点改写进 settings.json，新版只读。
+func TestPrepareOtelEnv_DoesNotTouchSettingsFile(t *testing.T) {
+	clearOtelEnvs(t)
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+	cm := config.NewManager(settingsPath, filepath.Join(dir, "b"), 3)
+	if err := cm.SaveSettings(map[string]any{
+		"env": map[string]any{
+			"OTEL_EXPORTER_OTLP_ENDPOINT": "https://company-otel:4317",
+		},
+		"permissions": map[string]any{"allow": []any{"Bash(ls)"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deliver := prepareOtelEnv(cm, newTestStateMgr(t))
+
+	after, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Errorf("settings.json 不得被 ccl 修改:\nbefore=%s\nafter=%s", before, after)
+	}
+
+	// 端点仍然由 --settings 接管
+	if deliver[keyEndpoint] != defaultEndpoint {
+		t.Errorf("交付的端点应为 ccl 默认值, got %q", deliver[keyEndpoint])
+	}
+}
+
+// TestPrepareOtelEnv_DeliversTakeover 断言交付给子进程的 env 块内容。
+//
+// spec/claude-code-env-config §"ccl delivers the OTel env to Claude Code through
+// --settings"：接管 2 个端点键、尊重用户写过的 exporter/开关、绝不交付 logs。
+func TestPrepareOtelEnv_DeliversTakeover(t *testing.T) {
+	clearOtelEnvs(t)
+	dir := t.TempDir()
+	cm := config.NewManager(filepath.Join(dir, "s.json"), filepath.Join(dir, "b"), 3)
+	if err := cm.SaveSettings(map[string]any{
+		"env": map[string]any{
+			"OTEL_EXPORTER_OTLP_ENDPOINT": "https://company-otel:4317",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	deliver := prepareOtelEnv(cm, newTestStateMgr(t))
+
+	// 接管：两个端点键都是 ccl 的默认值
+	if deliver[keyEndpoint] != defaultEndpoint {
+		t.Errorf("%s 应被接管为 %q, got %q", keyEndpoint, defaultEndpoint, deliver[keyEndpoint])
+	}
+	if deliver[keyMetricsEndpoint] != defaultMetricsEndpoint {
+		t.Errorf("%s 应被接管为 %q, got %q", keyMetricsEndpoint, defaultMetricsEndpoint, deliver[keyMetricsEndpoint])
+	}
+	// 用户没写 → 补默认值
+	if deliver[keyMetricsExport] != defaultMetricsExporter {
+		t.Errorf("%s 应补默认值 %q, got %q", keyMetricsExport, defaultMetricsExporter, deliver[keyMetricsExport])
+	}
+	if deliver[keyProtocol] != defaultProtocol {
+		t.Errorf("%s 应补默认值 %q, got %q", keyProtocol, defaultProtocol, deliver[keyProtocol])
+	}
+	if deliver[keyEnableTelemetry] != defaultEnableTelemetry {
+		t.Errorf("%s 应补默认值 %q, got %q", keyEnableTelemetry, defaultEnableTelemetry, deliver[keyEnableTelemetry])
+	}
+	// logs exporter 永不交付
+	if _, ok := deliver[keyLogsExporter]; ok {
+		t.Errorf("%s 不该被交付, got %q", keyLogsExporter, deliver[keyLogsExporter])
+	}
+}
+
+// TestPrepareOtelEnv_RespectsUserChoice 断言用户自己写的 exporter 不被覆盖。
+func TestPrepareOtelEnv_RespectsUserChoice(t *testing.T) {
+	clearOtelEnvs(t)
+	dir := t.TempDir()
+	cm := config.NewManager(filepath.Join(dir, "s.json"), filepath.Join(dir, "b"), 3)
+	if err := cm.SaveSettings(map[string]any{
+		"env": map[string]any{
+			"OTEL_METRICS_EXPORTER":       "prometheus",
+			"OTEL_LOGS_EXPORTER":          "otlp",
+			"CLAUDE_CODE_ENABLE_TELEMETRY": "0",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	deliver := prepareOtelEnv(cm, newTestStateMgr(t))
+
+	for _, k := range []string{keyMetricsExport, keyLogsExporter, keyEnableTelemetry} {
+		if _, ok := deliver[k]; ok {
+			t.Errorf("用户自己写过的 %s 不该被交付, got %q", k, deliver[k])
+		}
+	}
+}
+
+// TestPrepareOtelEnv_ForwardTarget 断言转发目标变量指向用户自己的端点。
+//
+// spec/claude-code-env-config §"ccl delivers the forwarding target to the daemon
+// through its process environment"。
+func TestPrepareOtelEnv_ForwardTarget(t *testing.T) {
+	t.Run("fallback + per-signal 都投递", func(t *testing.T) {
+		clearOtelEnvs(t)
+		dir := t.TempDir()
+		cm := config.NewManager(filepath.Join(dir, "s.json"), filepath.Join(dir, "b"), 3)
+		if err := cm.SaveSettings(map[string]any{
+			"env": map[string]any{
+				"OTEL_EXPORTER_OTLP_ENDPOINT":         "https://fallback:4317",
+				"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "https://metrics:4318/v1/metrics",
+			},
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		prepareOtelEnv(cm, newTestStateMgr(t))
+
+		if got := os.Getenv(envOrigEndpoint); got != "https://fallback:4317" {
+			t.Errorf("%s = %q, want https://fallback:4317", envOrigEndpoint, got)
+		}
+		if got := os.Getenv(envForwardMetricsEndpoint); got != "https://metrics:4318/v1/metrics" {
+			t.Errorf("%s = %q, want https://metrics:4318/v1/metrics", envForwardMetricsEndpoint, got)
+		}
+	})
+
+	t.Run("用户没有端点 → 变量不设", func(t *testing.T) {
+		clearOtelEnvs(t)
+		dir := t.TempDir()
+		cm := config.NewManager(filepath.Join(dir, "s.json"), filepath.Join(dir, "b"), 3)
+
+		prepareOtelEnv(cm, newTestStateMgr(t))
+
+		if got := os.Getenv(envOrigEndpoint); got != "" {
+			t.Errorf("%s 不该被设置, got %q", envOrigEndpoint, got)
+		}
+		if got := os.Getenv(envForwardMetricsEndpoint); got != "" {
+			t.Errorf("%s 不该被设置, got %q", envForwardMetricsEndpoint, got)
+		}
+	})
+
+	t.Run("遗留备份键优先于被改写的 live 键", func(t *testing.T) {
+		clearOtelEnvs(t)
+		dir := t.TempDir()
+		cm := config.NewManager(filepath.Join(dir, "s.json"), filepath.Join(dir, "b"), 3)
+		if err := cm.SaveSettings(map[string]any{
+			"env": map[string]any{
+				"OTEL_EXPORTER_OTLP_ENDPOINT":        "http://localhost:4318",
+				"CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT": "https://company-otel:4317",
+			},
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		prepareOtelEnv(cm, newTestStateMgr(t))
+
+		if got := os.Getenv(envOrigEndpoint); got != "https://company-otel:4317" {
+			t.Errorf("%s = %q, want https://company-otel:4317（备份键优先）", envOrigEndpoint, got)
+		}
+	})
+}
+
+// TestPrepareOtelEnv_CleansLegacyArtifactsOnce 断言遗留清理：还原 + 只跑一次。
+//
+// spec/claude-code-env-config §"ccl cleans up legacy ccl artifacts from settings.json once"。
+func TestPrepareOtelEnv_CleansLegacyArtifactsOnce(t *testing.T) {
+	clearOtelEnvs(t)
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+	cm := config.NewManager(settingsPath, filepath.Join(dir, "b"), 3)
+	if err := cm.SaveSettings(map[string]any{
+		"env": map[string]any{
+			"OTEL_EXPORTER_OTLP_ENDPOINT":        "http://localhost:4318",
+			"CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT": "https://company-otel:4317",
+			"ANTHROPIC_BASE_URL":                 "https://api.example.com",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	sm := newTestStateMgr(t)
+	prepareOtelEnv(cm, sm)
+
+	settings, err := cm.LoadSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := settings["env"].(map[string]any)
+	if env[keyEndpoint] != "https://company-otel:4317" {
+		t.Errorf("用户原值应被还原, got %v", env[keyEndpoint])
+	}
+	if _, ok := env["CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT"]; ok {
+		t.Errorf("备份键应被删除, got %v", env)
+	}
+	if env["ANTHROPIC_BASE_URL"] != "https://api.example.com" {
+		t.Errorf("用户自有键不该被动, got %v", env)
+	}
+
+	// 第二次：不再动文件（标志已记）
+	before, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepareOtelEnv(cm, sm)
+	after, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Errorf("清理只应跑一次，第二次不该改文件:\nbefore=%s\nafter=%s", before, after)
+	}
+}
+
+// TestPrepareOtelEnv_NoArtifactLeavesFileAlone 断言没有 ccl 痕迹时不动用户文件。
+func TestPrepareOtelEnv_NoArtifactLeavesFileAlone(t *testing.T) {
+	clearOtelEnvs(t)
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+	cm := config.NewManager(settingsPath, filepath.Join(dir, "b"), 3)
+	if err := cm.SaveSettings(map[string]any{
+		"env": map[string]any{
+			"OTEL_METRICS_EXPORTER": "otlp", // 用户自己写的，不是 ccl 注入的
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prepareOtelEnv(cm, newTestStateMgr(t))
+
+	after, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Errorf("没有 ccl 痕迹时不该改用户文件:\nbefore=%s\nafter=%s", before, after)
+	}
+}
+
+// TestHasCclArtifact 断言"旧版 ccl 痕迹"的判定。
+func TestHasCclArtifact(t *testing.T) {
 	cases := []struct {
 		name string
 		env  map[string]any
 		want bool
 	}{
-		// §1.2 主路径：4 个 case
-		{
-			name: "fallback endpoint is ccl default → in control",
-			env: map[string]any{
-				"OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4318",
-			},
-			want: true,
-		},
-		{
-			name: "per-signal metrics endpoint is ccl default → in control",
-			env: map[string]any{
-				"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://localhost:4318/v1/metrics",
-			},
-			want: true,
-		},
-		{
-			name: "both endpoints are ccl defaults → in control",
-			env: map[string]any{
-				"OTEL_EXPORTER_OTLP_ENDPOINT":         "http://localhost:4318",
-				"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://localhost:4318/v1/metrics",
-			},
-			want: true,
-		},
-		{
-			name: "neither endpoint matches ccl defaults → NOT in control",
-			env: map[string]any{
-				"OTEL_EXPORTER_OTLP_ENDPOINT":         "https://company-otel:4317",
-				"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://other-tool:4318/v1/metrics",
-			},
-			want: false,
-		},
-		// §1.3 边界 case
-		{
-			name: "env is nil → NOT in control (treated as handover boundary)",
-			env:  nil,
-			want: false,
-		},
-		{
-			name: "endpoint key absent → NOT in control",
-			env: map[string]any{
-				"OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
-			},
-			want: false,
-		},
-		{
-			name: "endpoint value is nil → NOT in control",
-			env: map[string]any{
-				"OTEL_EXPORTER_OTLP_ENDPOINT": nil,
-			},
-			want: false,
-		},
-		{
-			name: "endpoint value is non-string (int) → NOT in control",
-			env: map[string]any{
-				"OTEL_EXPORTER_OTLP_ENDPOINT": 4318,
-			},
-			want: false,
-		},
-		{
-			name: "endpoint value is localhost:4318 but wrong scheme → NOT in control",
-			env: map[string]any{
-				"OTEL_EXPORTER_OTLP_ENDPOINT": "https://localhost:4318",
-			},
-			want: false,
-		},
+		{"空 env", map[string]any{}, false},
+		{"用户自己的 exporter", map[string]any{keyMetricsExport: "otlp"}, false},
+		{"用户的远程端点", map[string]any{keyEndpoint: "https://company-otel:4317"}, false},
+		{"旧版改写的端点", map[string]any{keyEndpoint: defaultEndpoint}, true},
+		{"旧版的 CC_ORIG_ 备份键", map[string]any{backupPrefixOrig + keyEndpoint: "https://x"}, true},
+		{"旧版的 FORWORD_ 备份键", map[string]any{backupPrefixForword + keyMetricsEndpoint: "https://x"}, true},
 	}
-
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := isUnderCclControl(tc.env)
-			if got != tc.want {
-				t.Errorf("isUnderCclControl(%v) = %v, want %v", tc.env, got, tc.want)
+			if got := hasCclArtifact(tc.env); got != tc.want {
+				t.Errorf("hasCclArtifact(%v) = %v, want %v", tc.env, got, tc.want)
 			}
 		})
-	}
-}
-
-// telemetry-config-compat §4.3
-
-func TestInjectOTelEnv_FORWORD_Propagation(t *testing.T) {
-	dir := t.TempDir()
-	settingsPath := filepath.Join(dir, "settings.json")
-	backupDir := filepath.Join(dir, "backups")
-	cm := config.NewManager(settingsPath, backupDir, 3)
-
-	// 准备典型公司远程 collector 配置：用户设了 per-signal metrics endpoint
-	initial := map[string]any{
-		"env": map[string]any{
-			"OTEL_EXPORTER_OTLP_ENDPOINT":      "http://remote:4318",
-			"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://remote:4318/v1/metrics",
-		},
-	}
-	if err := cm.SaveSettings(initial); err != nil {
-		t.Fatal(err)
-	}
-
-	const fwdKey = "FORWORD_OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
-	// 确保初始 env 是干净的，避免被其它测试污染
-	t.Setenv(fwdKey, "")
-
-	if err := injectOTelEnv(cm); err != nil {
-		t.Fatalf("injectOTelEnv: %v", err)
-	}
-
-	got := os.Getenv(fwdKey)
-	if got != "http://remote:4318/v1/metrics" {
-		t.Errorf("FORWORD_ env must be set to user original value: got %q", got)
-	}
-}
-
-// telemetry-config-compat §4.4
-
-func TestInjectOTelEnv_FORWORD_EdgeCases(t *testing.T) {
-	const fwdKey = "FORWORD_OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
-
-	t.Run("user missing per-signal metrics → FORWORD_ not set", func(t *testing.T) {
-		dir := t.TempDir()
-		cm := config.NewManager(filepath.Join(dir, "s.json"), filepath.Join(dir, "b"), 3)
-		// 仅设 fallback，无 per-signal metrics
-		initial := map[string]any{
-			"env": map[string]any{
-				"OTEL_EXPORTER_OTLP_ENDPOINT": "http://remote:4318",
-			},
-		}
-		if err := cm.SaveSettings(initial); err != nil {
-			t.Fatal(err)
-		}
-		t.Setenv(fwdKey, "")
-
-		if err := injectOTelEnv(cm); err != nil {
-			t.Fatalf("injectOTelEnv: %v", err)
-		}
-		if got := os.Getenv(fwdKey); got != "" {
-			t.Errorf("FORWORD_ should NOT be set when user missing per-signal metrics: got %q", got)
-		}
-	})
-
-	t.Run("pre-existing FORWORD_ env → overwritten with settings.json backup", func(t *testing.T) {
-		dir := t.TempDir()
-		cm := config.NewManager(filepath.Join(dir, "s.json"), filepath.Join(dir, "b"), 3)
-		initial := map[string]any{
-			"env": map[string]any{
-				"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://user-original:9999/v1/metrics",
-			},
-		}
-		if err := cm.SaveSettings(initial); err != nil {
-			t.Fatal(err)
-		}
-		// 预存一个不一样的值（模拟 daemon 已启动后残留）
-		t.Setenv(fwdKey, "http://stale:1/v1/metrics")
-
-		if err := injectOTelEnv(cm); err != nil {
-			t.Fatalf("injectOTelEnv: %v", err)
-		}
-		if got := os.Getenv(fwdKey); got != "http://user-original:9999/v1/metrics" {
-			t.Errorf("FORWORD_ must be overwritten with backup value: got %q", got)
-		}
-	})
-
-	t.Run("idempotent — second call without daemon changes does not harm env", func(t *testing.T) {
-		dir := t.TempDir()
-		cm := config.NewManager(filepath.Join(dir, "s.json"), filepath.Join(dir, "b"), 3)
-		initial := map[string]any{
-			"env": map[string]any{
-				"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://user-original:9999/v1/metrics",
-			},
-		}
-		if err := cm.SaveSettings(initial); err != nil {
-			t.Fatal(err)
-		}
-		t.Setenv(fwdKey, "")
-
-		// 第一次注入
-		if err := injectOTelEnv(cm); err != nil {
-			t.Fatalf("first injectOTelEnv: %v", err)
-		}
-		firstVal := os.Getenv(fwdKey)
-
-		// 第二次注入（settings.json 没变 → injectOTelEnv 仍然写 env，幂等）
-		if err := injectOTelEnv(cm); err != nil {
-			t.Fatalf("second injectOTelEnv: %v", err)
-		}
-		secondVal := os.Getenv(fwdKey)
-		if firstVal != secondVal {
-			t.Errorf("FORWORD_ value changed between calls: %q → %q", firstVal, secondVal)
-		}
-		if firstVal != "http://user-original:9999/v1/metrics" {
-			t.Errorf("FORWORD_ should hold user backup: %q", firstVal)
-		}
-	})
-}
-
-// backup-on-control-handover §3：完整 spec scenario 覆盖。
-
-// clearOTelBackupEnvs 清理 injectOTelEnv 会 Setenv 的所有备份键，避免测试间污染。
-func clearOTelBackupEnvs(t *testing.T) {
-	t.Helper()
-	keys := []string{
-		"CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT",
-		"CC_ORIG_OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
-		"CC_ORIG_OTEL_LOGS_EXPORTER",
-		"CC_ORIG_OTEL_METRICS_EXPORTER",
-		"CC_ORIG_OTEL_EXPORTER_OTLP_PROTOCOL",
-		"CC_ORIG_CLAUDE_CODE_ENABLE_TELEMETRY",
-		"FORWORD_OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
-		"CC_FORWARD_AUTH_HEADER",
-	}
-	for _, k := range keys {
-		t.Setenv(k, "")
-	}
-}
-//
-// 每个 subtest 对应 spec "claude-code-env-config" 的一个 Scenario。
-// 用 t.Run 集中管理便于 spec 修订时定位测试。
-
-func TestInjectOTelEnv_SpecScenarios(t *testing.T) {
-	// §3.5 回归测试：Manager.Backup 对不存在的 settings.json 返回 nil 且不创建目录。
-	// 提到最前面因为 §3.1 等 scenario 隐含依赖此契约。
-	t.Run("backup no-op when settings.json missing", func(t *testing.T) {
-		clearOTelBackupEnvs(t)
-		dir := t.TempDir()
-		cm := config.NewManager(filepath.Join(dir, "settings.json"), filepath.Join(dir, "backups"), 3)
-		if err := cm.Backup(); err != nil {
-			t.Fatalf("Backup on missing settings.json must be no-op, got err: %v", err)
-		}
-		if _, err := os.Stat(filepath.Join(dir, "backups")); !os.IsNotExist(err) {
-			t.Errorf("backupDir should NOT be created when settings.json is missing (stat err=%v)", err)
-		}
-	})
-
-	// §3.1：首次 ccl 启动，settings.json 健康基线被备份。
-	t.Run("first-run backup captures user original", func(t *testing.T) {
-		clearOTelBackupEnvs(t)
-		dir := t.TempDir()
-		cm := config.NewManager(filepath.Join(dir, "s.json"), filepath.Join(dir, "b"), 3)
-		cm.SaveSettings(map[string]any{
-			"env": map[string]any{
-				"OTEL_EXPORTER_OTLP_ENDPOINT": "https://company-otel:4317",
-			},
-		})
-
-		if err := injectOTelEnv(cm); err != nil {
-			t.Fatalf("injectOTelEnv: %v", err)
-		}
-
-		entries, err := os.ReadDir(filepath.Join(dir, "b"))
-		if err != nil {
-			t.Fatalf("readDir backupDir: %v", err)
-		}
-		if len(entries) != 1 {
-			t.Fatalf("expected 1 backup, got %d", len(entries))
-		}
-		data, _ := os.ReadFile(filepath.Join(dir, "b", entries[0].Name()))
-		var backup map[string]any
-		if err := json.Unmarshal(data, &backup); err != nil {
-			t.Fatal(err)
-		}
-		env := backup["env"].(map[string]any)
-		if env["OTEL_EXPORTER_OTLP_ENDPOINT"] != "https://company-otel:4317" {
-			t.Errorf("backup must capture user original endpoint, got %v", env["OTEL_EXPORTER_OTLP_ENDPOINT"])
-		}
-	})
-
-	// §3.2：ccl 已在控制中（每次常规启动），跳过 Backup。
-	t.Run("in-control skips backup", func(t *testing.T) {
-		clearOTelBackupEnvs(t)
-		dir := t.TempDir()
-		cm := config.NewManager(filepath.Join(dir, "s.json"), filepath.Join(dir, "b"), 3)
-		cm.SaveSettings(map[string]any{
-			"env": map[string]any{
-				"OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4318",
-			},
-		})
-
-		if err := injectOTelEnv(cm); err != nil {
-			t.Fatalf("injectOTelEnv: %v", err)
-		}
-
-		if _, err := os.Stat(filepath.Join(dir, "b")); !os.IsNotExist(err) {
-			entries, _ := os.ReadDir(filepath.Join(dir, "b"))
-			t.Errorf("backupDir must be absent (in-control skip), got %d entries (stat err=%v)", len(entries), err)
-		}
-	})
-
-	// §3.3：第三方覆盖 OTel 端点但 CC_ORIG_* 残留，触发 Backup。
-	// ccl 重新接管但不擦除 CC_ORIG_*（那是 restore 的工作）。
-	t.Run("third-party overwrite triggers backup and keeps CC_ORIG_", func(t *testing.T) {
-		clearOTelBackupEnvs(t)
-		dir := t.TempDir()
-		cm := config.NewManager(filepath.Join(dir, "s.json"), filepath.Join(dir, "b"), 3)
-		cm.SaveSettings(map[string]any{
-			"env": map[string]any{
-				"OTEL_EXPORTER_OTLP_ENDPOINT":                "http://other-tool:4318",
-				"CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT":         "https://company-otel:4317",
-			},
-		})
-
-		if err := injectOTelEnv(cm); err != nil {
-			t.Fatalf("injectOTelEnv: %v", err)
-		}
-
-		// 1. 触发了 Backup
-		entries, err := os.ReadDir(filepath.Join(dir, "b"))
-		if err != nil {
-			t.Fatalf("readDir: %v", err)
-		}
-		if len(entries) != 1 {
-			t.Fatalf("expected 1 backup, got %d", len(entries))
-		}
-		// 备份内容反映"接管前"——三方覆盖态
-		data, _ := os.ReadFile(filepath.Join(dir, "b", entries[0].Name()))
-		var backup map[string]any
-		json.Unmarshal(data, &backup)
-		bEnv := backup["env"].(map[string]any)
-		if bEnv["OTEL_EXPORTER_OTLP_ENDPOINT"] != "http://other-tool:4318" {
-			t.Errorf("backup must capture pre-takeover state, got endpoint=%v", bEnv["OTEL_EXPORTER_OTLP_ENDPOINT"])
-		}
-
-		// 2. ccl 接管后 CC_ORIG_* 仍在（restore 才清）
-		settings, _ := cm.LoadSettings()
-		curEnv := settings["env"].(map[string]any)
-		if curEnv["OTEL_EXPORTER_OTLP_ENDPOINT"] != "http://localhost:4318" {
-			t.Errorf("ccl must take over endpoint, got %v", curEnv["OTEL_EXPORTER_OTLP_ENDPOINT"])
-		}
-		if curEnv["CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT"] != "https://company-otel:4317" {
-			t.Errorf("CC_ORIG_ must NOT be erased by injectOTelEnv (that's restore's job), got %v", curEnv["CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT"])
-		}
-	})
-
-	// §3.4：per-signal metrics 接管路径识别为 ccl 控制中。
-	t.Run("per-signal metrics takeover is recognized as in-control", func(t *testing.T) {
-		clearOTelBackupEnvs(t)
-		dir := t.TempDir()
-		cm := config.NewManager(filepath.Join(dir, "s.json"), filepath.Join(dir, "b"), 3)
-		cm.SaveSettings(map[string]any{
-			"env": map[string]any{
-				"OTEL_EXPORTER_OTLP_ENDPOINT":         "http://user-company:4317", // 兜底非 localhost
-				"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://localhost:4318/v1/metrics", // per-signal 是 ccl 默认
-			},
-		})
-
-		if err := injectOTelEnv(cm); err != nil {
-			t.Fatalf("injectOTelEnv: %v", err)
-		}
-
-		if _, err := os.Stat(filepath.Join(dir, "b")); !os.IsNotExist(err) {
-			entries, _ := os.ReadDir(filepath.Join(dir, "b"))
-			t.Errorf("backupDir must be absent (per-signal takeover → in-control), got %d entries", len(entries))
-		}
-	})
-
-	// §3.7：settings.json 存在但无 env 字段（用户从未用 OTel）。
-	// 也是控制权交接边界 → Backup 触发。
-	t.Run("settings.json without env field triggers backup", func(t *testing.T) {
-		clearOTelBackupEnvs(t)
-		dir := t.TempDir()
-		cm := config.NewManager(filepath.Join(dir, "s.json"), filepath.Join(dir, "b"), 3)
-		cm.SaveSettings(map[string]any{
-			"enabledPlugins": map[string]any{"some-plugin": true},
-		})
-
-		if err := injectOTelEnv(cm); err != nil {
-			t.Fatalf("injectOTelEnv: %v", err)
-		}
-
-		entries, err := os.ReadDir(filepath.Join(dir, "b"))
-		if err != nil {
-			t.Fatalf("readDir: %v", err)
-		}
-		if len(entries) != 1 {
-			t.Fatalf("expected 1 backup (no env field = handover boundary), got %d", len(entries))
-		}
-	})
-}
-
-// backup-on-control-handover §3.6：Backup 失败仅警告，不阻断 ccl 主流程。
-//
-// 测试方式：os.Chmod(backupDir, 0) 制造不可写 + defer 恢复；断言
-//   - injectOTelEnv 返回 nil（不向上传播 Backup 错误）
-//   - SaveSettings 仍发生（OTel 注入仍完成）
-//   - log 输出含警告行（用 log.SetOutput 重定向到 buffer）
-//
-// 平台限制：仅 Linux/macOS 生效；Windows 上 t.Skipf 跳过。
-func TestInjectOTelEnv_BackupFailureOnlyWarns(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skipf("Backup 权限测试在 Windows 不可靠（chmod 语义差异）")
-	}
-	clearOTelBackupEnvs(t)
-
-	dir := t.TempDir()
-	backupDir := filepath.Join(dir, "b")
-	if err := os.MkdirAll(backupDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(backupDir, 0); err != nil {
-		t.Fatalf("chmod 0: %v", err)
-	}
-	if os.Geteuid() == 0 {
-		_ = os.Chmod(backupDir, 0755)
-		t.Skipf("root 用户不受 chmod 0 限制，跳过该测试")
-	}
-	t.Cleanup(func() { _ = os.Chmod(backupDir, 0755) })
-
-	cm := config.NewManager(filepath.Join(dir, "s.json"), backupDir, 3)
-	cm.SaveSettings(map[string]any{
-		"env": map[string]any{
-			"OTEL_EXPORTER_OTLP_ENDPOINT": "https://company-otel:4317",
-		},
-	})
-
-	// 重定向 log 输出（log 包内部缓存了默认 stderr 的引用，
-	// 替换 os.Stderr 变量无效，必须用 log.SetOutput）。
-	var logBuf bytes.Buffer
-	origLogOutput := log.Writer()
-	log.SetOutput(&logBuf)
-	t.Cleanup(func() { log.SetOutput(origLogOutput) })
-
-	if err := injectOTelEnv(cm); err != nil {
-		t.Errorf("injectOTelEnv must NOT return Backup error, got: %v", err)
-	}
-
-	logged := logBuf.String()
-	if !strings.Contains(logged, "injectOTelEnv: 备份 settings.json 失败") {
-		t.Errorf("log output should contain Backup warning, got: %q", logged)
-	}
-
-	// 验证 SaveSettings 仍发生（应用级备份 + endpoint 改写完成）
-	settings, err := cm.LoadSettings()
-	if err != nil {
-		t.Fatalf("LoadSettings: %v", err)
-	}
-	env := settings["env"].(map[string]any)
-	if env["OTEL_EXPORTER_OTLP_ENDPOINT"] != "http://localhost:4318" {
-		t.Errorf("OTel injection must complete despite Backup failure, got endpoint=%v", env["OTEL_EXPORTER_OTLP_ENDPOINT"])
 	}
 }
 
@@ -1110,15 +953,15 @@ func TestMigrate_NoMatchNoBackup(t *testing.T) {
 	}
 }
 
-// ─── provider-setenv-cwd-binding §8.6: E2E Backup 节奏回归 ───
+// ─── otel-endpoints-via-settings: E2E Backup 节奏回归 ───
 
-// TestE2E_OldUserFirstRunTUI_BackupRhythm 覆盖 tasks.md §8.6 + spec
-// §"Migration backs up settings.json before write" + injectOTelEnv "控制权交接
-// 边界" 备份策略的组合断言——老 ccl 用户首次 runTUI 后 backups/ 目录新增 ≤ 1 个
-// settings-*.json 文件：
-//   - migrate 删 1 个匹配 key 调 Backup（1 次）
-//   - injectOTelEnv 看到 OTel 仍在 → ccl 仍在控制下 → 不调 Backup（0 次）
-//   合计 1 次。
+// TestE2E_OldUserFirstRunTUI_BackupRhythm 覆盖老 ccl 用户升级后的备份节奏：
+//   - migrate（provider 迁移）删 1 个匹配 key → Backup（1 次）
+//   - 遗留清理（OTel）删掉旧版注入的端点 → Backup（1 次）
+//   - 第二次启动：两个迁移都已是 no-op → 不再产生备份
+//
+// 关键不变量：**新流程不再为"控制权交接"备份** —— ccl 不写 settings.json，
+// 没有交接这回事。
 func TestE2E_OldUserFirstRunTUI_BackupRhythm(t *testing.T) {
 	tmpHome := t.TempDir()
 
@@ -1131,7 +974,7 @@ func TestE2E_OldUserFirstRunTUI_BackupRhythm(t *testing.T) {
 		t.Fatalf("SetInjectedSnapshot: %v", err)
 	}
 
-	// 构造 settings.json 含匹配的 ANTHROPIC_* + OTel_*（ccl 仍在控制下）
+	// 构造 settings.json 含匹配的 ANTHROPIC_* + 旧版 ccl 注入的 OTel 端点
 	claudeDir := filepath.Join(tmpHome, ".claude")
 	if err := os.MkdirAll(claudeDir, 0755); err != nil {
 		t.Fatal(err)
@@ -1139,7 +982,7 @@ func TestE2E_OldUserFirstRunTUI_BackupRhythm(t *testing.T) {
 	settingsPath := filepath.Join(claudeDir, "settings.json")
 	settings := map[string]any{"env": map[string]any{
 		"ANTHROPIC_AUTH_TOKEN":        "sk-ccl-wrote",          // 匹配 snapshot → 删
-		"OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4318", // ccl 仍在控制下
+		"OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4318", // 旧版 ccl 注入的端点 → 遗留清理删
 	}}
 	data, _ := json.Marshal(settings)
 	if err := os.WriteFile(settingsPath, data, 0644); err != nil {
@@ -1149,28 +992,47 @@ func TestE2E_OldUserFirstRunTUI_BackupRhythm(t *testing.T) {
 	backupDir := filepath.Join(stateDir, "backups")
 	cm := config.NewManager(settingsPath, backupDir, 10)
 
-	// 模拟 runTUI 的 migrate + injectOTelEnv 顺序（tasks §4.4）
+	// 模拟 runTUI 的顺序：provider 迁移 → OTel 环境准备
 	if err := migrateSettingsJSON(cm, sm); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	if err := injectOTelEnv(cm); err != nil {
-		t.Fatalf("injectOTelEnv: %v", err)
-	}
+	prepareOtelEnv(cm, sm)
 
-	// 断言 backups/ ≤ 1 个文件
+	// 第一次：migrate + 遗留清理各备份一次（备份文件名精确到秒，同秒会互相覆盖，
+	// 所以这里只断言"有备份"+"旧版端点已被清掉"）
 	entries, err := os.ReadDir(backupDir)
 	if err != nil {
-		if !os.IsNotExist(err) {
-			t.Fatalf("ReadDir: %v", err)
-		}
-		// 目录不存在 = 0 backup（接受"无操作"语义）
-		return
+		t.Fatalf("ReadDir: %v", err)
 	}
-	if len(entries) > 1 {
-		t.Errorf("backups count = %d, want ≤ 1 (migrate 1 + injectOTelEnv 0)", len(entries))
-		for _, e := range entries {
-			t.Logf("  - %s", e.Name())
-		}
+	if len(entries) == 0 {
+		t.Error("首次启动应产生备份")
+	}
+
+	// 旧版 ccl 注入的端点应被清掉
+	after, err := cm.LoadSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	envAny, _ := after["env"].(map[string]any)
+	if _, ok := envAny["OTEL_EXPORTER_OTLP_ENDPOINT"]; ok {
+		t.Errorf("旧版注入的端点应被清理掉: %v", envAny)
+	}
+	if envAny["ANTHROPIC_AUTH_TOKEN"] != nil {
+		t.Errorf("provider 迁移应删掉匹配的 key: %v", envAny)
+	}
+
+	// 第二次：都是 no-op → 不再产生备份
+	before := map[string]bool{}
+	for _, e := range entries {
+		before[e.Name()] = true
+	}
+	prepareOtelEnv(cm, sm)
+	entries, err = os.ReadDir(backupDir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != len(before) {
+		t.Errorf("第二次启动后 backups count = %d, want %d（不再新增）", len(entries), len(before))
 	}
 }
 

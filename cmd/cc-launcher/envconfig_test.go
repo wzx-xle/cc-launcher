@@ -1,268 +1,251 @@
 package main
 
 import (
-	"reflect"
 	"testing"
 )
 
-func TestBackupAndInjectOTel_Missing(t *testing.T) {
-	got := backupAndInjectOTel(map[string]string{})
+// =============================================================================
+// otel-endpoints-via-settings：交付策略 / 转发目标 / 遗留清理
+// =============================================================================
+
+// TestBuildChildOtelEnv_Takeover 断言两个端点键**总是**被接管。
+func TestBuildChildOtelEnv_Takeover(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]any
+	}{
+		{"空 env", map[string]any{}},
+		{"用户有远程端点", map[string]any{keyEndpoint: "https://company-otel:4317"}},
+		{"用户有 per-signal 端点", map[string]any{keyMetricsEndpoint: "https://m:4318/v1/metrics"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := buildChildOtelEnv(tc.env)
+			if got[keyEndpoint] != defaultEndpoint {
+				t.Errorf("%s = %q, want %q", keyEndpoint, got[keyEndpoint], defaultEndpoint)
+			}
+			if got[keyMetricsEndpoint] != defaultMetricsEndpoint {
+				t.Errorf("%s = %q, want %q", keyMetricsEndpoint, got[keyMetricsEndpoint], defaultMetricsEndpoint)
+			}
+		})
+	}
+}
+
+// TestBuildChildOtelEnv_RespectsUserValue 断言用户自己写过的键**不被交付**
+// （不交付 = settings.json 的值继续生效）。
+func TestBuildChildOtelEnv_RespectsUserValue(t *testing.T) {
+	env := map[string]any{
+		keyMetricsExport:   "prometheus",
+		keyProtocol:        "grpc",
+		keyEnableTelemetry: "0",
+		keyLogsExporter:    "otlp",
+	}
+	got := buildChildOtelEnv(env)
+	for _, k := range []string{keyMetricsExport, keyProtocol, keyEnableTelemetry, keyLogsExporter} {
+		if _, ok := got[k]; ok {
+			t.Errorf("%s 用户自己写过，不该被交付, got %q", k, got[k])
+		}
+	}
+	// 端点仍然接管
+	if got[keyEndpoint] != defaultEndpoint {
+		t.Errorf("%s 应被接管, got %q", keyEndpoint, got[keyEndpoint])
+	}
+}
+
+// TestBuildChildOtelEnv_MissingGetsDefault 断言用户没写的键补默认值。
+func TestBuildChildOtelEnv_MissingGetsDefault(t *testing.T) {
+	got := buildChildOtelEnv(map[string]any{})
 	want := map[string]string{
 		keyEndpoint:        defaultEndpoint,
+		keyMetricsEndpoint: defaultMetricsEndpoint,
 		keyMetricsExport:   defaultMetricsExporter,
 		keyProtocol:        defaultProtocol,
 		keyEnableTelemetry: defaultEnableTelemetry,
-		// keyLogsExporter 缺失时不注入（决策 16）
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("missing env:\n got=%v\nwant=%v", got, want)
+	if len(got) != len(want) {
+		t.Fatalf("交付的键数 = %d, want %d (%v)", len(got), len(want), got)
 	}
-}
-
-func TestBackupAndInjectOTel_ExistingEndpoint(t *testing.T) {
-	got := backupAndInjectOTel(map[string]string{
-		keyEndpoint: "https://company-otel:4317",
-	})
-	// endpoint 备份 + 改写为 localhost
-	want := map[string]string{
-		keyEndpoint:          defaultEndpoint,
-		backupKey(keyEndpoint): "https://company-otel:4317",
-		keyMetricsExport:     defaultMetricsExporter,
-		keyProtocol:          defaultProtocol,
-		keyEnableTelemetry:   defaultEnableTelemetry,
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("existing endpoint:\n got=%v\nwant=%v", got, want)
-	}
-}
-
-func TestBackupAndInjectOTel_LogsRespected(t *testing.T) {
-	// 用户设了 OTEL_LOGS_EXPORTER=otlp → 备份 + 保留
-	got := backupAndInjectOTel(map[string]string{
-		keyLogsExporter: "otlp",
-	})
-	want := map[string]string{
-		keyEndpoint:             defaultEndpoint,
-		keyMetricsExport:        defaultMetricsExporter,
-		keyProtocol:             defaultProtocol,
-		keyEnableTelemetry:      defaultEnableTelemetry,
-		keyLogsExporter:         "otlp",
-		backupKey(keyLogsExporter): "otlp",
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("logs respected:\n got=%v\nwant=%v", got, want)
-	}
-}
-
-func TestBackupAndInjectOTel_BackupNotOverwritten(t *testing.T) {
-	// CC_ORIG_ 已存在 → 不覆盖
-	got := backupAndInjectOTel(map[string]string{
-		keyEndpoint:        "http://localhost:4318", // ccl 已经写过的
-		backupKey(keyEndpoint): "https://original.com",
-	})
-	if got[backupKey(keyEndpoint)] != "https://original.com" {
-		t.Errorf("backup should not be overwritten: %v", got)
-	}
-}
-
-func TestBackupAndInjectOTel_PrometheusUser(t *testing.T) {
-	// 用户设 OTEL_METRICS_EXPORTER=prometheus → 备份 + 保留
-	got := backupAndInjectOTel(map[string]string{
-		keyMetricsExport: "prometheus",
-	})
-	if got[keyMetricsExport] != "prometheus" {
-		t.Errorf("prometheus should be respected, got %v", got)
-	}
-	if got[backupKey(keyMetricsExport)] != "prometheus" {
-		t.Errorf("prometheus should be backed up: %v", got)
-	}
-}
-
-func TestRestoreOTelEnv_RestoresOrig(t *testing.T) {
-	env := map[string]string{
-		keyEndpoint:             defaultEndpoint,
-		backupKey(keyEndpoint):  "https://company-otel:4317",
-		keyMetricsExport:        defaultMetricsExporter,
-		keyProtocol:             defaultProtocol,
-		keyEnableTelemetry:      defaultEnableTelemetry,
-	}
-	got := restoreOTelEnv(env)
-	want := map[string]string{
-		keyEndpoint: "https://company-otel:4317",
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("restore:\n got=%v\nwant=%v", got, want)
-	}
-}
-
-func TestRestoreOTelEnv_RemovesInjectedDefaults(t *testing.T) {
-	// ccl 注入的默认值（无对应 backup）→ 删除
-	env := map[string]string{
-		keyMetricsExport:   defaultMetricsExporter, // "otlp" 是 ccl 默认值
-		keyProtocol:        defaultProtocol,       // "http/protobuf" 是 ccl 默认值
-		keyEnableTelemetry: defaultEnableTelemetry,
-		// 用户的真值，不动
-		"ANTHROPIC_API_KEY": "sk-fake",
-	}
-	got := restoreOTelEnv(env)
-	if _, ok := got[keyMetricsExport]; ok {
-		t.Errorf("injected metric exporter should be removed: %v", got)
-	}
-	if _, ok := got[keyProtocol]; ok {
-		t.Errorf("injected protocol should be removed: %v", got)
-	}
-	if got["ANTHROPIC_API_KEY"] != "sk-fake" {
-		t.Errorf("user key should not be touched: %v", got)
-	}
-}
-
-func TestRestoreOTelEnv_Idempotent(t *testing.T) {
-	// 跑两次 restore，第二次应是 no-op（map 完全一致）
-	env := map[string]string{
-		keyEndpoint:             "https://company-otel:4317",
-		backupKey(keyEndpoint):  "https://orig.com",
-		keyMetricsExport:        defaultMetricsExporter,
-		keyProtocol:             defaultProtocol,
-		keyEnableTelemetry:      defaultEnableTelemetry,
-	}
-	first := restoreOTelEnv(env)
-	second := restoreOTelEnv(first)
-	if !reflect.DeepEqual(first, second) {
-		t.Errorf("restore not idempotent: %v vs %v", first, second)
-	}
-}
-
-func TestIsLocalhostEndpoint(t *testing.T) {
-	cases := map[string]bool{
-		"http://localhost:4318":      true,
-		"http://127.0.0.1:4318":      true,
-		"https://company.com":        false,
-		"https://otel.example.com":   false,
-		"":                           false,
-	}
-	for in, want := range cases {
-		if got := isLocalhostEndpoint(in); got != want {
-			t.Errorf("isLocalhostEndpoint(%q): want %v, got %v", in, want, got)
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s = %q, want %q", k, got[k], v)
 		}
 	}
 }
 
-func TestBackupKey(t *testing.T) {
-	if got := backupKey("FOO"); got != "CC_ORIG_FOO" {
-		t.Errorf("got %q", got)
+// TestBuildChildOtelEnv_NeverDeliversLogs 断言 OTEL_LOGS_EXPORTER 永不交付。
+func TestBuildChildOtelEnv_NeverDeliversLogs(t *testing.T) {
+	got := buildChildOtelEnv(map[string]any{keyLogsExporter: "otlp"})
+	if _, ok := got[keyLogsExporter]; ok {
+		t.Errorf("%s 不该被交付, got %q", keyLogsExporter, got[keyLogsExporter])
 	}
 }
 
-// telemetry-config-compat §1.6
-
-func TestBackupAndInject_PerSignalMetrics(t *testing.T) {
-	const fwdKey = "FORWORD_" + keyMetricsEndpoint
-
-	t.Run("user has per-signal metrics → backup to FORWORD_ + override", func(t *testing.T) {
-		got := backupAndInjectOTel(map[string]string{
-			keyMetricsEndpoint: "http://remote:4318/v1/metrics",
-		})
-		if got[keyMetricsEndpoint] != defaultMetricsEndpoint {
-			t.Errorf("per-signal metrics should be overridden: got %q", got[keyMetricsEndpoint])
+// TestResolveForwardTarget 断言转发目标的解析。
+func TestResolveForwardTarget(t *testing.T) {
+	t.Run("fallback 与 per-signal 各取各的", func(t *testing.T) {
+		env := map[string]any{
+			keyEndpoint:        "https://fallback:4317",
+			keyMetricsEndpoint: "https://metrics:4318/v1/metrics",
 		}
-		if got[fwdKey] != "http://remote:4318/v1/metrics" {
-			t.Errorf("user value should be backed up to FORWORD_*: got %q", got[fwdKey])
+		fb, ps := resolveForwardTarget(env)
+		if fb != "https://fallback:4317" {
+			t.Errorf("fallback = %q", fb)
 		}
-	})
-
-	t.Run("user missing per-signal metrics → no injection, no FORWORD_ backup", func(t *testing.T) {
-		got := backupAndInjectOTel(map[string]string{
-			keyEndpoint: "http://remote:4318",
-		})
-		if _, ok := got[keyMetricsEndpoint]; ok {
-			t.Errorf("per-signal metrics should NOT be injected when user missing: got %v", got)
-		}
-		if _, ok := got[fwdKey]; ok {
-			t.Errorf("FORWORD_ backup should NOT exist when user missing: got %v", got)
+		if ps != "https://metrics:4318/v1/metrics" {
+			t.Errorf("per-signal = %q", ps)
 		}
 	})
 
-	t.Run("FORWORD_ backup already exists → not overwritten on second run", func(t *testing.T) {
-		got := backupAndInjectOTel(map[string]string{
-			keyMetricsEndpoint:         "http://localhost:4318/v1/metrics", // ccl 上次写的
-			"FORWORD_" + keyMetricsEndpoint: "http://ORIGINAL:9999/v1/metrics", // 首次 ccl 写的 backup
-		})
-		if got["FORWORD_"+keyMetricsEndpoint] != "http://ORIGINAL:9999/v1/metrics" {
-			t.Errorf("FORWORD_ backup must not be overwritten: %v", got)
+	t.Run("没有端点 → 两个都空", func(t *testing.T) {
+		fb, ps := resolveForwardTarget(map[string]any{})
+		if fb != "" || ps != "" {
+			t.Errorf("没有端点时应为空, got %q / %q", fb, ps)
+		}
+	})
+
+	t.Run("遗留备份键优先于被改写的 live 键", func(t *testing.T) {
+		env := map[string]any{
+			keyEndpoint:                            defaultEndpoint,
+			backupPrefixOrig + keyEndpoint:         "https://company-otel:4317",
+			keyMetricsEndpoint:                     defaultMetricsEndpoint,
+			backupPrefixForword + keyMetricsEndpoint: "https://metrics:4318/v1/metrics",
+		}
+		fb, ps := resolveForwardTarget(env)
+		if fb != "https://company-otel:4317" {
+			t.Errorf("fallback 应取备份键, got %q", fb)
+		}
+		if ps != "https://metrics:4318/v1/metrics" {
+			t.Errorf("per-signal 应取备份键, got %q", ps)
+		}
+	})
+
+	t.Run("非 string 值被忽略", func(t *testing.T) {
+		env := map[string]any{keyEndpoint: 4318}
+		fb, _ := resolveForwardTarget(env)
+		if fb != "" {
+			t.Errorf("非 string 值应被忽略, got %q", fb)
 		}
 	})
 }
 
-// telemetry-config-compat §1.7
+// TestCleanupLegacyOtelEnv 断言遗留清理的三条规则。
+func TestCleanupLegacyOtelEnv(t *testing.T) {
+	t.Run("备份值还原回 live 键", func(t *testing.T) {
+		env := map[string]any{
+			keyEndpoint:                    defaultEndpoint,
+			backupPrefixOrig + keyEndpoint: "https://company-otel:4317",
+		}
+		got, changed := cleanupLegacyOtelEnv(env)
+		if !changed {
+			t.Fatal("应有变化")
+		}
+		if got[keyEndpoint] != "https://company-otel:4317" {
+			t.Errorf("原值应被还原, got %v", got[keyEndpoint])
+		}
+		if _, ok := got[backupPrefixOrig+keyEndpoint]; ok {
+			t.Errorf("备份键应被删除, got %v", got)
+		}
+	})
 
-func TestRestoreOTelEnv_FORWORD(t *testing.T) {
-	const fwdKey = "FORWORD_" + keyMetricsEndpoint
+	t.Run("自我备份（备份值 == ccl 默认值）→ live 键也删", func(t *testing.T) {
+		env := map[string]any{
+			keyEndpoint:                    defaultEndpoint,
+			backupPrefixOrig + keyEndpoint: defaultEndpoint,
+		}
+		got, changed := cleanupLegacyOtelEnv(env)
+		if !changed {
+			t.Fatal("应有变化")
+		}
+		if _, ok := got[keyEndpoint]; ok {
+			t.Errorf("自我备份时 live 键应被删除, got %v", got)
+		}
+		if _, ok := got[backupPrefixOrig+keyEndpoint]; ok {
+			t.Errorf("备份键应被删除, got %v", got)
+		}
+	})
 
-	env := map[string]string{
-		keyMetricsEndpoint:        defaultMetricsEndpoint, // ccl 改写后的 localhost
-		fwdKey:                    "http://remote:4318/v1/metrics", // 用户原值
-		keyEndpoint:               defaultEndpoint,
-		"CC_ORIG_" + keyEndpoint:  "http://remote:4318",
-	}
-	got := restoreOTelEnv(env)
+	t.Run("自我备份但 live 被用户改过 → 保留用户的值", func(t *testing.T) {
+		env := map[string]any{
+			keyEndpoint:                    "https://my-own:4318",
+			backupPrefixOrig + keyEndpoint: defaultEndpoint,
+		}
+		got, _ := cleanupLegacyOtelEnv(env)
+		if got[keyEndpoint] != "https://my-own:4318" {
+			t.Errorf("用户改过的值应保留, got %v", got[keyEndpoint])
+		}
+	})
 
-	if _, ok := got[fwdKey]; ok {
-		t.Errorf("FORWORD_ backup should be deleted after restore: %v", got)
-	}
-	if got[keyMetricsEndpoint] != "http://remote:4318/v1/metrics" {
-		t.Errorf("user value should be restored: got %q", got[keyMetricsEndpoint])
-	}
+	t.Run("无备份且值 == ccl 默认值 → 删除", func(t *testing.T) {
+		env := map[string]any{
+			keyMetricsExport: defaultMetricsExporter,
+			keyProtocol:      defaultProtocol,
+		}
+		got, changed := cleanupLegacyOtelEnv(env)
+		if !changed {
+			t.Fatal("应有变化")
+		}
+		if _, ok := got[keyMetricsExport]; ok {
+			t.Errorf("%s 应被删除, got %v", keyMetricsExport, got)
+		}
+		if _, ok := got[keyProtocol]; ok {
+			t.Errorf("%s 应被删除, got %v", keyProtocol, got)
+		}
+	})
+
+	t.Run("无备份且值 != ccl 默认值 → 保留", func(t *testing.T) {
+		env := map[string]any{keyMetricsExport: "prometheus"}
+		got, changed := cleanupLegacyOtelEnv(env)
+		if changed {
+			t.Error("不应有变化")
+		}
+		if got[keyMetricsExport] != "prometheus" {
+			t.Errorf("用户值应保留, got %v", got[keyMetricsExport])
+		}
+	})
+
+	t.Run("用户自有键与非 string 值不动", func(t *testing.T) {
+		env := map[string]any{
+			"ANTHROPIC_BASE_URL": "https://api.example.com",
+			"OTEL_SOME_NUMBER":   4318,
+		}
+		got, changed := cleanupLegacyOtelEnv(env)
+		if changed {
+			t.Error("不应有变化")
+		}
+		if got["ANTHROPIC_BASE_URL"] != "https://api.example.com" {
+			t.Errorf("用户键不该动, got %v", got)
+		}
+		if got["OTEL_SOME_NUMBER"] != 4318 {
+			t.Errorf("非 string 值不该动, got %v", got)
+		}
+	})
+
+	t.Run("幂等", func(t *testing.T) {
+		env := map[string]any{
+			keyEndpoint:                    defaultEndpoint,
+			backupPrefixOrig + keyEndpoint: "https://company-otel:4317",
+		}
+		first, _ := cleanupLegacyOtelEnv(env)
+		second, changed := cleanupLegacyOtelEnv(first)
+		if changed {
+			t.Errorf("第二次应无变化, got %v", second)
+		}
+		if len(second) != len(first) {
+			t.Errorf("第二次应无变化: %v vs %v", first, second)
+		}
+	})
+
+	t.Run("入参不被修改", func(t *testing.T) {
+		env := map[string]any{
+			keyEndpoint:                    defaultEndpoint,
+			backupPrefixOrig + keyEndpoint: "https://company-otel:4317",
+		}
+		cleanupLegacyOtelEnv(env)
+		if env[keyEndpoint] != defaultEndpoint {
+			t.Errorf("入参不应被修改, got %v", env)
+		}
+		if _, ok := env[backupPrefixOrig+keyEndpoint]; !ok {
+			t.Errorf("入参的备份键不应被删除, got %v", env)
+		}
+	})
 }
-
-// telemetry-config-compat §1.8
-
-func TestPerSignalMetrics_EdgeCases(t *testing.T) {
-	const fwdKey = "FORWORD_" + keyMetricsEndpoint
-
-	t.Run("empty string user value → treated as missing", func(t *testing.T) {
-		got := backupAndInjectOTel(map[string]string{
-			keyMetricsEndpoint: "",
-		})
-		// "" 是用户主动写的（key 存在） → 走"已设"路径：备份 "" + override 为 default
-		// 这是当前 backupAndInjectOTel 的实际行为。空字符串值不视为"缺失"
-		// （因为 maps 的 exists 判断的是 key 存在性，不是值非空）
-		if got[fwdKey] != "" {
-			t.Errorf("empty user value should be backed up verbatim: got %q", got[fwdKey])
-		}
-		if got[keyMetricsEndpoint] != defaultMetricsEndpoint {
-			t.Errorf("empty user value should be overridden: got %q", got[keyMetricsEndpoint])
-		}
-	})
-
-	t.Run("trailing slash user value → backed up verbatim", func(t *testing.T) {
-		got := backupAndInjectOTel(map[string]string{
-			keyMetricsEndpoint: "http://remote:4318/",
-		})
-		if got[fwdKey] != "http://remote:4318/" {
-			t.Errorf("user value with trailing slash should be backed up verbatim: got %q", got[fwdKey])
-		}
-	})
-
-	t.Run("user value missing scheme → backed up verbatim", func(t *testing.T) {
-		got := backupAndInjectOTel(map[string]string{
-			keyMetricsEndpoint: "remote:4318",
-		})
-		if got[fwdKey] != "remote:4318" {
-			t.Errorf("user value without scheme should be backed up verbatim: got %q", got[fwdKey])
-		}
-	})
-
-	t.Run("whitespace-only user value → treated as non-empty (exists in map)", func(t *testing.T) {
-		got := backupAndInjectOTel(map[string]string{
-			keyMetricsEndpoint: "   ",
-		})
-		if got[fwdKey] != "   " {
-			t.Errorf("whitespace user value should be backed up verbatim: got %q", got[fwdKey])
-		}
-		if got[keyMetricsEndpoint] != defaultMetricsEndpoint {
-			t.Errorf("whitespace user value should be overridden: got %q", got[keyMetricsEndpoint])
-		}
-	})
-}
-
-// §5.4 端到端测试移至 envconfig_integration_test.go（commit 4）

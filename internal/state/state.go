@@ -8,14 +8,17 @@ import (
 
 // State 记录 launcher 运行时状态。
 //
-// 字段演进：DirBindings（provider-setenv-cwd-binding §2）从 0 加入。
-// 旧 state.json 无该字段时，json.Unmarshal 忽略未知字段，Load 后由
-// nil-check 兜底为空 map。
+// 字段演进：DirBindings（provider-setenv-cwd-binding §2）从 0 加入；
+// OtelLegacyCleaned（otel-endpoints-via-settings §"ccl cleans up legacy ccl
+// artifacts from settings.json once"）记录"旧版 ccl 遗留清理"是否已跑过。
+// 旧 state.json 无该字段时，json.Unmarshal 忽略未知字段 —— 新字段的零值
+// false 意味着"还没清理过"，升级后的第一次启动会补跑一次。
 type State struct {
 	ActiveProvider      string            `json:"active_provider"`
 	InjectedSnapshot    map[string]any    `json:"injected_snapshot"`
 	LastPermissionModes map[string]string `json:"last_permission_modes"`
 	DirBindings         map[string]string `json:"dir_bindings"`
+	OtelLegacyCleaned   bool              `json:"otel_legacy_cleaned"`
 }
 
 // Manager 管理 state.json 的读写。
@@ -111,6 +114,28 @@ func (m *Manager) SetInjectedSnapshot(snapshot map[string]any) error {
 		return err
 	}
 	s.InjectedSnapshot = snapshot
+	return m.Save(s)
+}
+
+// GetOtelLegacyCleaned 报告"旧版 ccl 遗留清理"是否已经跑过。
+//
+// 语义（otel-endpoints-via-settings）：清理**只跑一次**。规则里有"值等于 ccl
+// 默认值就删"这种启发式，反复跑会把用户事后自己写进去的同名值也删掉。
+func (m *Manager) GetOtelLegacyCleaned() bool {
+	s, err := m.Load()
+	if err != nil {
+		return false
+	}
+	return s.OtelLegacyCleaned
+}
+
+// SetOtelLegacyCleaned 记录"旧版 ccl 遗留清理"已经跑过并持久化。
+func (m *Manager) SetOtelLegacyCleaned(done bool) error {
+	s, err := m.Load()
+	if err != nil {
+		return err
+	}
+	s.OtelLegacyCleaned = done
 	return m.Save(s)
 }
 

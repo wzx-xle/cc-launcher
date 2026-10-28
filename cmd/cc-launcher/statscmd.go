@@ -251,28 +251,25 @@ func runStopInner(args []string) error {
 
 // restoreHelp 是 `ccl serve --restore -h` 的输出（runRestore 内部化后被 runServe --restore 复用）。
 //
-// 决策（design.md §D2）：原 `ccl restore` 顶层子命令整合为 `ccl serve --restore` 后，
-// 仍允许 `ccl serve --restore -h` 显示本帮助——内容保留 restore 的语义。
+// 语义（otel-endpoints-via-settings）：新版 ccl **不再改写** settings.json，
+// 所以本命令不再是"撤销当前接管"，而是"清理旧版 ccl 留下的痕迹"。
 const restoreHelp = `用法: ccl serve --restore
 
-读 ~/.claude/settings.json，还原 ccl 注入的 OTel env：
-  - CC_ORIG_<KEY> 还原到 <KEY>，删 CC_ORIG_*
-  - 删除 ccl 注入的默认值（如 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318）
+清理**旧版 ccl** 留在 ~/.claude/settings.json 里的 OTel 注入痕迹：
+  - CC_ORIG_<KEY> / FORWORD_<KEY> 还原到 <KEY>，删掉备份键
+  - 删除旧版 ccl 注入的默认值（如 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318）
   - 其它用户自有的 env 键不动
 
-不可逆：清掉后下次 ccl 启动会重新注入。
+说明：新版 ccl 通过 Claude Code 的 --settings 参数交付 OTel 配置，
+**不再改写 settings.json**——所以这里没有"当前接管"可撤销，
+只有旧版留下的痕迹需要清理。升级后第一次跑 ccl 会自动清理一次。
 
-操作前会先备份当前 settings.json 到 ~/.cc-launcher/backups/settings-<时间戳>.json。
-
-补充：backups/ 还包含 ccl 自动产出的\"控制权交接快照\"——
-每次 ccl 启动检测到 settings.json 不再处于 ccl 控制下时（如首次启动、
-第三方工具覆盖 OTel 端点后），会额外备份一份作为健康基线，便于
-回滚到\"接管前\"状态。常量启动（仍在 ccl 控制下）不产生新备份，
-避免轮转（保留最近 30 个）被瞬态版本耗光。`
+操作前会先备份当前 settings.json 到 ~/.cc-launcher/backups/settings-<时间戳>.json。`
 
 // runRestoreInner 是 `ccl serve --restore` 的实现（原 `ccl restore` 入口改名 unexported）。
 //
-// 决策（design.md §D1-D2）：runRestore 改为包内 unexported，函数体一字不动；由 runServe --restore 分支调用。
+// 语义（otel-endpoints-via-settings）：清理旧版 ccl 留在 settings.json 里的痕迹，
+// 用与自动迁移同一份实现（cleanupLegacyOtelEnv）——幂等。
 func runRestoreInner(args []string) error {
 	if len(args) > 0 && (args[0] == "-h" || args[0] == "--help") {
 		fmt.Println(restoreHelp)
@@ -306,33 +303,27 @@ func runRestoreInner(args []string) error {
 		fmt.Println("no settings to restore")
 		return nil
 	}
-
-	envStr := make(map[string]string, len(env))
-	for k, v := range env {
-		if s, ok := v.(string); ok {
-			envStr[k] = s
-		}
+	if !hasCclArtifact(env) {
+		fmt.Println("settings.json 没有旧版 ccl 的注入痕迹；无需清理")
+		return nil
 	}
 
-	origJSON, _ := json.Marshal(settings)
-	restored := restoreOTelEnv(envStr)
-	settings["env"] = restored
-	nowJSON, _ := json.Marshal(settings)
-
-	if string(origJSON) == string(nowJSON) {
-		fmt.Println("settings.json 无 ccl 注入；restore 是 no-op")
+	cleaned, changed := cleanupLegacyOtelEnv(env)
+	if !changed {
+		fmt.Println("settings.json 没有旧版 ccl 的注入痕迹；无需清理")
 		return nil
 	}
 
 	if err := cfg.Backup(); err != nil {
 		return fmt.Errorf("备份失败: %w", err)
 	}
+	settings["env"] = cleaned
 	if err := cfg.SaveSettings(settings); err != nil {
 		return fmt.Errorf("写 settings 失败: %w", err)
 	}
 
-	fmt.Println("settings.json 已还原到 ccl 之前的状态")
-	fmt.Println("提示：若想继续用 ccl 用量监控，再次跑 `ccl` 即可（会重新注入）。")
+	fmt.Println("已清理旧版 ccl 留在 settings.json 的 OTel 注入痕迹")
+	fmt.Println("提示：新版 ccl 通过 --settings 交付 OTel 配置，不再改写 settings.json。")
 	return nil
 }
 

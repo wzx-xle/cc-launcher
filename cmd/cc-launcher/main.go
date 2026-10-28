@@ -2,10 +2,8 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"cc-launcher/internal/cli"
 	"cc-launcher/internal/config"
@@ -40,7 +38,8 @@ Tab completion:
   - ccl 首次跑会拉起 OTel daemon（监听 :4318）
   - 跑过 Claude Code session 后用 ccl stats 查看
   - 想在浏览器里看用 ccl web（会打印带 token 的看板 URL）
-  - 不要 daemon 时跑 ccl serve --stop；要彻底清除注入用 ccl serve --restore
+  - 不要 daemon 时跑 ccl serve --stop；要清理旧版 ccl 留在 settings.json 的痕迹用 ccl serve --restore
+  - ccl 不改写 ~/.claude/settings.json：OTel 配置通过 --settings 参数交付
   - 隐私：daemon 不解析 logs/traces；本地 SQLite 永远没有 prompt 内容
 
 想看具体怎么配置 deepseek / MiniMax / 智谱 / 阿里云？
@@ -196,17 +195,20 @@ func runTUI(pm *provider.Manager, sm *state.Manager, cm *config.Manager) error {
 		sessionLabel = "从会话列表选择"
 	}
 
-	// 注入 OTel env（备份 + 写默认值）
-	if err := injectOTelEnv(cm); err != nil {
-		fmt.Fprintf(os.Stderr, "⚠ 注入 OTel env 失败: %v\n", err)
-	}
+	// 准备 OTel 环境（otel-endpoints-via-settings）：
+	//   - 一次性清理旧版 ccl 留在 settings.json 里的痕迹
+	//   - 读用户自己的端点 → 投递到 ccl 进程环境（fork daemon 时继承 → 转发）
+	//   - 算出要通过 --settings 交付给子进程的 env 块
+	//
+	// ccl **不再写** ~/.claude/settings.json。
+	otelEnv := prepareOtelEnv(cm, sm)
 
 	// 注入 launch 上下文（provider / cwd / 端点 host → OTEL_RESOURCE_ATTRIBUTES）。
 	// 必须在 provider 选定之后、launcher.Launch 之前——上下文描述的是"这次启动"。
 	//
 	// 主通道是 Claude Code 的 `--settings` 参数（优先级高于 settings.json 与进程
 	// 环境）；进程环境那条是冗余第二通道。详见 launchctx.go 的注释。
-	optsEnv, launchSettingsJSON := injectLaunchContext(cm, result.Provider, wd, providerBaseURL, optsEnv)
+	optsEnv, launchSettingsJSON := injectLaunchContext(cm, result.Provider, wd, providerBaseURL, optsEnv, otelEnv)
 
 	// additional settings（--settings）——承载 launch 上下文的主通道。
 	if launchSettingsJSON != "" {
@@ -300,94 +302,102 @@ func migrateSettingsJSON(cm *config.Manager, sm *state.Manager) error {
 	return sm.SetInjectedSnapshot(nil)
 }
 
-// injectOTelEnv 在 exec Claude Code 前把 OTel env 注入 ~/.claude/settings.json，
-// 同时把备份键（CC_ORIG_* 与 FORWORD_* 两类）导出到当前进程 env（fork ccl serve 时子进程继承 →
-// 触发 forwarder）。FORWORD_* 是 telemetry-config-compat 引入的 per-signal metrics 备份命名空间。
+// prepareOtelEnv 准备本次启动的 OTel 环境。
 //
-// 失败仅警告，不阻断 ccl 主流程（决策 10：daemon 是 optional）。
+// 三件事（otel-endpoints-via-settings）：
 //
-// 控制权交接语义（backup-on-control-handover change）：如果 settings.json 不在 ccl 当前控制下
-// （即 OTel 端点不指向 ccl 默认值），调 Manager.Backup() 做一次文件级快照到 backups/，
-// 目的：保留一份"ccl 接管前"的健康基线，便于日后回滚。控制中则跳过 Backup，
-// 避免 10 个轮转被同状态瞬态版本耗光。
-func injectOTelEnv(cm *config.Manager) error {
-	settings, err := cm.LoadSettings()
-	if err != nil {
-		return err
+//  1. 一次性清理旧版 ccl 留在 settings.json 里的痕迹（cleanupLegacyOtelSettings）
+//  2. 读**用户自己的**端点 → 写进 ccl 的进程环境变量（fork daemon 时被继承 →
+//     daemon 的 forwarder 转发到用户的远程 collector）
+//  3. 算出要通过 `--settings` 交付给子进程的 env 块（接管端点 + 补默认值）
+//
+// ccl **不再写** ~/.claude/settings.json。
+//
+// 返回交付用的 env 块（map[string]string）。
+func prepareOtelEnv(cm *config.Manager, sm *state.Manager) map[string]string {
+	cleanupLegacyOtelSettings(cm, sm)
+
+	userEnv := settingsEnvMap(cm)
+
+	// 转发目标：用户自己的端点 → daemon 的进程环境变量。
+	// daemon 侧（internal/collector/forwarder.go）读自己 env 的
+	// FORWORD_OTEL_EXPORTER_OTLP_METRICS_ENDPOINT（per-signal，优先）与
+	// CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT（fallback，兜底）。
+	//
+	// 没有就显式 unset：变量必须"要么是真值、要么不存在"，不能留占位值。
+	fallback, perSignal := resolveForwardTarget(userEnv)
+	if fallback != "" {
+		_ = os.Setenv(envOrigEndpoint, fallback)
+	} else {
+		_ = os.Unsetenv(envOrigEndpoint)
 	}
-	envAny, _ := settings["env"].(map[string]any)
-	env := make(map[string]string, len(envAny))
-	for k, v := range envAny {
-		if s, ok := v.(string); ok {
-			env[k] = s
-		}
+	if perSignal != "" {
+		_ = os.Setenv(envForwardMetricsEndpoint, perSignal)
+	} else {
+		_ = os.Unsetenv(envForwardMetricsEndpoint)
 	}
 
-	// 控制权交接边界：若 settings.json 不在 ccl 当前控制下，备份一次作为健康基线。
-	// 注意：调用发生在 backupAndInjectOTel 之前——此时 settings.json 仍是"接管前"状态，
-	// 备份反映的是第三方/用户当前持有的版本，正是我们想保留的基线。
-	if !isUnderCclControl(envAny) {
-		if err := cm.Backup(); err != nil {
-			log.Printf("injectOTelEnv: 备份 settings.json 失败: %v", err)
-		}
-	}
-
-	updated := backupAndInjectOTel(env)
-
-	// 比较是否真的改了
-	changed := len(envAny) != len(updated)
-	if !changed {
-		for k, v := range updated {
-			if cur, ok := envAny[k]; !ok || cur != v {
-				changed = true
-				break
-			}
-		}
-	}
-	if changed {
-		settings["env"] = updated
-		if err := cm.SaveSettings(settings); err != nil {
-			return err
-		}
-	}
-
-	// 把备份键同步到当前进程 env → fork ccl serve 时子进程继承。
-	// 设计 14：daemon 读自己 env 的 CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT 决定是否启用 forwarder。
-	// telemetry-config-compat §4：daemon 也读 FORWORD_OTEL_EXPORTER_OTLP_METRICS_ENDPOINT（per-signal 优先）。
-	for k, v := range updated {
-		if strings.HasPrefix(k, "CC_ORIG_") || strings.HasPrefix(k, "FORWORD_") {
-			_ = os.Setenv(k, v)
-		}
-	}
-	if auth := os.Getenv("CC_FORWARD_AUTH_HEADER"); auth != "" {
-		_ = os.Setenv("CC_FORWARD_AUTH_HEADER", auth)
-	}
-
-	return nil
+	return buildChildOtelEnv(userEnv)
 }
 
-// isUnderCclControl 判断 settings.json 的 env map 是否仍处于 ccl 当前控制下。
+// cleanupLegacyOtelSettings 一次性清理旧版 ccl 留在 settings.json 里的痕迹。
 //
-// ccl 当前控制 = env 中至少一个端点字段还指向 ccl 默认地址：
-//   - OTEL_EXPORTER_OTLP_ENDPOINT == "http://localhost:4318"（兜底端点）
-//   - OTEL_EXPORTER_OTLP_METRICS_ENDPOINT == "http://localhost:4318/v1/metrics"（per-signal metrics）
+// 只跑一次（标志记在 state.json）：清理规则里有"值等于 ccl 默认值就删"这种启发式，
+// 反复跑会把用户事后自己写进去的同名值也删掉。
 //
-// 都不指向 → ccl 当前不在控制 settings.json → 视为"控制权交接边界"。
+// 没有 ccl 痕迹 → **不碰用户的文件**（spec/claude-code-env-config §"ccl cleans up
+// legacy ccl artifacts from settings.json once"）。
 //
-// 注意：默认地址常量集中在 envconfig.go（keyEndpoint / defaultEndpoint /
-// keyMetricsEndpoint / defaultMetricsEndpoint）。**若未来 ccl 默认值变化（如改端口、
-// 加新端点），需同步更新 envconfig.go 的常量与本判断函数。**
+// 失败（读不了 / 写不了）仅警告，不阻断 ccl 主流程。
+func cleanupLegacyOtelSettings(cm *config.Manager, sm *state.Manager) {
+	if sm.GetOtelLegacyCleaned() {
+		return // 只跑一次
+	}
+
+	settings, err := cm.LoadSettings()
+	if err != nil {
+		return // 读不了 → 这轮跳过，下次启动再看
+	}
+	envAny, _ := settings["env"].(map[string]any)
+	if envAny == nil || !hasCclArtifact(envAny) {
+		// 没有 ccl 痕迹 → 标记"已处理"，此后不再检查用户的文件。
+		_ = sm.SetOtelLegacyCleaned(true)
+		return
+	}
+
+	cleaned, changed := cleanupLegacyOtelEnv(envAny)
+	if !changed {
+		_ = sm.SetOtelLegacyCleaned(true)
+		return
+	}
+
+	// 先备份再写（与 provider 迁移一致）
+	if err := cm.Backup(); err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ 清理旧版 ccl 遗留前备份 settings.json 失败: %v\n", err)
+	}
+	settings["env"] = cleaned
+	if err := cm.SaveSettings(settings); err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ 清理旧版 ccl 遗留失败: %v\n", err)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "⚙ 已清理旧版 ccl 留在 settings.json 的 OTel 注入痕迹（备份到 %s）\n", cm.BackupDir())
+	_ = sm.SetOtelLegacyCleaned(true)
+}
+
+// settingsEnvMap 读 ~/.claude/settings.json 的 env 块。
 //
-// 入参 env 可为 nil 或缺字段；本函数只读、容忍 nil 和非 string 值。
-func isUnderCclControl(env map[string]any) bool {
+// 文件不存在 / 没有 env 字段 / 解析失败 → 空 map（只读，不报错）。
+func settingsEnvMap(cm *config.Manager) map[string]any {
+	if cm == nil {
+		return map[string]any{}
+	}
+	settings, err := cm.LoadSettings()
+	if err != nil {
+		return map[string]any{}
+	}
+	env, _ := settings["env"].(map[string]any)
 	if env == nil {
-		return false
+		return map[string]any{}
 	}
-	if v, ok := env[keyEndpoint].(string); ok && v == defaultEndpoint {
-		return true
-	}
-	if v, ok := env[keyMetricsEndpoint].(string); ok && v == defaultMetricsEndpoint {
-		return true
-	}
-	return false
+	return env
 }

@@ -44,7 +44,7 @@
 | `ccl mode` | 列出 6 种权限模式，`▶` 标记当前目录默认 |
 | `ccl mode <name>` | 设置当前目录的默认权限模式 |
 | `ccl serve --stop` | 优雅停 OTel daemon（5s 内 graceful shutdown） |
-| `ccl serve --restore` | 还原 `~/.claude/settings.json` 到 ccl 之前的状态 |
+| `ccl serve --restore` | 清理旧版 ccl 留在 `~/.claude/settings.json` 里的 OTel 注入痕迹 |
 | `ccl serve --status` | 打印 daemon 状态摘要（pid / 端口可达 / db 大小 / session 数） |
 
 ## Tab completion
@@ -193,7 +193,9 @@ cd ~/work/proj-b && ccl
 
 ## 配置合并机制
 
-切换提供商时，框架执行以下步骤：
+> ⚠️ **本节描述的是老版本行为**。自 provider-setenv 起，provider 配置**不再写进 `~/.claude/settings.json`**，而是 **setenv 注入到子进程环境**（`launcher.Options.Env`）。切换提供商时 ccl **不碰** settings.json。
+
+老 ccl 版本切换提供商时的步骤：
 
 1. **备份** — 当前 settings.json 写入 `~/.cc-launcher/backups/`（保留最近 30 个）
 2. **清理旧配置** — 按快照比对，删除未被用户修改的旧提供商字段
@@ -202,7 +204,7 @@ cd ~/work/proj-b && ccl
 
 不会被删除的：不在快照中的字段（用户手动加的）、值与快照不同的字段（用户改过的）。
 
-> **备份触发语义**（详见"用量监控" → "自动备份时机"）：除切换提供商外，每次 `ccl` 启动时也会**条件性**触发备份——仅在检测到 settings.json 不再处于 ccl 控制下时（如首次启动、第三方工具覆盖 OTel 端点后）。常态启动（仍在 ccl 控制下）不产生新备份。
+> **备份触发语义**（详见"用量监控" → "自动备份时机"）：新版 ccl 只在**一次性清理旧版遗留**和**手动 `ccl serve --restore`** 时备份 settings.json——provider 切换与每次启动都不再备份。
 
 ### settings.json 历史兼容
 
@@ -311,21 +313,28 @@ ccl 在后台启一个轻量 OTel daemon，自动收集每次 Claude Code sessio
 
 ### 数据来源
 
-Claude Code v2.1.x 原生支持 OTel 推送（`CLAUDE_CODE_ENABLE_TELEMETRY=1`）。ccl 检测到 settings.json 里没配 OTel 时，会自动写入 5 个 key + 视情况接管 1 个 per-signal metrics 端点：
+Claude Code v2.1.x 原生支持 OTel 推送（`CLAUDE_CODE_ENABLE_TELEMETRY=1`）。ccl 启动 Claude Code 时，通过 **`--settings` 参数**交付 6 个 OTel key——**不写你的 `~/.claude/settings.json`**：
 
-| Key | 默认值 | ccl 是否改写 |
-|-----|--------|------------|
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4318` | **是**（让 Claude Code 推到本地 daemon） |
-| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | `http://localhost:4318/v1/metrics` | **仅当用户已设该 key**（备份为 `FORWORD_*`，覆盖为 localhost） |
-| `OTEL_METRICS_EXPORTER` | `otlp` | 否（备份用户原值） |
-| `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/protobuf` | 否 |
-| `CLAUDE_CODE_ENABLE_TELEMETRY` | `1` | 否 |
-| `OTEL_LOGS_EXPORTER` | _不主动注入_ | 否 |
+| Key | ccl 交付的值 | 你自己写过这个 key 时 |
+|-----|------------|------------------|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4318` | **仍然接管**（覆盖成 localhost） |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | `http://localhost:4318/v1/metrics` | **仍然接管**（覆盖成 localhost） |
+| `OTEL_METRICS_EXPORTER` | `otlp` | **尊重你的值**（不交付这个 key） |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/protobuf` | **尊重你的值** |
+| `CLAUDE_CODE_ENABLE_TELEMETRY` | `1` | **尊重你的值** |
+| `OTEL_LOGS_EXPORTER` | _不交付_ | 尊重你的值 |
 
-**改写机制**：
-- 5 个 fallback key 备份到 `CC_ORIG_<KEY>` 后只对 `OTEL_EXPORTER_OTLP_ENDPOINT` 改写为本地 daemon 地址；其它 4 个 key 保留用户原值。
-- per-signal metrics 端点用 **新的 `FORWORD_<KEY>` 命名空间**（不沿用 `CC_ORIG_`）——用户原话要求"备份 key 也不要用 cc_orig，改叫 forword"。详见下面"per-signal endpoint 兼容"段落。
-- `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` / `_TRACES_ENDPOINT` 不动（ccl 不接管 logs/traces 的端点）。
+**为什么走 `--settings`**：Claude Code 的优先级是 **`--settings` > `settings.json` > 进程环境**（实测），且 `env` 块是**逐键深合并**。于是：
+
+- "交付某个 key" = 覆盖 settings.json 里的同名键 → **接管**
+- "不交付某个 key" = settings.json 里的值继续生效 → **尊重用户**（比如你把 `OTEL_METRICS_EXPORTER` 设成 `prometheus`，ccl 不会把它改回 `otlp`）
+
+**不写 settings.json 的两个好处**：
+
+1. **直接敲 `claude`（不走 ccl）的会话不再被 ccl 记录**。旧版 ccl 把端点写进全局 settings.json，导致本机所有 Claude Code 进程都往 ccl 的 daemon 推，统计里留下一堆 provider / cwd 全空的"未知"会话。现在没有全局端点，裸 claude 根本不导出（你自己配了远程端点的话，它照旧发给自己的 collector，只是**不再经过 ccl 的 daemon**）。
+2. 你的配置文件里不再留 ccl 的备份键（`CC_ORIG_*` / `FORWORD_*`），也不会出现"live 值 + 备份值"两份历史。
+
+`OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` / `_TRACES_ENDPOINT` ccl 不碰（logs/traces 你自己配的去自己的 collector）。
 
 ### 自动启动 daemon
 
@@ -386,13 +395,15 @@ Claude Code 的 OTel payload 里**没有** cwd，也没有 provider——它只�
 
    ccl **不会**改你的 `~/.claude/settings.json`——`--settings` 只作用于本次启动的进程，直接 `claude` 启动的会话不受影响。
 
+   **同一个 `--settings` 对象里还带着 OTel 端点接管**（见上面"数据来源"）：`OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` 被交付成本地 daemon 地址，`OTEL_METRICS_EXPORTER` / `OTEL_EXPORTER_OTLP_PROTOCOL` / `CLAUDE_CODE_ENABLE_TELEMETRY` 按需补默认值。**所有变量传递都走这一条通道**，没有第二个写入点。
+
    ⚠️ **转发到远程 collector 时**，daemon 会剥掉 `ccl.provider` / `ccl.cwd` / `ccl.provider_endpoint` 这三个键再转发（它们是本地记账，描述的是"这次 ccl 启动用了什么"，对远程 collector 没价值，还可能泄露本机工作目录）。你的远程 collector 收到的资源属性与你没装 ccl 时一致。**本地** `telemetry.db` 里仍然保留这三个键（CLI 的 provider 列兜底要用）。
 
 2. **jsonl 兜底（补历史 + 非 ccl 启动的会话）**：payload 里没有 `ccl.cwd` 时，daemon 用 `session.id` 反查 Claude Code 的会话记录 `~/.claude/projects/*/<session-id>.jsonl`，读其中第一条带顶层 `cwd` 字段的记录（**只取 cwd 一个字段**，prompt 内容不读、不存、不记日志）。查不到就留空——那是正常状态，不是错误。
 
    daemon 启动时会在后台回填历史行（每次启动最多 500 行，**不阻塞**端口监听）；想一次补齐就跑 `ccl serve --backfill`（不限量）。回填是**数据驱动幂等**的：只处理 `cwd = ''` 的行，跑两次结果一致，之后新建的空行仍可被后续回填补上。
 
-**直接用 `claude`（而不是 `ccl`）启动的会话**：provider 恒为空、cwd 靠 jsonl 兜底（常常也查不到，因为 Claude Code 会清理旧会话）。这类会话在 CLI 与看板上显示为「未知」——ccl **不会**拿"当前配置的 provider"去回填历史会话，那是假数据。
+**直接用 `claude`（而不是 `ccl`）启动的会话**：因为 ccl 不再往 settings.json 里写全局 OTel 端点，裸 `claude` **根本不会往 ccl 的 daemon 导出**——所以这类会话**不会被记录**（你自己配了指向 ccl daemon 的端点、或旧版 ccl 遗留的端点还在，那才会进来）。万一进来了（没有 `ccl.*` 属性的 export），provider 恒为空、cwd 靠 jsonl 兜底（常常也查不到，因为 Claude Code 会清理旧会话），在 CLI 与看板上显示为「未知」——ccl **不会**拿"当前配置的 provider"去回填历史会话，那是假数据。
 
 ### 用量看板（浏览器）
 
@@ -430,19 +441,16 @@ http://127.0.0.1:4318/ui?token=<64 位 hex>
 
 ### 自动备份时机
 
-ccl 会把每次 `settings.json` 写入前的快照存到 `~/.cc-launcher/backups/settings-<时间戳>.json`，保留最近 30 个。三种触发时机：
+ccl 会把每次 `settings.json` 写入前的快照存到 `~/.cc-launcher/backups/settings-<时间戳>.json`，保留最近 30 个。**新版 ccl 只在两种情况下写 settings.json**：
 
-1. **手动 `ccl serve --restore`** — 还原操作前做一份（操作本身的回滚锚点）
-2. **切换 provider（`Manager.Merge`）** — 合并前做一份
-3. **每次 `ccl` 启动的 `injectOTelEnv`** — **仅在控制权交接边界**触发：
-   - ✅ 首次 ccl 启动（settings.json 没被 ccl 写过）
-   - ✅ 第三方工具/手动编辑覆盖 OTel 端点（ccl 检测到端点不指向 `localhost:4318`）
-   - ✅ settings.json 不含 `env` 字段（用户从未用 OTel）
-   - ❌ 常态启动（端点已是 ccl 默认值）—— **不**触发，避免 30 个轮转被瞬态版本耗光
+1. **一次性清理旧版遗留**（升级后第一次跑 ccl）—— 清理前做一份
+2. **手动 `ccl serve --restore`** —— 清理前做一份
 
-判断条件："OTel 端点仍指向 ccl 默认值（兜底 `http://localhost:4318` 或 per-signal `http://localhost:4318/v1/metrics`）"则视为控制中，否则视为交接边界。
+provider 切换**不再**写 settings.json（provider env 走 setenv 注入子进程环境）。
 
-`backups/` 里现在会有三类快照：恢复点、provider 切换点、控制权交接点——按时间戳排序即可选择回滚目标。
+> **旧版兼容**：≤ v0.15.3 的 ccl 会把 OTel 端点写进 settings.json（并在文件里留 `CC_ORIG_*` / `FORWORD_*` 备份键）。升级后**第一次**跑 ccl 会自动清理这些痕迹：把备份值还原回原 key、删掉 ccl 注入的默认值、删掉备份键（**用户自己写的键一律不动**）。清理前会备份；备份失败只警告不阻断启动。清理**只跑一次**（标志记在 `~/.cc-launcher/state.json`）。
+>
+> 你的 settings.json 里如果没有 ccl 痕迹（比如全新安装），ccl **一个字都不会改**它。
 
 ### 端口冲突怎么办
 
@@ -469,20 +477,16 @@ ccl  # 此时 ccl 不会 fork daemon（决策：远程 endpoint 不拉本地 dae
 
 Claude Code v2.1.x 的 OTel SDK 按"先分类型端点 → 没有才用兜底"的顺序选 endpoint。如果用户在 settings.json 里**写齐了**分类型端点（典型公司远程 collector 配置），Claude Code 会优先用分类型端点把 metrics 直接推到远程 collector，`ccl stats` 看不到任何数据。
 
-为接管这一场景，ccl 在检测到用户**已设** `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` 时会：
+为接管这一场景，ccl 在 `--settings` 里交付 `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://localhost:4318/v1/metrics`——**优先级高于 settings.json**，所以分类型端点也被接管到本地 daemon；你原值不受影响（settings.json 里原样保留），只是被"本次启动"的 `--settings` 压住了。
 
-1. 备份原值到 `FORWORD_OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`（**新命名空间**，不复用 `CC_ORIG_`）
-2. 把该 key 改写为 `http://localhost:4318/v1/metrics`，让 Claude Code 把 metrics 推到本地 daemon
-3. daemon 把 metrics 异步转发到 `FORWORD_OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`（用户原值）
-
-**为什么是 `FORWORD_` 不是 `CC_ORIG_`**：用户原话要求"备份 key 也不要用 cc_orig，改叫 forword"。`CC_ORIG_<KEY>` 命名空间保留给 5 个 fallback key，避免双重历史（用户已有 `CC_ORIG_*` 不被重命名造成混乱）。
+daemon 转发时用的正是你的原值（见下一节）。
 
 **为什么只接管 metrics，不接管 logs/traces**：logs/traces 用户本来就写好了去自己的远程 collector，已经直达了；ccl 再插一脚只是浪费流量 + 多一个可能挂的点。`ccl stats` 只需要 metrics 就够了。
 
 **典型公司远程 collector 配置**（场景 A）：
 
 ```jsonc
-// ~/.claude/settings.json 注入前
+// ~/.claude/settings.json（ccl 不改这个文件）
 {
     "env": {
         "OTEL_EXPORTER_OTLP_ENDPOINT":            "http://remote:4318",
@@ -493,25 +497,22 @@ Claude Code v2.1.x 的 OTel SDK 按"先分类型端点 → 没有才用兜底"�
 }
 ```
 
-注入后：
+ccl 启动 Claude Code 时交付的 `--settings`：
 
 ```jsonc
 {
     "env": {
-        // ccl 改写
-        "OTEL_EXPORTER_OTLP_ENDPOINT":                "http://localhost:4318",            // 改写
-        "CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT":        "http://remote:4318",               // 备份
-        "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT":        "http://localhost:4318/v1/metrics", // 改写
-        "FORWORD_OTEL_EXPORTER_OTLP_METRICS_ENDPOINT":"http://remote:4318/v1/metrics",    // 备份
+        // 接管 → 本地 daemon
+        "OTEL_EXPORTER_OTLP_ENDPOINT":         "http://localhost:4318",
+        "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://localhost:4318/v1/metrics",
 
-        // 用户原值（ccl 不动）
-        "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT":           "http://remote:4318/v1/logs",
-        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT":         "http://remote:4318/v1/traces",
+        // 用户没写的键 → ccl 补默认值
+        "OTEL_METRICS_EXPORTER":               "otlp",
+        "OTEL_EXPORTER_OTLP_PROTOCOL":         "http/protobuf",
+        "CLAUDE_CODE_ENABLE_TELEMETRY":        "1",
 
-        // 其余 4 个 fallback key 照常备份 + 注入默认
-        "OTEL_METRICS_EXPORTER":                      "otlp",
-        "OTEL_EXPORTER_OTLP_PROTOCOL":                "http/protobuf",
-        "CLAUDE_CODE_ENABLE_TELEMETRY":               "1"
+        // launch 上下文（provider / cwd / 端点 host）
+        "OTEL_RESOURCE_ATTRIBUTES":            "ccl.provider=...,ccl.cwd=..."
     }
 }
 ```
@@ -520,9 +521,14 @@ Claude Code v2.1.x 的 OTel SDK 按"先分类型端点 → 没有才用兜底"�
 
 如果你公司有 OTel collector（如 `otel.example.com:4317`），ccl 启动后会自动：
 
-1. 把你的 `OTEL_EXPORTER_OTLP_ENDPOINT` 备份到 `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT`
-2. 把 endpoint 改写到 `http://localhost:4318`（本地 daemon）
-3. daemon 把 metrics **异步**转发到 `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT`（或 `FORWORD_OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`，按优先级）
+1. 从你的 `~/.claude/settings.json` 读出**你自己配的**端点
+2. 通过 `--settings` 把本次启动的端点接管到 `http://localhost:4318`（本地 daemon）
+3. 把你的原值通过**进程环境变量**交给 daemon（fork daemon 时被继承）：
+   - `FORWORD_OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`（per-signal metrics 端点，**优先**）
+   - `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT`（兜底端点）
+4. daemon 把 metrics **异步**转发到你的原值
+
+这两个变量**只存在于进程环境里**，不会再写进你的 settings.json。没有对应端点时变量**不设置**（不留占位值）——daemon 看到没设就不转发。
 
 > **telemetry-config-compat 变更**：daemon 现为 metrics-only forwarder。logs/traces 不再经 daemon 转发——`/v1/logs` `/v1/traces` 收到请求只回 200，bytes 不落本地也不外发。
 
@@ -540,12 +546,12 @@ ccl  # daemon 自动加上 auth 头
 
 ```bash
 ccl serve --stop       # 优雅停 daemon（5s 内 graceful shutdown）
-ccl serve --restore    # 还原 settings.json 到 ccl 之前的状态（删 CC_ORIG_* + FORWORD_* + ccl 注入的默认）
+ccl serve --restore    # 清理**旧版 ccl** 留在 settings.json 里的 OTel 注入痕迹（幂等）
 ccl serve --status     # 打印 daemon 状态摘要（pid / 端口可达 / db 文件大小 / session 数）
 ccl serve --restart    # 热重启 daemon（升级 ccl 二进制后用，Claude Code session 不受影响）
 ```
 
-`ccl serve --restore` 是**不可逆**操作（spec 明确）。会先备份到 `~/.cc-launcher/backups/settings-<时间戳>.json`。
+新版 ccl **不再改写 settings.json**，所以 `--restore` 没有"当前接管"可撤销——它只负责清理旧版留下的痕迹（`CC_ORIG_*` / `FORWORD_*` 备份键 + 被改写的端点）。升级后第一次跑 ccl 会自动清理一次；之后 `--restore` 就是 no-op。会先备份到 `~/.cc-launcher/backups/settings-<时间戳>.json`。
 
 ### 升级 ccl 二进制
 
