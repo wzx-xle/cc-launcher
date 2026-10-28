@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-10-28 — otel-endpoints-via-settings
+
+### Refactor
+- **OTel 端点接管从"改写 `~/.claude/settings.json`"改为"走 `--settings` 参数"**：v0.15.3 只把 launch 上下文（provider / cwd / 端点 host）搬进了 `--settings`，OTel 端点接管仍然靠改写用户的配置文件。两个通道语义不一致，而"改文件"是**机器全局**的副作用：
+  - **裸 `claude` 被劫持**：settings.json 的 `env` 块对本机**所有** Claude Code 进程生效 → 直接敲 `claude`（不走 ccl）的会话也往 ccl 的 daemon 推 → 统计里留下一堆 provider / cwd 全空的"未知"会话
+  - **用户文件里长期躺着两份历史**：live 值 + `CC_ORIG_*` 备份键，得靠 `ccl serve --restore` 手工收拾
+  - **Windows 用户反馈的"settings.json 覆盖进程环境"问题**，根因正是"改文件 vs 传参"——同一个解法（`--settings`）已经用于 launch 上下文，端点接管现在也用上
+- **6 个 OTel key 全部通过 `--settings` 的 `env` 块交付**（与 launch 上下文**同一个** settings 对象）：
+  - 两个端点键（`OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`）**接管**成本地 daemon 地址——`--settings` 优先级高于 settings.json，所以你的原值不用动也能被接管
+  - `OTEL_METRICS_EXPORTER` / `OTEL_EXPORTER_OTLP_PROTOCOL` / `CLAUDE_CODE_ENABLE_TELEMETRY`：你自己写过就**尊重**（= 不交付这个键 → settings.json 的值继续生效），没写才由 ccl 补默认值
+  - `OTEL_LOGS_EXPORTER` **永不交付**（daemon 不解析 logs，隐私靠 daemon 架构保证）
+- **转发目标改由进程环境投递**：ccl 从 settings.json 读出**用户自己配的**端点，写进自己的进程环境 `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT` / `FORWORD_OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`（fork daemon 时被继承）→ **daemon 侧代码与 otel-receiver spec 一个字没改**。没有对应端点时变量**不设置**（不留占位值）
+- **删掉"控制权交接备份"整套机制**（`isUnderCclControl` + 交接边界的 `Manager.Backup()`）：它只因为要改文件才存在——不写文件就没有交接这回事
+
+### Features
+- **一次性清理旧版遗留**：升级后第一次跑 ccl，自动把旧版 ccl 留在 settings.json 里的痕迹收拾干净——备份值还原回原 key、删掉 ccl 注入的默认值、删掉 `CC_ORIG_*` / `FORWORD_*` 备份键；**用户自己写的键一律不动**。清理前备份到 `~/.cc-launcher/backups/`，失败只警告不阻断启动；**只跑一次**（标志记在 `~/.cc-launcher/state.json`）
+- **`ccl serve --restore` 语义收敛**：从"撤销 ccl 当前的接管"改成"清理**旧版 ccl** 留下的痕迹"（幂等）。新版 ccl 不写 settings.json → 没有"当前接管"可撤销
+
+### Fixes
+- **转发到远程 collector 的目标不会退化成 localhost**：万一清理没跑成（settings.json 不可写等），读取转发目标时**备份键优先于被改写的 live 键** → 转发目标仍是用户的真原值，而不是旧版改写后的 `localhost:4318`（后者会让用户的公司 collector 静默收不到数据）
+
+### Tests
+- `cmd/cc-launcher`：交付策略（接管 / 尊重 / 永不交付 logs）、转发目标解析（per-signal 优先、遗留备份键优先、缺失时不设值）、遗留清理三条规则（还原 / 自我备份删除 / 无备份默认值删除）、幂等、用户自有键与非 string 值不动、**settings.json 不被改写**（字节级对比）、清理只跑一次
+- `cmd/cc-launcher`（launchctx）：OTel 端点与 launch 上下文**合并进同一个 `--settings` 对象**（只含 env 块）
+- smoke 测试同步：首跑不改用户文件、旧版痕迹清理一次、restore 语义
+
+### Compatibility
+- ⚠️ **行为变化：裸 `claude`（不走 ccl）的会话不再被 ccl 记录**。因为 ccl 不再往 settings.json 写全局端点，Claude Code 没有端点就根本不导出。**你自己配了 `OTEL_EXPORTER_OTLP_ENDPOINT` 的话，裸 claude 照旧发给你自己的 collector，只是不再经过 ccl 的 daemon**。历史数据里已有的"未知"会话仍在（不会回填）
+- ⚠️ **行为变化：老版本 ccl 留在 `~/.claude/settings.json` 里的 OTel 痕迹会被自动清理**（升级后第一次跑 ccl）。你自己的端点会被**还原**（不是删除）；ccl 注入的默认值与备份键被删掉。**如果你的 `OTEL_METRICS_EXPORTER` / `OTEL_EXPORTER_OTLP_PROTOCOL` 恰好等于 ccl 的默认值**（`otlp` / `http/protobuf`，也是 OTel SDK 自己的默认值），它们也会被删——功能上无差别（SDK 默认值相同），但你的文件会变
+- `ccl serve --restore` 不再撤销"当前接管"（当前接管不再落盘）；它只清理旧版遗留，幂等
+- **转发到远程 collector 的链路不变**：daemon 仍读 `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT` / `FORWORD_OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` 两个进程环境变量，优先级与 loopback 防环行为都不变
+- db schema / 看板 / 鉴权 / `ccl stats` 的 flag 与输出格式 / 顶层子命令列表全部不变
+
+### OpenSpec
+- archive `otel-endpoints-via-settings` (2026-10-28)
+
 ## [0.15.3] - 2026-10-28 — launch-context-settings-injection
 
 ### Fixes
