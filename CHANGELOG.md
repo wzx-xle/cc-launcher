@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.15.3] - 2026-10-28 — launch-context-settings-injection
+
+### Fixes
+- **Windows 上 `ccl stats` 的 PROVIDER 列恒空**：Claude Code 的 `~/.claude/settings.json` 里若已设 `OTEL_RESOURCE_ATTRIBUTES`（公司模板 / 旧脚本 / 别的教程），settings.json 的 `env` 块优先级**高于进程环境** → ccl 注入的 launch 上下文被**整体顶掉** → provider 维度恒空。2026-10-28 实测复验：settings.json 写 `X=2` + 进程环境写 `X=1` → Claude Code 实际拿到 `2`。**修复**：launch 上下文的注入通道从**进程环境**改为 Claude Code 官方参数 **`--settings`**（优先级实测：`--settings` > settings.json > 进程环境），绕开被覆盖的那一层
+  - **用户的 settings.json 里有没有那个 key 都不再影响 ccl 的注入** → 之前"检测到就降级 + 警告"的行为**删除**（那条警告说的是"provider / 项目维度将为空"，实际只有 provider 维度真空——project 维度还有 jsonl 兜底，文案本身也是错的）
+  - **用户原有的属性值不丢**：注入值 = 「settings.json 里的原值」+ 「ccl 的三个上下文属性」，合并而非替换；ccl 的同名 key 以 ccl 为准
+  - **不改用户的 `~/.claude/settings.json`**：`--settings` 只作用于本次启动的进程 → 直接 `claude` 启动的会话**不受影响**（继续靠 jsonl 兜底拿 cwd，provider 显示"未知"）
+  - 进程环境那条注入**保留**为冗余第二通道（settings.json 没设该 key 时仍然生效；万一某个 Claude Code 版本不认 `--settings` 还有一道防线）
+- **转发给远程 collector 的 payload 里不再含 ccl 的三个属性**：`ccl.provider` / `ccl.cwd` / `ccl.provider_endpoint` 是本地记账（描述"这次 ccl 启动用了什么"），对远程 collector 没价值，还可能泄露本机工作目录 → daemon 转发前剥掉它们，远程收到的资源属性与你没装 ccl 时一致。**本地 `telemetry.db` 仍保留这三个键**（CLI 的 provider 列兜底要用）
+  - ⚠️ **实测踩坑**：Claude Code 的 OTel SDK 把 `OTEL_RESOURCE_ATTRIBUTES` 的内容**同时**放进 Resource 的 attributes **和每个 data point 的 attributes** → 只剥 resource 那一处，datapoint 里那份会原样转发出去。两处都剥才是完整的（单测只覆盖了 resource 那一处，是端到端验证抓出来的）
+
+### Features
+- **`ccl` 启动 Claude Code 时会带一个 `--settings` 参数**（内容形如 `{"env":{"OTEL_RESOURCE_ATTRIBUTES":"<合并值>"}}`，只含 `env` 一个字段，不影响 settings.json 的其它设置）
+  - **Unix**：内联 JSON 字符串（`syscall.Exec` 直传 argv，不经 shell → 双引号安全，且不产生临时文件）
+  - **Windows**：写临时文件（`os.TempDir()`，权限 0600）→ `--settings <path>`。**必须用文件**：`launcher_windows.go` 走 `cmd /c claude ...`，cmd.exe 会把 JSON 的双引号当参数分隔符剥掉 → 内联 JSON 会被拆坏。文件在 claude 退出后由 ccl 删除
+- `ccl stats` 的 PROJECT / PROVIDER 列在上述场景下**恢复有真值**（真机验证：settings.json 故意设冲突值 `team=platform` → daemon 仍收到 `ccl.provider` / `ccl.cwd` / `ccl.provider_endpoint`，且用户的 `team=platform` 也在）
+
+### Tests
+- `internal/launcher`：`Options.ExtraArgs` 被正确拼进 argv
+- `cmd/cc-launcher`：注入值合并逻辑（用户原值保留 + ccl 同名 key 覆盖）、additional settings 的 JSON 形状（只含 env 块）、settings.json 不被改动
+- `internal/collector`：转发前剥除——resource attrs 与 datapoint attrs **两处**都剥、用户的键保留、metric 本身（名 / 值 / session.id）不受影响、畸形 payload 不 panic 且按原样转发
+
+### Compatibility
+- **`ccl` 启动 Claude Code 的命令行多了一个 `--settings` 参数**——若有脚本解析 `ccl` 的输出或包裹 claude 调用，需注意
+- **转发给远程 collector 的 payload 内容变了**：不再含 `ccl.provider` / `ccl.cwd` / `ccl.provider_endpoint`（语义上更接近"没装 ccl"的状态）。若你的远程 collector 依赖这三个键做聚合，需要另找来源
+- **`~/.claude/settings.json` 里已设 `OTEL_RESOURCE_ATTRIBUTES` 的用户**：不再有任何警告或降级——注入照常生效，provider / 项目维度有真值
+- db schema / 看板 / 鉴权 / `ccl stats` 的 flag 与输出格式全部不变
+
+### OpenSpec
+- archive `launch-context-settings-injection` (2026-10-28)
+
 ## [0.15.2] - 2026-10-27 — web-backfill-to-serve
 
 ### Refactor
