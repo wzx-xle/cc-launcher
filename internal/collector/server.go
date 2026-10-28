@@ -18,10 +18,11 @@ import (
 // Server 监听 :4318，提供 OTel HTTP endpoint。
 //
 // 路由（telemetry-config-compat）：
-//   POST /v1/metrics  → 解析 + 持久化 + 转发（如启用）
-//   POST /v1/logs     → 不解析 + 仅回 200（HTTP 200，不持久不转发）
-//   POST /v1/traces   → 不解析 + 仅回 200（HTTP 200，不持久不转发）
-//   其它路径          → 404
+//
+//	POST /v1/metrics  → 解析 + 持久化 + 转发（如启用）
+//	POST /v1/logs     → 不解析 + 仅回 200（HTTP 200，不持久不转发）
+//	POST /v1/traces   → 不解析 + 仅回 200（HTTP 200，不持久不转发）
+//	其它路径          → 404
 //
 // logs/traces 现在只是"应答"——用户的上游（per-signal endpoint 或 fallback 路径推到本地 daemon
 // 的兜底场景）已直达远程 collector，daemon 不再 forward、不再 persist。本地 SQLite 永远不会有
@@ -29,10 +30,10 @@ import (
 //
 // 优雅关：调用 SetShuttingDown() 后 /v1/metrics 返回 503（避免新数据；in-flight 仍能完成）。
 type Server struct {
-	addr   string
-	store  *Store
-	fwd    *Forwarder
-	srv    *http.Server
+	addr  string
+	store *Store
+	fwd   *Forwarder
+	srv   *http.Server
 
 	shuttingDown atomic.Bool // SIGTERM 时置 true → metrics handler 返回 503
 }
@@ -169,8 +170,18 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 转发（async；落盘失败不影响 forwarder）
+	//
+	// 转发前剥掉 ccl 追加的 resource attributes（ccl.provider / ccl.cwd /
+	// ccl.provider_endpoint）——它们是本地 bookkeeping，对用户的远程 collector
+	// 没价值，还可能泄露本机工作目录。剥不掉时**照常转发原 body**（不能因为
+	// 剥不掉就把转发丢了）。
 	if s.fwd != nil {
-		s.fwd.Forward("metrics", forwardBody)
+		out, err := stripCclAttributes(forwardBody)
+		if err != nil {
+			log.Printf("collector: 转发前剥 ccl 属性失败（按原样转发）: %v", err)
+			out = forwardBody
+		}
+		s.fwd.Forward("metrics", out)
 	}
 
 	// 响应 OTel ExportMetricsServiceResponse（HTTP 200 + 0 rejected）

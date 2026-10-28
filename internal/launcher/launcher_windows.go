@@ -43,6 +43,10 @@ func Launch(opts Options) error {
 	configureCmd(cmd, opts)
 
 	err = cmd.Run()
+	// Cleanup 必须在 os.Exit 之前跑——否则 --settings 的临时文件会残留。
+	if opts.Cleanup != nil {
+		opts.Cleanup()
+	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
 		os.Exit(exitErr.ExitCode())

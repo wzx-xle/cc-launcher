@@ -203,7 +203,21 @@ func runTUI(pm *provider.Manager, sm *state.Manager, cm *config.Manager) error {
 
 	// 注入 launch 上下文（provider / cwd / 端点 host → OTEL_RESOURCE_ATTRIBUTES）。
 	// 必须在 provider 选定之后、launcher.Launch 之前——上下文描述的是"这次启动"。
-	optsEnv = injectLaunchContext(cm, result.Provider, wd, providerBaseURL, optsEnv)
+	//
+	// 主通道是 Claude Code 的 `--settings` 参数（优先级高于 settings.json 与进程
+	// 环境）；进程环境那条是冗余第二通道。详见 launchctx.go 的注释。
+	optsEnv, launchSettingsJSON := injectLaunchContext(cm, result.Provider, wd, providerBaseURL, optsEnv)
+
+	// additional settings（--settings）——承载 launch 上下文的主通道。
+	if launchSettingsJSON != "" {
+		args, cleanup, err := settingsArgs(launchSettingsJSON)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "⚠ 构造 --settings 参数失败（provider / 项目维度将为空）: %v\n", err)
+		} else {
+			opts.ExtraArgs = args
+			opts.Cleanup = cleanup
+		}
+	}
 
 	// 拉起 OTel daemon（按需；端口已占 → skip）
 	started, _ := ensureDaemonRunning()
@@ -219,7 +233,7 @@ func runTUI(pm *provider.Manager, sm *state.Manager, cm *config.Manager) error {
 }
 
 // migrateSettingsJSON 一次性清理 settings.json 中 ccl 历史注入的 provider env
-//（基于 snapshot 比对），保留用户手写的 key + OTel / 备份键。
+// （基于 snapshot 比对），保留用户手写的 key + OTel / 备份键。
 //
 // 详细设计见 openspec/changes/provider-setenv-cwd-binding/design.md §Decision 3。
 //
@@ -228,7 +242,7 @@ func runTUI(pm *provider.Manager, sm *state.Manager, cm *config.Manager) error {
 //
 // 备份策略：仅当至少一个 key 被删时调 cm.Backup()——无变更不浪费备份槽。
 // "值匹配"原则：snapshot 值 == settings.json 当前值才删；用户手改过的 key
-//（值与 snapshot 不等）保留（CLAUDE.md §"claudeCode 本身添加的配置要保留"）。
+// （值与 snapshot 不等）保留（CLAUDE.md §"claudeCode 本身添加的配置要保留"）。
 func migrateSettingsJSON(cm *config.Manager, sm *state.Manager) error {
 	snapshot := sm.GetInjectedSnapshot()
 	if snapshot == nil {

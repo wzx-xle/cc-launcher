@@ -364,7 +364,7 @@ ccl stats --json --day 7        # JSON 含 bucket_rows / bucket_totals 字段
 
 Claude Code 的 OTel payload 里**没有** cwd，也没有 provider——它只推 `session.id / model / type / start_type` 和 `host.arch / os.version / user.id` 这类机器信息。所以 ccl 用了两条路补这两个维度：
 
-1. **launch 上下文（主路径）**：`ccl` 启动 Claude Code 时，把当次的 provider 名、工作目录、provider 端点 host 写进**子进程环境**的 `OTEL_RESOURCE_ATTRIBUTES`：
+1. **launch 上下文（主路径）**：`ccl` 启动 Claude Code 时，把当次的 provider 名、工作目录、provider 端点 host 写进 `OTEL_RESOURCE_ATTRIBUTES`：
 
    | key | 值 |
    |-----|-----|
@@ -374,9 +374,19 @@ Claude Code 的 OTel payload 里**没有** cwd，也没有 provider——它只�
 
    Claude Code 的 OTel SDK 会把它们作为 **resource attributes** 随 metrics 推送，daemon 直接取。这是**逐次 launch 的真值**——provider 是"这次启动用的哪个 provider"的快照，不是"当前配置的 provider"。
 
-   值的编码有硬约束：Claude Code 按 `,` / `=` 拆属性，且**一个非法值会让整份属性 map 被丢弃**（不是只丢那一个）。所以 ccl 对所有值强制 percent-encode（unreserved 之外全编），编码后 > 255 字符的属性直接不注入。已存在的 `OTEL_RESOURCE_ATTRIBUTES`（用户自己设的）会被合并保留，ccl 的同名 key 以 ccl 为准。
+   **注入通道是 `--settings` 参数**（Claude Code 官方参数），不是进程环境：
 
-   ⚠️ `~/.claude/settings.json` 的 `env` 优先级**高于**进程环境。若你的 settings.json 里已经设了 `OTEL_RESOURCE_ATTRIBUTES`，ccl 会**警告并降级**（provider / 项目显示"未知"），**不会**擅自改你的 settings.json。
+   ```bash
+   claude --settings '{"env":{"OTEL_RESOURCE_ATTRIBUTES":"team=platform,ccl.provider=...,ccl.cwd=..."}}'
+   ```
+
+   为什么不用进程环境：**`~/.claude/settings.json` 的 `env` 块优先级高于进程环境**（实测：settings.json 写 `X=2` + 进程环境写 `X=1` → Claude Code 实际拿到 `2`）。若你的 settings.json 里已经设了 `OTEL_RESOURCE_ATTRIBUTES`，走进程环境就会被整体顶掉 → provider / 项目维度恒空。`--settings` 的优先级**高于 settings.json**（实测：`--settings` > settings.json > 进程环境），所以走它就绕开了这一层——**你的 settings.json 里有没有那个 key 都不影响 ccl 的注入**。
+
+   值的编码有硬约束：Claude Code 按 `,` / `=` 拆属性，且**一个非法值会让整份属性 map 被丢弃**（不是只丢那一个）。所以 ccl 对**自己追加的**值强制 percent-encode（unreserved 之外全编），编码后 > 255 字符的属性直接不注入。**你原有的值原样保留**（不重新编码），ccl 的同名 key 以 ccl 为准。
+
+   ccl **不会**改你的 `~/.claude/settings.json`——`--settings` 只作用于本次启动的进程，直接 `claude` 启动的会话不受影响。
+
+   ⚠️ **转发到远程 collector 时**，daemon 会剥掉 `ccl.provider` / `ccl.cwd` / `ccl.provider_endpoint` 这三个键再转发（它们是本地记账，描述的是"这次 ccl 启动用了什么"，对远程 collector 没价值，还可能泄露本机工作目录）。你的远程 collector 收到的资源属性与你没装 ccl 时一致。**本地** `telemetry.db` 里仍然保留这三个键（CLI 的 provider 列兜底要用）。
 
 2. **jsonl 兜底（补历史 + 非 ccl 启动的会话）**：payload 里没有 `ccl.cwd` 时，daemon 用 `session.id` 反查 Claude Code 的会话记录 `~/.claude/projects/*/<session-id>.jsonl`，读其中第一条带顶层 `cwd` 字段的记录（**只取 cwd 一个字段**，prompt 内容不读、不存、不记日志）。查不到就留空——那是正常状态，不是错误。
 

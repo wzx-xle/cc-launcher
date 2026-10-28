@@ -119,3 +119,35 @@ func TestLaunch_Unix_NilEnvFallsBackToOsEnviron(t *testing.T) {
 			fakeExecCalls[0].Envv, os.Environ())
 	}
 }
+
+// TestLaunch_ExtraArgs 断言 ExtraArgs 被追加到最终 argv（launch-context-settings-injection）。
+//
+// 承载 `--settings <json|file>`：launch 上下文走这个通道，而不是进程环境
+// （settings.json 的 env 块优先级更高，会把进程环境里的同名变量顶掉）。
+func TestLaunch_ExtraArgs(t *testing.T) {
+	restore := withFakeExec(t)
+	defer restore()
+	withFakeClaude(t)
+
+	settings := `{"env":{"OTEL_RESOURCE_ATTRIBUTES":"team=platform,ccl.provider=minimax"}}`
+	opts := Options{
+		PermissionMode: "bypassPermissions",
+		ExtraArgs:      []string{"--settings", settings},
+	}
+	if err := Launch(opts); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	if len(fakeExecCalls) != 1 {
+		t.Fatalf("want 1 exec call, got %d", len(fakeExecCalls))
+	}
+	argv := fakeExecCalls[0].Argv
+	// argv[0] 是 claude 路径，后面是参数
+	var got []string
+	for _, a := range argv[1:] {
+		got = append(got, a)
+	}
+	want := []string{"--permission-mode", "bypassPermissions", "--settings", settings}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("argv:\n got=%v\nwant=%v", got, want)
+	}
+}
