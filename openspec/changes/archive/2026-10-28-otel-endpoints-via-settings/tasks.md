@@ -43,6 +43,6 @@
 - [x] 6.1 README 的"用量监控"章节重写：6 个 key 的交付方式改为 `--settings`，`--restore` 语义更新
 - [x] 6.2 README / CHANGELOG 写明行为变化：**裸 `claude` 会话不再被记录**
 - [x] 6.3 CHANGELOG 加新版本段
-- [ ] 6.4 `openspec archive otel-endpoints-via-settings`
-- [ ] 6.5 打 tag + 一次推送（commit 与 tag 同一次 push）
-- [ ] 6.6 bump scoop manifest
+- [x] 6.4 `openspec archive otel-endpoints-via-settings`
+- [x] 6.5 打 tag + 一次推送（commit 与 tag 同一次 push）
+- [x] 6.6 bump scoop manifest
