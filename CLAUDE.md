@@ -14,7 +14,7 @@ Claude Code Launcher — 一个终端启动器，在启动 Claude Code 时提供
 4. 切换提供商时：**原提供商配置不能残留**，但 **Claude Code 自身添加的配置要保留**
 5. 流程：选择提供商 → 选择权限模式 → 打开 Claude Code，每一步都可取消
 6. **所有变量传递统一走 Claude Code 的 `--settings` 参数**（provider-env-via-settings change 起）：
-   - provider 配置通过 `--settings` 的 `env` 块交付，**ccl 配置的优先级高于用户在 settings.json 里的同名值**（配了独立提供商就一定用它）
+   - provider 配置通过 `--settings` 的 `env` 块交付，**ccl 配置的优先级高于用户在 settings.json 里的同名值**（配了独立提供商就一定用它）；进程环境里另有一份低优先级副本（daemon 的转发要用用户的代理设置）
    - Claude Code settings.json 不再保留 provider 字段；老 ccl 注入的 ANTHROPIC_* 由 migrate 函数首次启动时自动清理
    - `--settings` 指向 `~/.cc-launcher/cache/` 下**内容哈希命名**的常驻文件（argv 里没有明文凭证；同内容复用、同名即同内容 → 并发启动各读各的）
 

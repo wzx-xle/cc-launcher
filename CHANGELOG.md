@@ -11,7 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixes
 - **选的 provider 现在一定生效**：provider 的 env 此前走 **setenv（进程环境）** 注入——而进程环境是 Claude Code 优先级**最低**的通道（`~/.claude/settings.json` 的 `env` 块会压住它）→ 用户在 settings.json 里手写过任何 `ANTHROPIC_*`（公司模板 / 脚本 / 教程留下的），**在 ccl 里选的 provider 就完全不生效**。这与"配一个独立提供商"的目的直接冲突：**配了等于没选**
-  - **provider 配置改走 `--settings`**（与 OTel 配置、launch 上下文**同一个 settings 对象**）：Claude Code 的优先级是 `--settings` > `settings.json` > 进程环境 → **ccl 配置的键赢**
+  - **provider 配置的主通道改成 `--settings`**（与 OTel 配置、launch 上下文**同一个 settings 对象**）：Claude Code 的优先级是 `--settings` > `settings.json` > 进程环境 → **ccl 配置的键赢**
+  - **进程环境里也保留一份**（低优先级）：daemon 的 forwarder 用 `http.Client` 默认 Transport → `ProxyFromEnvironment` → 读进程环境的代理变量；daemon 是 fork 出来的（继承 ccl 的环境）→ provider 配了代理时，转发到远程 collector 才走得通
   - **ccl 没配的键不碰**：provider 里没有的 `ANTHROPIC_MODEL` 之类，settings.json 的手写值继续生效（settings.json 里也没写才轮到进程环境）
   - 用户手写的 `ANTHROPIC_*` 会被当前 provider 覆盖——**这是本程序的目的**（不提示）
   - 真机验证：settings.json 里手写 `ANTHROPIC_BASE_URL=stale` + `ANTHROPIC_AUTH_TOKEN=sk-stale` → 实际请求打到 provider 的端点、auth 头是 provider 的 token

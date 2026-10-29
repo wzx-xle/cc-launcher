@@ -163,10 +163,19 @@ func runTUI(pm *provider.Manager, sm *state.Manager, cm *config.Manager) error {
 
 	sm.SetPermissionMode(wd, result.Mode)
 
-	// provider-settings-injection：provider 的 env **走 --settings 交付**，不再走
-	// setenv（进程环境是 Claude Code 优先级最低的通道 → 用户在 settings.json 里
-	// 手写的 ANTHROPIC_* 会把 provider 顶掉，选了等于没选）。
+	// provider-settings-injection：provider 的 env **主通道是 --settings**
+	//（Claude Code 侧 ccl 说了算：用户在 settings.json 里手写的 ANTHROPIC_*
+	// 不再压住选中的 provider）。
 	providerEnv, providerBaseURL := providerEnvMap(pm, result.Provider)
+
+	// **进程环境里也放一份**（低优先级，Claude Code 侧仍是 --settings 赢）：
+	//   - daemon 的 forwarder 用 http.Client 默认 Transport → ProxyFromEnvironment
+	//     → 读进程环境的 HTTP_PROXY/HTTPS_PROXY。daemon 是 fork 出来的（继承
+	//     ccl 的环境）→ 远程 collector 需要代理时，转发才走得通
+	//   - 顺带是 --settings 失效时的冗余备份
+	for k, v := range providerEnv {
+		_ = os.Setenv(k, v)
+	}
 
 	sessionLabel := "新会话"
 	opts := launcher.Options{PermissionMode: result.Mode}

@@ -46,7 +46,9 @@ provider 的 env 现在走 **setenv（进程环境）**，而进程环境是 Cla
 - **ccl 配置里有的键 → ccl 赢**（覆盖 settings.json 的同名值）
 - **ccl 没配的键 → 不碰**（settings.json 的手写值继续生效）
 
-删除 provider env 的 setenv 注入（`opts.Env` 不再承载 provider 键）。`opts.Env` 仍承载**父进程环境**（PATH/HOME/LANG…）+ `OTEL_RESOURCE_ATTRIBUTES` 的冗余通道。
+**进程环境里也放一份**（低优先级）：daemon 的 forwarder 用 `http.Client` 默认 Transport → `ProxyFromEnvironment` → 读进程环境的 `HTTP_PROXY`/`HTTPS_PROXY`；daemon 是 fork 出来的（继承 ccl 的环境）→ provider 配了代理时，**转发到远程 collector 才走得通**。Claude Code 侧仍是 `--settings` 赢。
+
+（这条是实现期发现的回归：只走 `--settings` 的话，daemon 转发会丢掉用户的代理设置。）
 
 ### D2: 载体 = `~/.cc-launcher/cache/` 下的内容哈希文件
 
