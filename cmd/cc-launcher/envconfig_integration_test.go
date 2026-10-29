@@ -21,11 +21,12 @@ func TestOtelEnv_ScenarioA_EndToEnd(t *testing.T) {
 
 	// 1. 交付给子进程的 env 块（--settings）
 	deliver := buildChildOtelEnv(original)
-	if deliver[keyEndpoint] != defaultEndpoint {
-		t.Errorf("兜底端点应被接管为 %q, got %q", defaultEndpoint, deliver[keyEndpoint])
-	}
 	if deliver[keyMetricsEndpoint] != defaultMetricsEndpoint {
 		t.Errorf("per-signal metrics 端点应被接管为 %q, got %q", defaultMetricsEndpoint, deliver[keyMetricsEndpoint])
+	}
+	// 兜底端点（总配置）不交付——logs / traces 不该被 ccl 劫持
+	if _, ok := deliver[keyEndpoint]; ok {
+		t.Errorf("兜底端点不该被交付, got %q", deliver[keyEndpoint])
 	}
 	// logs / traces 的 per-signal 端点不在 ccl 的管理范围 → 不交付、不动
 	if _, ok := deliver["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"]; ok {
@@ -109,9 +110,12 @@ func TestOtelEnv_ScenarioB_LegacyUpgrade(t *testing.T) {
 		t.Errorf("转发 per-signal = %q", perSignal)
 	}
 
-	// 清理之后再算交付块 → 端点照样接管
+	// 清理之后再算交付块 → metrics 端点照样接管
 	deliver := buildChildOtelEnv(cleaned)
-	if deliver[keyEndpoint] != defaultEndpoint {
-		t.Errorf("端点应被接管, got %q", deliver[keyEndpoint])
+	if deliver[keyMetricsEndpoint] != defaultMetricsEndpoint {
+		t.Errorf("metrics 端点应被接管, got %q", deliver[keyMetricsEndpoint])
+	}
+	if _, ok := deliver[keyEndpoint]; ok {
+		t.Errorf("兜底端点不该被交付, got %q", deliver[keyEndpoint])
 	}
 }

@@ -65,9 +65,9 @@ func TestPrepareOtelEnv_DoesNotTouchSettingsFile(t *testing.T) {
 		t.Errorf("settings.json 不得被 ccl 修改:\nbefore=%s\nafter=%s", before, after)
 	}
 
-	// 端点仍然由 --settings 接管
-	if deliver[keyEndpoint] != defaultEndpoint {
-		t.Errorf("交付的端点应为 ccl 默认值, got %q", deliver[keyEndpoint])
+	// metrics 端点仍然由 --settings 接管
+	if deliver[keyMetricsEndpoint] != defaultMetricsEndpoint {
+		t.Errorf("交付的 metrics 端点应为 ccl 默认值, got %q", deliver[keyMetricsEndpoint])
 	}
 }
 
@@ -89,12 +89,13 @@ func TestPrepareOtelEnv_DeliversTakeover(t *testing.T) {
 
 	deliver := prepareOtelEnv(cm, newTestStateMgr(t))
 
-	// 接管：两个端点键都是 ccl 的默认值
-	if deliver[keyEndpoint] != defaultEndpoint {
-		t.Errorf("%s 应被接管为 %q, got %q", keyEndpoint, defaultEndpoint, deliver[keyEndpoint])
-	}
+	// 接管：只有 metrics 端点键是 ccl 的默认值
 	if deliver[keyMetricsEndpoint] != defaultMetricsEndpoint {
 		t.Errorf("%s 应被接管为 %q, got %q", keyMetricsEndpoint, defaultMetricsEndpoint, deliver[keyMetricsEndpoint])
+	}
+	// 兜底端点（总配置）永不交付——否则 logs / traces 会被一起劫持进 daemon
+	if _, ok := deliver[keyEndpoint]; ok {
+		t.Errorf("%s 不该被交付, got %q", keyEndpoint, deliver[keyEndpoint])
 	}
 	// 用户没写 → 补默认值
 	if deliver[keyMetricsExport] != defaultMetricsExporter {

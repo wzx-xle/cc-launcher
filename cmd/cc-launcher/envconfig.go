@@ -54,6 +54,8 @@ const (
 type otelKeyPolicy struct {
 	key          string
 	defaultValue string // 缺失时交付的默认值；空 = 永不交付
+	// deliver 为 false 时：这个 key **永不**出现在交付的 env 块里。
+	deliver bool
 	// takeover 为 true 时：不管用户有没有写，ccl 都交付 defaultValue（接管端点）。
 	takeover bool
 	// backupPrefix 是旧版 ccl 用的备份键前缀，仅遗留清理用。
@@ -62,34 +64,41 @@ type otelKeyPolicy struct {
 
 // otelKeyPolicies 是 6 个 key 的策略表。
 //
-//   - 两个端点键 takeover=true：ccl 必须把导出接到本地 daemon 才能统计用量。
+//   - **只有 metrics 端点键 takeover=true**：ccl 只需要 metrics 来统计用量，
+//     就只接管 metrics 这一个信号。
+//   - **兜底端点键（OTEL_EXPORTER_OTLP_ENDPOINT）deliver=false**：它是"总配置"，
+//     logs / traces 在没有 per-signal 端点时也走它。接管它 = 把用户的 logs /
+//     traces 一起劫持进 daemon（daemon 只回 200、不转发）→ 用户的远程 collector
+//     收不到日志。**统计不需要 logs，就不该动总配置。**
 //   - OTEL_LOGS_EXPORTER 的 defaultValue 为空 → **永不交付**：daemon 不解析
 //     logs（隐私靠 daemon 架构保证），不主动改用户对 logs exporter 的选择。
 //   - 其余三个（metrics exporter / protocol / telemetry 开关）不 takeover：
 //     用户自己写了就尊重（不交付这个键），没写才补默认值。
+//
+// 注：兜底端点键仍在表里——遗留清理要用它的默认值判定"自我备份"。
 var otelKeyPolicies = []otelKeyPolicy{
-	{key: keyEndpoint, defaultValue: defaultEndpoint, takeover: true, backupPrefix: backupPrefixOrig},
-	{key: keyMetricsEndpoint, defaultValue: defaultMetricsEndpoint, takeover: true, backupPrefix: backupPrefixForword},
-	{key: keyLogsExporter, defaultValue: "", takeover: false, backupPrefix: backupPrefixOrig},
-	{key: keyMetricsExport, defaultValue: defaultMetricsExporter, takeover: false, backupPrefix: backupPrefixOrig},
-	{key: keyProtocol, defaultValue: defaultProtocol, takeover: false, backupPrefix: backupPrefixOrig},
-	{key: keyEnableTelemetry, defaultValue: defaultEnableTelemetry, takeover: false, backupPrefix: backupPrefixOrig},
+	{key: keyEndpoint, defaultValue: defaultEndpoint, deliver: false, takeover: false, backupPrefix: backupPrefixOrig},
+	{key: keyMetricsEndpoint, defaultValue: defaultMetricsEndpoint, deliver: true, takeover: true, backupPrefix: backupPrefixForword},
+	{key: keyLogsExporter, defaultValue: "", deliver: false, takeover: false, backupPrefix: backupPrefixOrig},
+	{key: keyMetricsExport, defaultValue: defaultMetricsExporter, deliver: true, takeover: false, backupPrefix: backupPrefixOrig},
+	{key: keyProtocol, defaultValue: defaultProtocol, deliver: true, takeover: false, backupPrefix: backupPrefixOrig},
+	{key: keyEnableTelemetry, defaultValue: defaultEnableTelemetry, deliver: true, takeover: false, backupPrefix: backupPrefixOrig},
 }
 
 // buildChildOtelEnv 按交付策略算出要通过 `--settings` 交付给子进程的 env 块。
 //
 // 返回的 map **只含 ccl 要交付的键**：
-//   - takeover 键：一定是 ccl 的默认值（接管）
+//   - takeover 键（只有 metrics 端点）：一定是 ccl 的默认值（接管）
 //   - 非 takeover 键：用户自己写了 → 不出现（settings.json 的值生效）；没写 → 补默认值
-//   - OTEL_LOGS_EXPORTER：永远不出现
+//   - deliver=false 的键（兜底端点 / logs exporter）：永远不出现
 //
 // 入参是 settings.json 的 env 块（map[string]any，值不一定是 string）；只关心
 // "键在不在"，不关心值的类型。
 func buildChildOtelEnv(userEnv map[string]any) map[string]string {
 	out := make(map[string]string, len(otelKeyPolicies))
 	for _, p := range otelKeyPolicies {
-		if p.defaultValue == "" {
-			continue // OTEL_LOGS_EXPORTER：永不交付
+		if !p.deliver || p.defaultValue == "" {
+			continue
 		}
 		if p.takeover {
 			out[p.key] = p.defaultValue

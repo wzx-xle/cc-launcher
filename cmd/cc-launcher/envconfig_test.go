@@ -8,7 +8,7 @@ import (
 // otel-endpoints-via-settings：交付策略 / 转发目标 / 遗留清理
 // =============================================================================
 
-// TestBuildChildOtelEnv_Takeover 断言两个端点键**总是**被接管。
+// TestBuildChildOtelEnv_Takeover 断言**只有 metrics 端点**被接管。
 func TestBuildChildOtelEnv_Takeover(t *testing.T) {
 	cases := []struct {
 		name string
@@ -21,11 +21,32 @@ func TestBuildChildOtelEnv_Takeover(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := buildChildOtelEnv(tc.env)
-			if got[keyEndpoint] != defaultEndpoint {
-				t.Errorf("%s = %q, want %q", keyEndpoint, got[keyEndpoint], defaultEndpoint)
-			}
 			if got[keyMetricsEndpoint] != defaultMetricsEndpoint {
 				t.Errorf("%s = %q, want %q", keyMetricsEndpoint, got[keyMetricsEndpoint], defaultMetricsEndpoint)
+			}
+		})
+	}
+}
+
+// TestBuildChildOtelEnv_NeverDeliversFallbackEndpoint 断言**兜底端点永不交付**。
+//
+// 兜底端点 OTEL_EXPORTER_OTLP_ENDPOINT 是"总配置"：logs / traces 在没有
+// per-signal 端点时也走它。接管它 = 把用户的 logs / traces 一起劫持进 daemon
+// （daemon 只回 200、不转发）→ 用户的远程 collector 收不到日志。
+// ccl 统计只需要 metrics，就不该动总配置。
+func TestBuildChildOtelEnv_NeverDeliversFallbackEndpoint(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]any
+	}{
+		{"空 env", map[string]any{}},
+		{"用户自己配了兜底端点", map[string]any{keyEndpoint: "https://company-otel:4317"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := buildChildOtelEnv(tc.env)
+			if _, ok := got[keyEndpoint]; ok {
+				t.Errorf("%s 不该被交付, got %q", keyEndpoint, got[keyEndpoint])
 			}
 		})
 	}
@@ -46,9 +67,9 @@ func TestBuildChildOtelEnv_RespectsUserValue(t *testing.T) {
 			t.Errorf("%s 用户自己写过，不该被交付, got %q", k, got[k])
 		}
 	}
-	// 端点仍然接管
-	if got[keyEndpoint] != defaultEndpoint {
-		t.Errorf("%s 应被接管, got %q", keyEndpoint, got[keyEndpoint])
+	// metrics 端点仍然接管
+	if got[keyMetricsEndpoint] != defaultMetricsEndpoint {
+		t.Errorf("%s 应被接管, got %q", keyMetricsEndpoint, got[keyMetricsEndpoint])
 	}
 }
 
@@ -56,7 +77,6 @@ func TestBuildChildOtelEnv_RespectsUserValue(t *testing.T) {
 func TestBuildChildOtelEnv_MissingGetsDefault(t *testing.T) {
 	got := buildChildOtelEnv(map[string]any{})
 	want := map[string]string{
-		keyEndpoint:        defaultEndpoint,
 		keyMetricsEndpoint: defaultMetricsEndpoint,
 		keyMetricsExport:   defaultMetricsExporter,
 		keyProtocol:        defaultProtocol,
@@ -77,6 +97,9 @@ func TestBuildChildOtelEnv_NeverDeliversLogs(t *testing.T) {
 	got := buildChildOtelEnv(map[string]any{keyLogsExporter: "otlp"})
 	if _, ok := got[keyLogsExporter]; ok {
 		t.Errorf("%s 不该被交付, got %q", keyLogsExporter, got[keyLogsExporter])
+	}
+	if _, ok := got[keyEndpoint]; ok {
+		t.Errorf("%s 不该被交付, got %q", keyEndpoint, got[keyEndpoint])
 	}
 }
 

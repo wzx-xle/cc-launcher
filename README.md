@@ -313,16 +313,24 @@ ccl 在后台启一个轻量 OTel daemon，自动收集每次 Claude Code sessio
 
 ### 数据来源
 
-Claude Code v2.1.x 原生支持 OTel 推送（`CLAUDE_CODE_ENABLE_TELEMETRY=1`）。ccl 启动 Claude Code 时，通过 **`--settings` 参数**交付 6 个 OTel key——**不写你的 `~/.claude/settings.json`**：
+Claude Code v2.1.x 原生支持 OTel 推送（`CLAUDE_CODE_ENABLE_TELEMETRY=1`）。ccl 启动 Claude Code 时，通过 **`--settings` 参数**交付 OTel 配置——**不写你的 `~/.claude/settings.json`**。
+
+**ccl 的用量统计只需要 metrics 一个信号，所以 ccl 只接管 metrics**：
 
 | Key | ccl 交付的值 | 你自己写过这个 key 时 |
 |-----|------------|------------------|
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4318` | **仍然接管**（覆盖成 localhost） |
 | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | `http://localhost:4318/v1/metrics` | **仍然接管**（覆盖成 localhost） |
 | `OTEL_METRICS_EXPORTER` | `otlp` | **尊重你的值**（不交付这个 key） |
 | `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/protobuf` | **尊重你的值** |
 | `CLAUDE_CODE_ENABLE_TELEMETRY` | `1` | **尊重你的值** |
-| `OTEL_LOGS_EXPORTER` | _不交付_ | 尊重你的值 |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`（兜底 / 总配置） | _不交付_ | 你的值原样生效 |
+| `OTEL_LOGS_EXPORTER` | _不交付_ | 你的值原样生效 |
+
+**为什么只接管 metrics**：兜底端点 `OTEL_EXPORTER_OTLP_ENDPOINT` 是"总配置"——**logs / traces 在没有 per-signal 端点时也走它**。而 daemon 是 metrics-only 的（`/v1/logs` `/v1/traces` 只回 200，不解析也不转发）→ 接管兜底端点 = 把你的 logs / traces 一起劫持进 daemon **静默丢弃**。ccl 统计不需要日志，就不该动总配置。
+
+**为什么 metrics 拦截不受影响**：per-signal metrics 端点**总是**被交付，而 OTel 规范规定 per-signal 端点**优先于**兜底端点 → metrics 一律到本地 daemon（哪怕你配了远程兜底端点）。
+
+**logs / traces 现在去哪了**：完全按你自己的配置走——配了 per-signal logs/traces 端点就直达那个端点；只配了兜底端点就走兜底端点。**不经 ccl 的 daemon**。
 
 **为什么走 `--settings`**：Claude Code 的优先级是 **`--settings` > `settings.json` > 进程环境**（实测），且 `env` 块是**逐键深合并**。于是：
 
@@ -331,7 +339,7 @@ Claude Code v2.1.x 原生支持 OTel 推送（`CLAUDE_CODE_ENABLE_TELEMETRY=1`�
 
 **不写 settings.json 的两个好处**：
 
-1. **直接敲 `claude`（不走 ccl）的会话不再被 ccl 记录**。旧版 ccl 把端点写进全局 settings.json，导致本机所有 Claude Code 进程都往 ccl 的 daemon 推，统计里留下一堆 provider / cwd 全空的"未知"会话。现在没有全局端点，裸 claude 根本不导出（你自己配了远程端点的话，它照旧发给自己的 collector，只是**不再经过 ccl 的 daemon**）。
+1. **直接敲 `claude`（不走 ccl）的会话不再被 ccl 记录**。旧版 ccl 把端点写进全局 settings.json，导致本机所有 Claude Code 进程都往 ccl 的 daemon 推，统计里留下一堆 provider / cwd 全空的"未知"会话。现在 ccl 不装全局端点，裸 claude 不再被劫持（你自己配了远程端点的话，它照旧发给自己的 collector，只是**不再经过 ccl 的 daemon**）。
 2. 你的配置文件里不再留 ccl 的备份键（`CC_ORIG_*` / `FORWORD_*`），也不会出现"live 值 + 备份值"两份历史。
 
 `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` / `_TRACES_ENDPOINT` ccl 不碰（logs/traces 你自己配的去自己的 collector）。
@@ -395,7 +403,7 @@ Claude Code 的 OTel payload 里**没有** cwd，也没有 provider——它只�
 
    ccl **不会**改你的 `~/.claude/settings.json`——`--settings` 只作用于本次启动的进程，直接 `claude` 启动的会话不受影响。
 
-   **同一个 `--settings` 对象里还带着 OTel 端点接管**（见上面"数据来源"）：`OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` 被交付成本地 daemon 地址，`OTEL_METRICS_EXPORTER` / `OTEL_EXPORTER_OTLP_PROTOCOL` / `CLAUDE_CODE_ENABLE_TELEMETRY` 按需补默认值。**所有变量传递都走这一条通道**，没有第二个写入点。
+   **同一个 `--settings` 对象里还带着 OTel 接管**（见上面"数据来源"）：`OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` 被交付成本地 daemon 地址（**只接管 metrics 这一个信号**），`OTEL_METRICS_EXPORTER` / `OTEL_EXPORTER_OTLP_PROTOCOL` / `CLAUDE_CODE_ENABLE_TELEMETRY` 按需补默认值。**所有变量传递都走这一条通道**，没有第二个写入点。
 
    ⚠️ **转发到远程 collector 时**，daemon 会剥掉 `ccl.provider` / `ccl.cwd` / `ccl.provider_endpoint` 这三个键再转发（它们是本地记账，描述的是"这次 ccl 启动用了什么"，对远程 collector 没价值，还可能泄露本机工作目录）。你的远程 collector 收到的资源属性与你没装 ccl 时一致。**本地** `telemetry.db` 里仍然保留这三个键（CLI 的 provider 列兜底要用）。
 
@@ -481,7 +489,9 @@ Claude Code v2.1.x 的 OTel SDK 按"先分类型端点 → 没有才用兜底"�
 
 daemon 转发时用的正是你的原值（见下一节）。
 
-**为什么只接管 metrics，不接管 logs/traces**：logs/traces 用户本来就写好了去自己的远程 collector，已经直达了；ccl 再插一脚只是浪费流量 + 多一个可能挂的点。`ccl stats` 只需要 metrics 就够了。
+**为什么只接管 metrics，不接管 logs/traces**：logs/traces 你自己配的去自己的 collector，本来就直达了；ccl 再插一脚只是浪费流量 + 多一个可能挂的点。`ccl stats` 只需要 metrics 就够了。
+
+**为什么不接管兜底端点**：兜底端点是"总配置"，logs / traces 在没有 per-signal 端点时也走它。接管它 = 把 logs / traces 一起劫持进 daemon（只回 200、不转发）→ 你的远程 collector 静默收不到日志。**ccl 统计不需要日志，就不该动总配置。**
 
 **典型公司远程 collector 配置**（场景 A）：
 
@@ -497,13 +507,12 @@ daemon 转发时用的正是你的原值（见下一节）。
 }
 ```
 
-ccl 启动 Claude Code 时交付的 `--settings`：
+ccl 启动 Claude Code 时交付的 `--settings`（**只有 metrics 相关**）：
 
 ```jsonc
 {
     "env": {
-        // 接管 → 本地 daemon
-        "OTEL_EXPORTER_OTLP_ENDPOINT":         "http://localhost:4318",
+        // 接管 → 本地 daemon（**只接管 metrics**）
         "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://localhost:4318/v1/metrics",
 
         // 用户没写的键 → ccl 补默认值
@@ -513,16 +522,21 @@ ccl 启动 Claude Code 时交付的 `--settings`：
 
         // launch 上下文（provider / cwd / 端点 host）
         "OTEL_RESOURCE_ATTRIBUTES":            "ccl.provider=...,ccl.cwd=..."
+
+        // 注意：没有 OTEL_EXPORTER_OTLP_ENDPOINT —— 兜底端点是你的总配置，
+        // logs / traces 走它，ccl 不碰
     }
 }
 ```
+
+结果：metrics → 本地 daemon → 转发到你的 collector；logs / traces → 你的 collector（直达，不经 daemon）。
 
 ### 转发到远程 collector
 
 如果你公司有 OTel collector（如 `otel.example.com:4317`），ccl 启动后会自动：
 
 1. 从你的 `~/.claude/settings.json` 读出**你自己配的**端点
-2. 通过 `--settings` 把本次启动的端点接管到 `http://localhost:4318`（本地 daemon）
+2. 通过 `--settings` 把本次启动的 **metrics 端点**接管到 `http://localhost:4318/v1/metrics`（本地 daemon）
 3. 把你的原值通过**进程环境变量**交给 daemon（fork daemon 时被继承）：
    - `FORWORD_OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`（per-signal metrics 端点，**优先**）
    - `CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT`（兜底端点）
