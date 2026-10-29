@@ -39,7 +39,7 @@ The resolved value SHALL be passed to the TUI as the pre-selected provider.
 
 #### Scenario: TUI user picks a different provider
 - **WHEN** the TUI pre-selects `deepseek` from cwd binding but the user picks `anthropic`
-- **THEN** the TUI result contains `result.Provider = "anthropic"` and the runner uses `anthropic` for `os.Setenv` and `SetActiveProvider`
+- **THEN** the TUI result contains `result.Provider = "anthropic"`, the runner delivers `anthropic`'s env through the `--settings` parameter, and `SetActiveProvider` records the selection
 
 ### Requirement: TUI offers to remember cwd binding
 After the user confirms provider and permission mode selections in the TUI, the TUI SHALL prompt `记住当前目录 (<wd>) 默认用 <provider> 吗？[Y/n]`. The prompt SHALL NOT appear if the user picked the same provider already bound to this cwd (no change to record).

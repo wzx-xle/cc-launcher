@@ -60,7 +60,10 @@ func TestInjectLaunchContext_MergesOtelEnv(t *testing.T) {
 		keyEndpoint:        defaultEndpoint,
 		keyMetricsEndpoint: defaultMetricsEndpoint,
 	}
-	_, settingsJSON := injectLaunchContext(cm, "minimax", "/home/u/proj", "https://api.minimax.cn/anthropic", nil, otelEnv)
+	settingsJSON, err := injectLaunchContext(cm, "minimax", "/home/u/proj", "https://api.minimax.cn/anthropic", otelEnv)
+	if err != nil {
+		t.Fatalf("injectLaunchContext: %v", err)
+	}
 
 	env := parseSettingsEnv(t, settingsJSON)
 	if env[keyEndpoint] != defaultEndpoint {
@@ -75,13 +78,19 @@ func TestInjectLaunchContext_MergesOtelEnv(t *testing.T) {
 	}
 }
 
-// TestInjectLaunchContext_WritesEnv 断言进程 env 与 optsEnv 都被注入了上下文。
+// TestInjectLaunchContext_WritesEnv 断言**进程 env**被注入了上下文（冗余第二通道）。
+//
+// 主通道是 --settings；进程环境这条是"万一某个 Claude Code 版本不认 --settings"
+// 的防线。launcher 在 opts.Env 为 nil 时用 os.Environ()（exec 时的实时值）→
+// 这里 os.Setenv 的值会进子进程。
 func TestInjectLaunchContext_WritesEnv(t *testing.T) {
 	t.Setenv(launchctx.EnvResourceAttributes, "")
 
 	cm, _ := newTestConfigMgr(t, nil)
-	optsEnv := []string{"PATH=/usr/bin"}
-	got, _ := injectLaunchContext(cm, "minimax", "/home/u/proj", "https://api.minimax.cn/anthropic", optsEnv, nil)
+	_, err := injectLaunchContext(cm, "minimax", "/home/u/proj", "https://api.minimax.cn/anthropic", nil)
+	if err != nil {
+		t.Fatalf("injectLaunchContext: %v", err)
+	}
 
 	val := os.Getenv(launchctx.EnvResourceAttributes)
 	if val == "" {
@@ -96,10 +105,6 @@ func TestInjectLaunchContext_WritesEnv(t *testing.T) {
 			t.Fatalf("注入值 %q 缺 %q", val, want)
 		}
 	}
-	joined := strings.Join(got, "\n")
-	if !strings.Contains(joined, launchctx.EnvResourceAttributes+"=") {
-		t.Fatalf("optsEnv 未被注入: %v", got)
-	}
 }
 
 // TestInjectLaunchContext_BuildsSettingsJSON 断言产出的 additional settings
@@ -108,7 +113,10 @@ func TestInjectLaunchContext_BuildsSettingsJSON(t *testing.T) {
 	t.Setenv(launchctx.EnvResourceAttributes, "")
 
 	cm, _ := newTestConfigMgr(t, nil)
-	_, settingsJSON := injectLaunchContext(cm, "minimax", "/home/u/proj", "https://api.minimax.cn/anthropic", nil, nil)
+	settingsJSON, err := injectLaunchContext(cm, "minimax", "/home/u/proj", "https://api.minimax.cn/anthropic", nil)
+	if err != nil {
+		t.Fatalf("injectLaunchContext: %v", err)
+	}
 	if settingsJSON == "" {
 		t.Fatal("未产出 additional settings JSON")
 	}
@@ -144,7 +152,10 @@ func TestInjectLaunchContext_MergesUserValue(t *testing.T) {
 			launchctx.EnvResourceAttributes: "team=platform",
 		},
 	})
-	_, settingsJSON := injectLaunchContext(cm, "minimax", "/home/u/proj", "", nil, nil)
+	settingsJSON, err := injectLaunchContext(cm, "minimax", "/home/u/proj", "", nil)
+	if err != nil {
+		t.Fatalf("injectLaunchContext: %v", err)
+	}
 	val := parseSettingsJSON(t, settingsJSON)
 
 	if !strings.Contains(val, "team=platform") {
@@ -164,7 +175,10 @@ func TestInjectLaunchContext_UserKeyWinsOverStale(t *testing.T) {
 			launchctx.EnvResourceAttributes: launchctx.KeyProvider + "=stale",
 		},
 	})
-	_, settingsJSON := injectLaunchContext(cm, "minimax", "/home/u/proj", "", nil, nil)
+	settingsJSON, err := injectLaunchContext(cm, "minimax", "/home/u/proj", "", nil)
+	if err != nil {
+		t.Fatalf("injectLaunchContext: %v", err)
+	}
 	val := parseSettingsJSON(t, settingsJSON)
 
 	if strings.Contains(val, "stale") {
@@ -186,7 +200,7 @@ func TestInjectLaunchContext_DoesNotTouchSettingsJSON(t *testing.T) {
 			"ANTHROPIC_AUTH_TOKEN": "sk-user-token",
 		},
 	})
-	injectLaunchContext(cm, "minimax", "/home/u/proj", "https://api.minimax.cn", []string{"PATH=/usr/bin"}, nil)
+	injectLaunchContext(cm, "minimax", "/home/u/proj", "https://api.minimax.cn", nil)
 
 	data, err := os.ReadFile(settingsPath)
 	if err != nil {

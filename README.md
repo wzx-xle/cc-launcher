@@ -191,39 +191,41 @@ cd ~/work/proj-b && ccl
 
 **清理解除**：在同 cwd 跑 `ccl provider <name>` 重写 binding；或直接编辑 `~/.cc-launcher/state.json` 的 `dir_bindings` 字段（key 是 `os.Getwd()` 解析的绝对路径）。
 
-## 配置合并机制
+## provider 配置怎么生效
 
-> ⚠️ **本节描述的是老版本行为**。自 provider-setenv 起，provider 配置**不再写进 `~/.claude/settings.json`**，而是 **setenv 注入到子进程环境**（`launcher.Options.Env`）。切换提供商时 ccl **不碰** settings.json。
+**provider 配置通过 Claude Code 的 `--settings` 参数交付**，与 OTel 配置、launch 上下文在**同一个 settings 对象**里。ccl **不碰** `~/.claude/settings.json`。
 
-老 ccl 版本切换提供商时的步骤：
+Claude Code 的优先级是 **`--settings` > `settings.json` > 进程环境**（实测），`env` 块**逐键深合并**：
 
-1. **备份** — 当前 settings.json 写入 `~/.cc-launcher/backups/`（保留最近 30 个）
-2. **清理旧配置** — 按快照比对，删除未被用户修改的旧提供商字段
-3. **注入新配置** — 写入新提供商的所有字段
-4. **更新快照** — 记录本次注入的字段，供下次切换时比对
+| 键 | ccl 的 provider 配了 | 你在 settings.json 里写了 | 谁赢 |
+|-----|---------------------|--------------------------|------|
+| `ANTHROPIC_BASE_URL` | ✅ | 任意值 | **ccl 的 provider** |
+| `ANTHROPIC_AUTH_TOKEN` | ✅ | 任意值 | **ccl 的 provider** |
+| `ANTHROPIC_MODEL` | ❌ | 有值 | **你的 settings.json** |
+| `ANTHROPIC_MODEL` | ❌ | 没值 | 进程环境的值 |
 
-不会被删除的：不在快照中的字段（用户手动加的）、值与快照不同的字段（用户改过的）。
+> **为什么 provider 的优先级要高于 settings.json**：配一个独立提供商的目的就是"用它"。如果用户在 settings.json 里手写过 `ANTHROPIC_*`，旧实现（setenv 注入进程环境）会被 settings.json 压住 → **选了等于没选**。
 
-> **备份触发语义**（详见"用量监控" → "自动备份时机"）：新版 ccl 只在**一次性清理旧版遗留**和**手动 `ccl serve --restore`** 时备份 settings.json——provider 切换与每次启动都不再备份。
+**`--settings` 的载体**：`~/.cc-launcher/cache/settings-<sha256(内容)[:16]>.json`
+
+- **内容哈希命名**：同样内容 → 同一个文件（复用）；不同内容 → 不同文件（两个并发启动各读各的，不会串）
+- **argv 里只有路径，没有明文凭证**（`/proc/<pid>/cmdline` 是 0444，同机任何用户可读 → token 不能进命令行）
+- 目录 0700、文件 0600；**常驻不删**（启动时清掉 mtime 超过 1 年的）
+- 同名即同内容 → 写入幂等（已存在且内容一致就直接复用）
 
 ### settings.json 历史兼容
 
-老 ccl 版本（≤ provider-setenv-cwd-binding change 前）通过 `config.Manager.Merge` 把 provider env 写到 `~/.claude/settings.json`，但**写时不删**——切 provider 时旧 `ANTHROPIC_*` 可能残留。**本 change 改用 setenv 注入到子进程环境**（不再写 settings.json 的 provider 字段），但**首次升级时** ccl 会自动：
+老 ccl 版本（≤ provider-setenv-cwd-binding change 前）通过 `config.Manager.Merge` 把 provider env 写到 `~/.claude/settings.json`，但**写时不删**——切 provider 时旧 `ANTHROPIC_*` 可能残留。**首次升级时** ccl 会自动：
 
 1. 读 `state.json.injected_snapshot`（老 ccl 写入的"上次 Merge 留下的字段"）
-2. 跟 `settings.json` 当前值**值匹配比对**：值完全相同的 key 才删（**保护用户手改的字段**——CLAUDE.md §"Claude Code 本身添加的配置要保留"）
+2. 跟 `settings.json` 当前值**值匹配比对**：值完全相同的 key 才删（**保护用户手改的字段**）
 3. 删除值匹配的 `ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL / ANTHROPIC_MODEL / ...`；OTel / `CC_ORIG_*` / `FORWORD_*` 等非 provider 字段**不动**
-4. 首次删除时打 stderr 日志 `⚙ 检测到 ccl 之前注入的 provider env，正在清理 settings.json（备份到 ~/.cc-launcher/backups/）... ✓ (N 个 key)`，并把 settings.json 备份到 `backups/settings-<时间戳>.json`
+4. 首次删除时打 stderr 日志 `⚙ 检测到 ccl 之前注入的 provider env，正在清理 settings.json（备份到 ~/.cc-launcher/backups/）... ✓ (N 个 key)`
 5. 清空 `state.json.injected_snapshot` 标记完成
 
-之后 settings.json 不再被 ccl 写 provider 字段（OTel 注入行为不变）。
+之后 settings.json 不再被 ccl 写 provider 字段。
 
-**用户手写了 `ANTHROPIC_*` 的情况**：
-
-如果在老 ccl 写入后**手改过** `settings.json` 的 `ANTHROPIC_AUTH_TOKEN` 等 key，migrate 会**保留**（值与 snapshot 不等视为用户意图）。但**这意味着 ccl 的 setenv 注入会被 settings.json 压住**——Claude Code 启动时按 `settings.json` env 优先于 shell env。**解决方法**：
-
-- 从 `settings.json` 删除手写的 `ANTHROPIC_*` key，让 ccl 接管 provider 配置
-- 或用 `ccl provider <name>` 明确覆盖（仍受 settings.json 压住，需先清手写字段）
+> **用户手写了 `ANTHROPIC_*` 的情况**：migrate 会**保留**它们（值与 snapshot 不等视为用户意图）——但现在 **ccl 选的 provider 会覆盖它们**（`--settings` 优先级最高）。这是本程序的意图：配了独立提供商就一定用它。
 
 ## 目录结构
 
@@ -232,6 +234,8 @@ cd ~/work/proj-b && ccl
 ├── providers/              # 提供商配置（一个 JSON 一个提供商）
 │   ├── anthropic.json
 │   └── bedrock.json
+├── cache/                  # --settings 的载体（内容哈希命名，常驻）
+│   └── settings-340cddc97ad7f8df.json
 ├── backups/                # settings.json 写前备份
 │   └── settings-2026-07-09T15-04-05.json
 ├── state.json              # 运行时状态（激活提供商、权限偏好）
@@ -454,7 +458,7 @@ ccl 会把每次 `settings.json` 写入前的快照存到 `~/.cc-launcher/backup
 1. **一次性清理旧版遗留**（升级后第一次跑 ccl）—— 清理前做一份
 2. **手动 `ccl serve --restore`** —— 清理前做一份
 
-provider 切换**不再**写 settings.json（provider env 走 setenv 注入子进程环境）。
+provider 切换**不再**写 settings.json（provider env 走 `--settings` 交付）。
 
 > **旧版兼容**：≤ v0.15.3 的 ccl 会把 OTel 端点写进 settings.json（并在文件里留 `CC_ORIG_*` / `FORWORD_*` 备份键）。升级后**第一次**跑 ccl 会自动清理这些痕迹：把备份值还原回原 key、删掉 ccl 注入的默认值、删掉备份键（**用户自己写的键一律不动**）。清理前会备份；备份失败只警告不阻断启动。清理**只跑一次**（标志记在 `~/.cc-launcher/state.json`）。
 >

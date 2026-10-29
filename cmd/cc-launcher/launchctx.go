@@ -8,7 +8,6 @@ import (
 	"sort"
 
 	"cc-launcher/internal/config"
-	"cc-launcher/internal/envutil"
 	"cc-launcher/internal/launchctx"
 )
 
@@ -37,12 +36,12 @@ import (
 // 用户原值（settings.json 的 env.OTEL_RESOURCE_ATTRIBUTES）**合并**进注入值，
 // 不替换——用户的属性不能因为 ccl 介入而丢失。
 //
-// otelEnv 是本次要交付给子进程的 OTel env 块（端点接管 + 补默认值，见
-// envconfig.go 的 buildChildOtelEnv）。它和 launch 上下文**合并进同一个
-// `--settings` 对象**——两个通道统一成一条。
+// deliver 是调用方要交付给子进程的 env 块（provider 的 env + OTel 的 env，见
+// envconfig.go 的 buildChildOtelEnv 与 main.go 的 providerEnvMap）。它和 launch
+// 上下文**合并进同一个 `--settings` 对象**——所有变量传递统一成一条通道。
 //
-// 返回：更新后的 optsEnv + additional settings 的 JSON（空串 = 不注入）。
-func injectLaunchContext(cm *config.Manager, provider, cwd, baseURL string, optsEnv []string, otelEnv map[string]string) ([]string, string) {
+// 返回：additional settings 的 JSON。
+func injectLaunchContext(cm *config.Manager, provider, cwd, baseURL string, deliver map[string]string) (string, error) {
 	ctx := launchctx.Context{
 		Provider:         provider,
 		Cwd:              cwd,
@@ -50,10 +49,10 @@ func injectLaunchContext(cm *config.Manager, provider, cwd, baseURL string, opts
 	}
 	attrs := ctx.Attrs()
 
-	// 交付的 env 块 = OTel 端点接管 + launch 上下文的 resource attributes。
-	deliver := make(map[string]string, len(otelEnv)+1)
-	for k, v := range otelEnv {
-		deliver[k] = v
+	// 交付的 env 块 = 调用方给的（provider env + OTel env）+ launch 上下文。
+	out := make(map[string]string, len(deliver)+1)
+	for k, v := range deliver {
+		out[k] = v
 	}
 
 	if len(attrs) > 0 {
@@ -62,23 +61,19 @@ func injectLaunchContext(cm *config.Manager, provider, cwd, baseURL string, opts
 		userValue, _ := settingsResourceAttrsValue(cm)
 		merged := launchctx.Merge(userValue, attrs)
 
-		// 通道 2：进程环境。
+		// 冗余第二通道：进程环境（万一某个 Claude Code 版本不认 --settings）。
+		// launcher 在 opts.Env 为 nil 时用 os.Environ()（exec 时的实时值）→
+		// 这里 os.Setenv 的值会进子进程 ✓
 		_ = os.Setenv(launchctx.EnvResourceAttributes, merged)
-		if optsEnv != nil {
-			// Unix 上 provider 选中时 opts.Env 非 nil（是启动时的 os.Environ() 快照），
-			// launcher 直接把它交给 syscall.Exec——只改进程 env 对它无效。
-			optsEnv = envutil.Upsert(optsEnv, launchctx.EnvResourceAttributes, merged)
-		}
-		deliver[launchctx.EnvResourceAttributes] = merged
+		out[launchctx.EnvResourceAttributes] = merged
 	}
 
-	// 通道 1：--settings（主通道）。
-	settingsJSON, err := buildLaunchSettingsJSON(deliver)
+	// 主通道：--settings。
+	settingsJSON, err := buildLaunchSettingsJSON(out)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "⚠ 构造 additional settings 失败（provider / 项目维度将为空）: %v\n", err)
-		return optsEnv, ""
+		return "", fmt.Errorf("构造 additional settings 失败: %w", err)
 	}
-	return optsEnv, settingsJSON
+	return settingsJSON, nil
 }
 
 // buildLaunchSettingsJSON 把要交付的 env 块包成 Claude Code 的 additional settings。

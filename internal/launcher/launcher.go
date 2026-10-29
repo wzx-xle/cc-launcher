@@ -31,16 +31,6 @@ type Options struct {
 	//
 	// 语义：追加在 launcher 自己生成的参数之后。launcher 包不解释内容。
 	ExtraArgs []string
-
-	// Cleanup 在 Claude Code 进程结束后、ccl 退出前执行一次（可为 nil）。
-	//
-	// 用途：删掉 `--settings` 的临时文件（Windows 上 cmd.exe 会剥掉 JSON 的
-	// 双引号 → 必须走文件；见 cmd/cc-launcher/settings_windows.go）。
-	//
-	// 语义差异：Unix 上 Launch 用 syscall.Exec 替换进程、**不返回** → Cleanup
-	// 不会执行（Unix 走内联 JSON、不产生文件，无影响）；Windows 上 Launch 等
-	// 子进程结束 → Cleanup 会执行（launcher 在 os.Exit 之前先调它）。
-	Cleanup func()
 }
 
 // resolveClaude 查找 claude 可执行文件，并根据 opts 构建参数（不含程序名）。
