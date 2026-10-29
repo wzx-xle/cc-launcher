@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-10-29 — provider-env-via-settings
+
+### Fixes
+- **选的 provider 现在一定生效**：provider 的 env 此前走 **setenv（进程环境）** 注入——而进程环境是 Claude Code 优先级**最低**的通道（`~/.claude/settings.json` 的 `env` 块会压住它）→ 用户在 settings.json 里手写过任何 `ANTHROPIC_*`（公司模板 / 脚本 / 教程留下的），**在 ccl 里选的 provider 就完全不生效**。这与"配一个独立提供商"的目的直接冲突：**配了等于没选**
+  - **provider 配置改走 `--settings`**（与 OTel 配置、launch 上下文**同一个 settings 对象**）：Claude Code 的优先级是 `--settings` > `settings.json` > 进程环境 → **ccl 配置的键赢**
+  - **ccl 没配的键不碰**：provider 里没有的 `ANTHROPIC_MODEL` 之类，settings.json 的手写值继续生效（settings.json 里也没写才轮到进程环境）
+  - 用户手写的 `ANTHROPIC_*` 会被当前 provider 覆盖——**这是本程序的目的**（不提示）
+  - 真机验证：settings.json 里手写 `ANTHROPIC_BASE_URL=stale` + `ANTHROPIC_AUTH_TOKEN=sk-stale` → 实际请求打到 provider 的端点、auth 头是 provider 的 token
+
+### Security
+- **provider 的 token 不再出现在进程命令行里**：Unix 上 `--settings <JSON>` 是命令行参数，而 `/proc/<pid>/cmdline` 权限是 **0444（同机任何用户可读）** → 明文凭证暴露。改用文件载体后，argv 里只有一个路径（真机验证：argv 里明文 token 出现次数 = 0）
+
+### Refactor
+- **`--settings` 的载体改成「可复用的常驻文件」**（两个平台统一）：
+  - 位置 `~/.cc-launcher/cache/`，目录 0700、文件 0600
+  - 命名 `settings-<sha256(内容)[:16]>.json` —— **内容哈希**：
+    - 同样内容 → 同一个文件（**复用**，不是每次启动留一个）
+    - 不同内容 → 不同文件（**并发启动各读各的**——固定名实测会串：A 写到 B 的 provider = 用错账号）
+    - 同名即同内容 → **写入幂等**（已存在且内容一致就直接复用、不重写；Windows 上也就不会撞上"文件被 claude 占用 → 覆盖失败"）
+  - **常驻不删**，启动时清掉 mtime 超过 **1 年**的 `settings-*.json`
+  - Unix 的 launcher **不用改**：不需要"退出时删文件"——`syscall.Exec` 替换进程本来就没有"退出"那一刻（旧的 `opts.Cleanup` 在 Unix 上一直是 no-op）
+  - Windows 不再删文件、不再用 pid 唯一名 → 与 Unix 同一套策略
+
+### Tests
+- `cmd/cc-launcher`：载体（哈希命名 / 复用幂等 / 目录 0700 + 文件 0600 / 内容完整 / 1 年清理阈值 / argv 无明文）、provider env 读取（异常输入不炸）、交付语义（**ccl 配了的赢、没配的不出现**）
+- 真机（pty 驱动真 TUI + 假 claude）：交付内容含 provider 的 `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `HTTP_PROXY` + OTel key + launch 上下文，**全在一个 env 块**；argv 只有路径
+- 真机（真 claude + 假代理服务器）：`--settings` 里的端点 / 凭证 / 代理**三者全部生效**（此前只有 OTel 键验证过）
+
+### Compatibility
+- **`--settings` 参数的值从内联 JSON 变成文件路径**——若有脚本解析 ccl 传给 claude 的命令行，需注意
+- **provider 配置的优先级反转**：settings.json 里手写的 `ANTHROPIC_*` 不再压住 ccl 选的 provider
+- 新增 `~/.cc-launcher/cache/` 目录（含 provider 凭证，0600）；可以整个删掉，ccl 会重建
+- `launcher.Options.Cleanup` 字段删除（唯一用途是删临时文件，现在文件常驻不删）
+- db schema / 看板 / 鉴权 / 顶层子命令 / daemon 转发链路全部不变
+
+### OpenSpec
+- archive `provider-env-via-settings` (2026-10-29)
+
 ## [0.16.1] - 2026-10-29 — otel-metrics-only-takeover
 
 ### Fixes
