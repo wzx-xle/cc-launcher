@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-10-29 — otel-metrics-only-takeover
+
+### Fixes
+- **logs / traces 不再被 ccl 意外拦截**：v0.16.0 把 OTel 接管搬进 `--settings` 时**接管了两个端点**——per-signal metrics 端点 + **兜底端点** `OTEL_EXPORTER_OTLP_ENDPOINT`。兜底端点是"总配置"：**logs / traces 在没有 per-signal 端点时也走它**。而 daemon 是 metrics-only 的（`/v1/logs` `/v1/traces` 只回 200，不解析也不转发）→ 接管兜底端点 = 把用户的 logs / traces 一起劫持进 daemon **静默丢弃**。ccl 的用量统计只涉及 metrics 一个信号 → **只接管 metrics**，兜底端点键不再交付
+  - **metrics 拦截不受影响**：per-signal metrics 端点**总是**被交付，而 OTel 规范规定 per-signal 端点**优先于**兜底端点 → metrics 一律到本地 daemon（哪怕用户配了远程兜底端点）
+  - **logs / traces 回到用户自己的配置**：配了 per-signal logs/traces 端点 → 直达那个端点；只配了兜底端点 → 走兜底端点直达远程 collector，**不再经 daemon**
+  - ⚠️ **更正 v0.16.0 的设计说法**：把"接管兜底端点"称作 metrics 拦截的兜底是错的——metrics 拦截从头到尾只靠 per-signal 端点，接管兜底端点**没有收益、只有一个副作用**。这个错误在 v0.16.0 的 design D2 与本文档里都写了，本次一并纠正
+  - 真机验证（假远程 collector + 真 daemon + 真 claude）：collector 收到 `POST /v1/logs`（Claude Code **直发**，不经 daemon）+ `POST /v1/metrics`（**daemon 转发**）；daemon 落库仍带 provider / cwd
+
+### Tests
+- `cmd/cc-launcher`：`buildChildOtelEnv` 新增专项用例——**兜底端点永不交付**（无论用户配没配）；既有交付策略 / 转发目标 / 遗留清理用例同步
+- 真机：交付给 Claude Code 的 `--settings` env 块里确认**没有**兜底端点键
+
+### Compatibility
+- **行为变化**：如果你在 v0.16.0 上配了兜底端点指远程 collector 且开着 `OTEL_LOGS_EXPORTER`，那些 logs 之前是被 ccl 的 daemon **吞掉**的；现在恢复为直达你的 collector
+- 交付给 Claude Code 的 `--settings` env 块里不再有 `OTEL_EXPORTER_OTLP_ENDPOINT` 键（其余 4 个 OTel 键 + `OTEL_RESOURCE_ATTRIBUTES` 不变）
+- 转发目标解析（仍读你的兜底 / per-signal 原值作为转发目的地）、daemon 侧代码、遗留清理规则、db schema / 看板 / 鉴权 / 顶层子命令全部不变
+
+### OpenSpec
+- archive `otel-metrics-only-takeover` (2026-10-29)
+
 ## [0.16.0] - 2026-10-28 — otel-endpoints-via-settings
 
 ### Refactor
