@@ -52,5 +52,5 @@
 - [x] 8.1 README：provider 文件格式章节（顶层键可透传 + 校验规则 + 排除清单）
 - [x] 8.2 `CLAUDE.md` 约束 6 同步（provider 键的覆盖语义、model 键的环境变量规则）
 - [x] 8.3 CHANGELOG：新版本段
-- [ ] 8.4 `openspec archive provider-settings-passthrough`
-- [ ] 8.5 打 tag + 一次推送
+- [x] 8.4 `openspec archive provider-settings-passthrough`
+- [x] 8.5 打 tag + 一次推送
