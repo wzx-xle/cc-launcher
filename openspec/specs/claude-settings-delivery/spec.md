@@ -65,14 +65,25 @@ A failure to remove a stale file MUST NOT block the launch: ccl MUST print a war
 - **WHEN** the cache directory contains a file that is neither `settings-*.json` nor older than a year
 - **THEN** ccl leaves it in place
 
-### Requirement: the delivered settings contain only an env block
-The settings object ccl delivers MUST contain exactly one top-level field, `env`. The settings file's own non-`env` settings (permissions, plugins, and the like) MUST remain in effect, because ccl's object is merged into the settings file rather than replacing it.
+### Requirement: The delivered settings contain the env block and the provider's passthrough keys
 
-#### Scenario: only an env block is delivered
-- **WHEN** ccl launches Claude Code
-- **THEN** the delivered settings object contains only an `env` field
+The settings object ccl delivers MUST contain the `env` block, and the top-level keys the selected provider configures, except for ccl's own `note` and `order` metadata. The settings file's own settings for the keys ccl does not deliver (plugins, and the settings for keys the provider does not configure) MUST remain in effect, because ccl's object is merged into the settings file rather than replacing it.
+
+The delivered object MUST list its keys in a stable order, so that the same provider configuration and the same environment always produce the same settings content and therefore the same content-hash-named cache file.
+
+#### Scenario: the env block is delivered
+- **WHEN** ccl launches Claude Code with a selected provider
+- **THEN** the delivered settings object contains an `env` field carrying the provider's env keys, the OTel keys and the launch context
+
+#### Scenario: the provider's keys are delivered alongside it
+- **WHEN** the selected provider's configuration contains `"model": "some-model"` and the user runs `ccl`
+- **THEN** the delivered settings object contains both the `env` field and the top-level key `model`
 
 #### Scenario: the settings file's other settings survive
-- **WHEN** `~/.claude/settings.json` defines `permissions` and ccl delivers its own settings object
+- **WHEN** `~/.claude/settings.json` defines `permissions` and the selected provider configures no `permissions`, and ccl delivers its own settings object
 - **THEN** the permissions remain in effect for the launched session
+
+#### Scenario: the same configuration yields the same content
+- **WHEN** the user runs `ccl` twice with the same provider and the same environment
+- **THEN** both launches deliver settings content whose keys appear in the same order
 

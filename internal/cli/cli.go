@@ -9,10 +9,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"cc-launcher/internal/modes"
 	"cc-launcher/internal/provider"
+	"cc-launcher/internal/settingsschema"
 	"cc-launcher/internal/state"
 	"cc-launcher/internal/templates"
 )
@@ -34,11 +36,13 @@ const providerHelp = `用法: ccl provider [选项] [name]
 
 子命令:
     ccl provider <name>   切换到指定提供商
+    ccl provider validate <name>   校验指定提供商的配置（不切换、不启动）
 
 示例:
     ccl provider --template           # 看 7 种类型 + 一行说明
     ccl provider --template deepseek  # 看 deepseek 的 JSON 模板
-    ccl provider --new --type deepseek my-deepseek  # 引导式新建`
+    ccl provider --new --type deepseek my-deepseek  # 引导式新建
+    ccl provider validate my-deepseek # 检查配置能不能被 Claude Code 接受`
 
 // modeHelp 是 `ccl mode --help` 输出的内容。
 const modeHelp = `用法: ccl mode [选项] [<name>]
@@ -206,6 +210,13 @@ func (c *CLI) runProvider(args []string) error {
 	if *templateFlag {
 		return c.printTemplate(positional)
 	}
+	// `ccl provider validate <name>`：校验配置。
+	//
+	// 只有**两个**位置参数时才算 validate —— 否则一个名字叫 "validate" 的
+	// provider 就再也切不掉了（`ccl provider validate` 仍然是切换它）。
+	if len(positional) >= 2 && positional[0] == "validate" {
+		return c.validateProvider(positional[1])
+	}
 	if *listFlag {
 		return c.listProviders()
 	}
@@ -224,6 +235,64 @@ func (c *CLI) runProvider(args []string) error {
 		return c.switchProvider(name)
 	}
 	return c.listProviders()
+}
+
+// validateProvider 实现 `ccl provider validate <name>`。
+//
+// 校验的是"这个配置能不能被 Claude Code 接受"——已知键的类型写错会让
+// Claude Code 丢弃**整个** settings 文件，连 provider 的凭证一起消失
+// （provider-settings-load-guard）。用户手改完 provider 文件后跑一次，
+// 比启动失败再看错误快得多。
+func (c *CLI) validateProvider(name string) error {
+	if !c.providers.Exists(name) {
+		return fmt.Errorf("提供商 %q 不存在", name)
+	}
+	cfg, err := c.providers.Get(name)
+	if err != nil {
+		return err
+	}
+
+	res := settingsschema.Validate(cfg)
+
+	// 顶层键概览：哪些会被透传，哪些是 ccl 自己的元数据。
+	envKeys := 0
+	if envAny, ok := cfg["env"].(map[string]any); ok {
+		envKeys = len(envAny)
+	}
+	var passthrough []string
+	for k := range cfg {
+		if k == "env" || provider.IsReservedKey(k) {
+			continue
+		}
+		passthrough = append(passthrough, k)
+	}
+	sort.Strings(passthrough)
+
+	fmt.Printf("提供商 %q\n", name)
+	fmt.Printf("  env 块: %d 个键\n", envKeys)
+	if len(passthrough) == 0 {
+		fmt.Printf("  顶层透传键: 无\n")
+	} else {
+		fmt.Printf("  顶层透传键: %s\n", strings.Join(passthrough, ", "))
+	}
+
+	if len(res.Warnings) > 0 {
+		fmt.Println("  警告:")
+		for _, w := range res.Warnings {
+			fmt.Printf("    - %s\n", w)
+		}
+	}
+
+	if !res.OK() {
+		fmt.Println("  ✗ 配置有误（Claude Code 会拒绝整个配置文件，provider 将不生效）:")
+		for _, e := range res.Errors {
+			fmt.Printf("    - %s\n", e)
+		}
+		return fmt.Errorf("提供商 %q 的配置有 %d 处错误", name, len(res.Errors))
+	}
+
+	fmt.Println("  ✓ 配置可被 Claude Code 接受")
+	return nil
 }
 
 // printTemplate 实现 `ccl provider --template [type]`。
@@ -320,11 +389,40 @@ func (c *CLI) listProviders() error {
 		}
 		if info.Error != "" {
 			fmt.Printf("⚠️  %s — %s\n", info.Name, info.Error)
+		} else if len(info.ValidationErrors) > 0 {
+			// 配置有已知键类型写错 → 启动时会被拦（Claude Code 会拒绝整个
+			// settings 文件）。提前标出来，别让用户选完才发现。
+			fmt.Printf("%s%s — ⚠️ 配置有误: %s\n", marker, info.Name, info.ValidationErrors[0])
 		} else {
-			fmt.Printf("%s%s\n", marker, info.Name)
+			// 标注这个 provider 有没有**顶层透传键**（env 以外的键）——
+			// 那些键会跟着 provider 一起生效，列出来让用户看得见。
+			suffix := ""
+			if info.PassthroughKeys > 0 {
+				suffix = fmt.Sprintf("  （%d 个透传键）", info.PassthroughKeys)
+			}
+			fmt.Printf("%s%s%s\n", marker, info.Name, suffix)
 		}
 	}
 	return nil
+}
+
+// passthroughKeyCount 数一个 provider 有多少个**顶层透传键**（env 以外、
+// 且不是 ccl 元数据键的顶层键）。
+//
+// 读文件失败 → 0（列表不该因为一个坏文件就整个失败）。
+func passthroughKeyCount(pm *provider.Manager, name string) int {
+	cfg, err := pm.Get(name)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for k := range cfg {
+		if k == "env" || provider.IsReservedKey(k) {
+			continue
+		}
+		n++
+	}
+	return n
 }
 
 func (c *CLI) switchProvider(name string) error {

@@ -60,7 +60,7 @@ func TestInjectLaunchContext_MergesOtelEnv(t *testing.T) {
 		keyEndpoint:        defaultEndpoint,
 		keyMetricsEndpoint: defaultMetricsEndpoint,
 	}
-	settingsJSON, err := injectLaunchContext(cm, "minimax", "/home/u/proj", "https://api.minimax.cn/anthropic", otelEnv)
+	settingsJSON, err := injectLaunchContext(cm, "minimax", "/home/u/proj", "https://api.minimax.cn/anthropic", otelEnv, nil)
 	if err != nil {
 		t.Fatalf("injectLaunchContext: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestInjectLaunchContext_WritesEnv(t *testing.T) {
 	t.Setenv(launchctx.EnvResourceAttributes, "")
 
 	cm, _ := newTestConfigMgr(t, nil)
-	_, err := injectLaunchContext(cm, "minimax", "/home/u/proj", "https://api.minimax.cn/anthropic", nil)
+	_, err := injectLaunchContext(cm, "minimax", "/home/u/proj", "https://api.minimax.cn/anthropic", nil, nil)
 	if err != nil {
 		t.Fatalf("injectLaunchContext: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestInjectLaunchContext_BuildsSettingsJSON(t *testing.T) {
 	t.Setenv(launchctx.EnvResourceAttributes, "")
 
 	cm, _ := newTestConfigMgr(t, nil)
-	settingsJSON, err := injectLaunchContext(cm, "minimax", "/home/u/proj", "https://api.minimax.cn/anthropic", nil)
+	settingsJSON, err := injectLaunchContext(cm, "minimax", "/home/u/proj", "https://api.minimax.cn/anthropic", nil, nil)
 	if err != nil {
 		t.Fatalf("injectLaunchContext: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestInjectLaunchContext_MergesUserValue(t *testing.T) {
 			launchctx.EnvResourceAttributes: "team=platform",
 		},
 	})
-	settingsJSON, err := injectLaunchContext(cm, "minimax", "/home/u/proj", "", nil)
+	settingsJSON, err := injectLaunchContext(cm, "minimax", "/home/u/proj", "", nil, nil)
 	if err != nil {
 		t.Fatalf("injectLaunchContext: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestInjectLaunchContext_UserKeyWinsOverStale(t *testing.T) {
 			launchctx.EnvResourceAttributes: launchctx.KeyProvider + "=stale",
 		},
 	})
-	settingsJSON, err := injectLaunchContext(cm, "minimax", "/home/u/proj", "", nil)
+	settingsJSON, err := injectLaunchContext(cm, "minimax", "/home/u/proj", "", nil, nil)
 	if err != nil {
 		t.Fatalf("injectLaunchContext: %v", err)
 	}
@@ -200,7 +200,7 @@ func TestInjectLaunchContext_DoesNotTouchSettingsJSON(t *testing.T) {
 			"ANTHROPIC_AUTH_TOKEN": "sk-user-token",
 		},
 	})
-	injectLaunchContext(cm, "minimax", "/home/u/proj", "https://api.minimax.cn", nil)
+	injectLaunchContext(cm, "minimax", "/home/u/proj", "https://api.minimax.cn", nil, nil)
 
 	data, err := os.ReadFile(settingsPath)
 	if err != nil {

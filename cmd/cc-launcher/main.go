@@ -163,29 +163,79 @@ func runTUI(pm *provider.Manager, sm *state.Manager, cm *config.Manager) error {
 
 	sm.SetPermissionMode(wd, result.Mode)
 
+	sessionLabel := "新会话"
+	switch result.SessionKind {
+	case "continue":
+		sessionLabel = "继续上次会话"
+	case "resume":
+		sessionLabel = "从会话列表选择"
+	}
+
+	// 组装本次启动的交付内容与参数（provider 的 env / 顶层键 / OTel / 上下文）。
+	opts, err := buildLaunchOptions(pm, cm, sm, result.Provider, result.Mode, wd, result.SessionKind)
+	if err != nil {
+		return err
+	}
+
+	// 拉起 OTel daemon（按需；端口已占 → skip）
+	started, _ := ensureDaemonRunning()
+	if started {
+		fmt.Println("✓ OTel daemon 拉起成功（监听 :4318）")
+	}
+
+	fmt.Printf("正在启动 Claude Code (%s / %s / %s)...\n", result.Provider, result.Mode, sessionLabel)
+	return launcher.Launch(opts)
+}
+
+// buildLaunchOptions 组装本次启动要交付给 Claude Code 的东西。
+//
+// 交付分三块，合并进**同一个** `--settings` 对象：
+//
+//  1. provider 的 env 块（凭证、端点、代理）
+//  2. provider 的顶层键（model / permissions / hooks …，已排除 ccl 元数据键）
+//  3. ccl 自己的东西（OTel 环境、启动上下文）
+//
+// 拆成独立函数是为了**可测**：TUI 是交互式的，测不了"选完 provider 之后到底
+// 交付了什么"，而交付内容恰恰是本 change 的核心契约。
+func buildLaunchOptions(pm *provider.Manager, cm *config.Manager, sm *state.Manager,
+	providerName, mode, wd, sessionKind string) (launcher.Options, error) {
+
+	opts := launcher.Options{PermissionMode: mode}
+	switch sessionKind {
+	case "continue":
+		opts.Continue = true
+	case "resume":
+		opts.Resume = true
+	}
+
 	// provider-settings-injection：provider 的 env **主通道是 --settings**
 	//（Claude Code 侧 ccl 说了算：用户在 settings.json 里手写的 ANTHROPIC_*
 	// 不再压住选中的 provider）。
-	providerEnv, providerBaseURL := providerEnvMap(pm, result.Provider)
+	//
+	// provider-settings-passthrough：provider 的**顶层键**（model / permissions /
+	// hooks …）也一起交付；配置先过一遍 schema 校验——已知键类型写错会让
+	// Claude Code 丢弃**整个** settings 文件（连 provider 凭证一起没）。
+	pcfg, err := loadProviderConfig(pm, providerName)
+	if err != nil {
+		return opts, err // 校验失败 → 阻止启动，不静默退化到用户自己的 provider
+	}
+	for _, w := range pcfg.Warnings {
+		fmt.Fprintf(os.Stderr, "⚠ 提供商 %q 配置有疑点: %s\n", providerName, w)
+	}
+	providerEnv := pcfg.Env
+	providerBaseURL := pcfg.BaseURL
 
-	// **进程环境里也放一份**（低优先级，Claude Code 侧仍是 --settings 赢）：
+	// **进程环境里也放一份** provider 的 env（低优先级，Claude Code 侧仍是
+	// --settings 赢）：
 	//   - daemon 的 forwarder 用 http.Client 默认 Transport → ProxyFromEnvironment
 	//     → 读进程环境的 HTTP_PROXY/HTTPS_PROXY。daemon 是 fork 出来的（继承
 	//     ccl 的环境）→ 远程 collector 需要代理时，转发才走得通
-	//   - 顺带是 --settings 失效时的冗余备份
+	//
+	// 注意：这份副本**不是** provider 生效的保障——Claude Code 里
+	// settings.json 的 env 块压过进程环境，用户自己写的同名键会盖住它。
+	// provider 生效靠的是 --settings 这条通道。
 	for k, v := range providerEnv {
 		_ = os.Setenv(k, v)
-	}
-
-	sessionLabel := "新会话"
-	opts := launcher.Options{PermissionMode: result.Mode}
-	switch result.SessionKind {
-	case "continue":
-		opts.Continue = true
-		sessionLabel = "继续上次会话"
-	case "resume":
-		opts.Resume = true
-		sessionLabel = "从会话列表选择"
 	}
 
 	// 准备 OTel 环境（otel-endpoints-via-settings）：
@@ -206,68 +256,58 @@ func runTUI(pm *provider.Manager, sm *state.Manager, cm *config.Manager) error {
 		deliver[k] = v
 	}
 
+	// provider 配了顶层 `model` 键 → 把它作为 ANTHROPIC_MODEL 放进**交付的
+	// env 块**。
+	//
+	// 真机实测（2026-10-30，Claude Code 2.1.308，provider-settings-passthrough）：
+	//
+	//   - `ANTHROPIC_MODEL` 环境变量压过任何文件里的 `model` 键（含 --settings）
+	//   - 但用户 settings.json 的 **env 块**里的 ANTHROPIC_MODEL 又压过**进程环境**
+	//
+	// 所以只 os.Setenv 是不够的（用户在 settings.json 里写一个同名键就能压掉它）。
+	// 唯一能让 provider 的 model 赢的路径是把 ANTHROPIC_MODEL 放进 --settings 的
+	// env 块——命令行层是优先级栈的最高层（仅次于 managed）。
+	//
+	// provider 自己的 env 块里若已经有 ANTHROPIC_MODEL，尊重它（provider 内部
+	// 一致性优先；env 变量本来就压过 model 键，两者都是 provider 自己的值）。
+	if model, ok := modelFromPassthrough(pcfg.Passthrough); ok {
+		if _, exists := deliver["ANTHROPIC_MODEL"]; !exists {
+			deliver["ANTHROPIC_MODEL"] = model
+		}
+		// 低优先级冗余：--settings 失效时（老版本 Claude Code）进程环境这一份
+		// 还能兜一下；正常路径上它被 --settings 的 env 块压住，不起作用。
+		_ = os.Setenv("ANTHROPIC_MODEL", model)
+	}
+
 	// 注入 launch 上下文（provider / cwd / 端点 host → OTEL_RESOURCE_ATTRIBUTES）。
 	// 必须在 provider 选定之后、launcher.Launch 之前——上下文描述的是"这次启动"。
 	//
 	// 主通道是 Claude Code 的 `--settings` 参数（优先级高于 settings.json 与进程
 	// 环境）；进程环境那条是冗余第二通道。详见 launchctx.go 的注释。
-	launchSettingsJSON, err := injectLaunchContext(cm, result.Provider, wd, providerBaseURL, deliver)
+	//
+	// pcfg.Passthrough 是 provider 的顶层键（model / permissions / hooks …），
+	// 它们和 env 块一起进同一个 settings 对象。
+	launchSettingsJSON, err := injectLaunchContext(cm, providerName, wd, providerBaseURL, deliver, pcfg.Passthrough)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "⚠ 构造 additional settings 失败（provider / 项目维度将为空）: %v\n", err)
+		return opts, fmt.Errorf("构造 --settings 参数失败（provider 配置无法交付，已中止启动）: %w", err)
 	}
 
 	// additional settings（--settings）——承载 provider env / OTel env / launch 上下文。
 	if launchSettingsJSON != "" {
 		args, _, err := settingsArgs(launchSettingsJSON)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "⚠ 构造 --settings 参数失败（provider / 项目维度将为空）: %v\n", err)
-		} else {
-			opts.ExtraArgs = args
+			return opts, fmt.Errorf("构造 --settings 参数失败（provider 配置无法交付，已中止启动）: %w", err)
 		}
+		opts.ExtraArgs = args
 	}
 
-	// 拉起 OTel daemon（按需；端口已占 → skip）
-	started, _ := ensureDaemonRunning()
-	if started {
-		fmt.Println("✓ OTel daemon 拉起成功（监听 :4318）")
+	// 确认 Claude Code 认 --settings——不认的话 provider 的配置根本交付不过去，
+	// 会话会悄悄跑在用户自己的 provider 上（provider-settings-load-guard）。
+	if err := ensureSettingsSupported(); err != nil {
+		return opts, err
 	}
 
-	fmt.Printf("正在启动 Claude Code (%s / %s / %s)...\n", result.Provider, result.Mode, sessionLabel)
-	return launcher.Launch(opts)
-}
-
-// providerEnvMap 读 provider 配置的 env 块，返回 (env map, ANTHROPIC_BASE_URL)。
-//
-// provider-settings-injection：这些键通过 `--settings` 交付（**不是** setenv）——
-// 进程环境是 Claude Code 优先级最低的通道，会被用户 settings.json 里的同名键顶掉。
-//
-// 值不是 string 的键被跳过（provider 配置结构与 Claude Code settings 一致，
-// env 的值就该是 string）。
-func providerEnvMap(pm *provider.Manager, name string) (map[string]string, string) {
-	out := map[string]string{}
-	if name == "" {
-		return out, ""
-	}
-	cfg, err := pm.Get(name)
-	if err != nil {
-		return out, ""
-	}
-	envAny, ok := cfg["env"].(map[string]any)
-	if !ok {
-		return out, ""
-	}
-	baseURL := ""
-	for k, v := range envAny {
-		s, ok := v.(string)
-		if !ok {
-			continue
-		}
-		out[k] = s
-		if k == "ANTHROPIC_BASE_URL" {
-			baseURL = s
-		}
-	}
-	return out, baseURL
+	return opts, nil
 }
 
 // migrateSettingsJSON 一次性清理 settings.json 中 ccl 历史注入的 provider env

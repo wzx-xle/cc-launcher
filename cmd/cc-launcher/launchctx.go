@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"sort"
 
 	"cc-launcher/internal/config"
 	"cc-launcher/internal/launchctx"
@@ -37,11 +36,14 @@ import (
 // 不替换——用户的属性不能因为 ccl 介入而丢失。
 //
 // deliver 是调用方要交付给子进程的 env 块（provider 的 env + OTel 的 env，见
-// envconfig.go 的 buildChildOtelEnv 与 main.go 的 providerEnvMap）。它和 launch
+// envconfig.go 的 buildChildOtelEnv 与 main.go 的 loadProviderConfig）。它和 launch
 // 上下文**合并进同一个 `--settings` 对象**——所有变量传递统一成一条通道。
 //
+// passthrough 是 provider 配置里要透传的顶层键（model / permissions / hooks …，
+// 已排除 env 与 ccl 自己的元数据键）。它和 env 块一起构成交付对象。
+//
 // 返回：additional settings 的 JSON。
-func injectLaunchContext(cm *config.Manager, provider, cwd, baseURL string, deliver map[string]string) (string, error) {
+func injectLaunchContext(cm *config.Manager, provider, cwd, baseURL string, deliver map[string]string, passthrough map[string]any) (string, error) {
 	ctx := launchctx.Context{
 		Provider:         provider,
 		Cwd:              cwd,
@@ -69,31 +71,38 @@ func injectLaunchContext(cm *config.Manager, provider, cwd, baseURL string, deli
 	}
 
 	// 主通道：--settings。
-	settingsJSON, err := buildLaunchSettingsJSON(out)
+	settingsJSON, err := buildLaunchSettingsJSON(out, passthrough)
 	if err != nil {
 		return "", fmt.Errorf("构造 additional settings 失败: %w", err)
 	}
 	return settingsJSON, nil
 }
 
-// buildLaunchSettingsJSON 把要交付的 env 块包成 Claude Code 的 additional settings。
+// buildLaunchSettingsJSON 把要交付的 env 块和 provider 的透传键包成 Claude Code 的
+// additional settings。
 //
-// 形状固定为 `{"env":{...}}`——**只带 env 一个字段**，settings.json 的其它设置
-// （permissions 等）不受影响（Claude Code 的 settings 是深合并，实测确认）。
+// 形状：`{"env":{...}, ...provider 的透传键}`。
 //
-// key 按字典序输出，保证同一份输入产出稳定的 JSON（便于测试与排查）。
-func buildLaunchSettingsJSON(env map[string]string) (string, error) {
+// settings.json 自己的其它设置（用户没让 provider 配的那些键）不受影响——
+// Claude Code 的 settings 是深合并，`--settings` 里的键赢，用户没被覆盖的键
+// 继续生效（provider-settings-passthrough）。
+//
+// **确定性**：`encoding/json` 对 map 的 key 按字典序输出，所以同一份输入永远
+// 产出同一串 JSON —— 交付文件是按内容哈希命名的（settingsfile.go），内容不稳
+// 就等于每次启动都新建一个缓存文件。
+func buildLaunchSettingsJSON(env map[string]string, passthrough map[string]any) (string, error) {
 	envObj := make(map[string]any, len(env))
-	keys := make([]string, 0, len(env))
-	for k := range env {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		envObj[k] = env[k]
+	for k, v := range env {
+		envObj[k] = v
 	}
 
-	obj := map[string]any{"env": envObj}
+	obj := make(map[string]any, len(passthrough)+1)
+	for k, v := range passthrough {
+		obj[k] = v
+	}
+	// ccl 自己的键赢（provider 的透传键不覆盖 ccl 的交付）。
+	obj["env"] = envObj
+
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false) // JSON 字符串里的 < > & 不必转义，可读性更好

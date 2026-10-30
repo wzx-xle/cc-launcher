@@ -436,3 +436,47 @@ func slicesEqual(a, b []string) bool {
 	}
 	return true
 }
+
+// TestList_FlagsInvalidPassthroughConfig 断言：List() 把"已知键类型写错"的
+// provider 标出来（ValidationErrors），并统计顶层透传键（PassthroughKeys）。
+//
+// 提前标出来的意义：Claude Code 会拒绝整个 settings 文件（provider 的凭证
+// 跟着一起消失），用户应该在**选择之前**就看到这个问题，而不是选完 provider
+// 才在启动那一步报错。
+func TestList_FlagsInvalidPassthroughConfig(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name string, cfg string) {
+		if err := os.WriteFile(filepath.Join(dir, name+".json"), []byte(cfg), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("broken", `{"model": {"name": "x"}, "env": {"A": "B"}}`)
+	write("good", `{"model": "m", "permissions": {"allow": ["Bash(ls:*)"]}, "env": {"A": "B"}}`)
+
+	m := NewManager(dir)
+	list, err := m.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]Info{}
+	for _, info := range list {
+		byName[info.Name] = info
+	}
+
+	broken := byName["broken"]
+	if len(broken.ValidationErrors) == 0 {
+		t.Error("类型写错的 provider 应被标出校验错误")
+	}
+	if broken.Error != "" {
+		t.Errorf("类型写错不是 JSON 错误，Error 应为空: %q", broken.Error)
+	}
+
+	good := byName["good"]
+	if len(good.ValidationErrors) != 0 {
+		t.Errorf("合法 provider 不该有校验错误: %+v", good.ValidationErrors)
+	}
+	// model + permissions 两个顶层键（env 不算，note/order 不算）
+	if good.PassthroughKeys != 2 {
+		t.Errorf("PassthroughKeys = %d, want 2", good.PassthroughKeys)
+	}
+}

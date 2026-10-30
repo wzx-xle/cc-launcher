@@ -121,6 +121,51 @@ ccl provider --new --type deepseek my-deepseek
 
 未列出的提供商：可直接编辑 `~/.cc-launcher/providers/<name>.json`，结构同上。
 
+### provider 文件能写什么
+
+除 `env` 块外，**顶层键也可以写**，且会跟着 provider 一起交付给 Claude Code
+（结构与 Claude Code 的 `settings.json` 完全一致）：
+
+```jsonc
+// ~/.cc-launcher/providers/my-provider.json
+{
+  "note": "给列表看的备注（ccl 自己的字段，不交付）",
+  "order": 1,                          // ccl 自己的字段：列表排序，不交付
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://api.example.com/anthropic",
+    "ANTHROPIC_AUTH_TOKEN": "sk-xxx"
+  },
+  "model": "claude-sonnet-5",           // ← 交付：Claude Code 的 model 设置
+  "permissions": {                     // ← 交付：Claude Code 的权限规则
+    "allow": ["Bash(git status)"]
+  }
+}
+```
+
+- **只有 `env` 与 `note`/`order` 之外的顶层键会被交付**；`note`/`order` 是 ccl
+  自己的元数据（备注、排序），不会进 Claude Code。
+- **列表类键（`permissions.allow` 等）取并集**：provider 的规则与你在
+  `~/.claude/settings.json` 里的规则**并存**，不是替换。
+- **`model` 键要生效，ccl 会额外把它作为 `ANTHROPIC_MODEL` 放进 env 块**
+  （Claude Code 里 `ANTHROPIC_MODEL` 环境变量的优先级高于任何文件里的 `model`
+  键；不这么做，用户 shell 或 settings.json 里的同名变量会把它顶掉）。
+- **配置会在启动前校验**：已知键的类型写错（比如 `"model": {...}`）会让 Claude
+  Code 拒绝**整个** settings 文件，provider 的凭证跟着一起消失——所以 ccl 直接
+  拒绝启动并告诉你哪个键不对。
+
+手改完 provider 文件可以先自查：
+
+```bash
+ccl provider validate my-provider
+# 提供商 "my-provider"
+#   env 块: 2 个键
+#   顶层透传键: model, permissions
+#   ✓ 配置可被 Claude Code 接受
+```
+
+`ccl provider --list` 也会标出来：配置有误的 provider 带 `⚠️ 配置有误: …`，
+带顶层透传键的标 `（N 个透传键）`。
+
 ### 历史示例（仍可参考）
 
 ```jsonc
@@ -205,6 +250,15 @@ Claude Code 的优先级是 **`--settings` > `settings.json` > 进程环境**（
 | `ANTHROPIC_MODEL` | ❌ | 没值 | 进程环境的值 |
 
 > **为什么 provider 的优先级要高于 settings.json**：配一个独立提供商的目的就是"用它"。如果用户在 settings.json 里手写过 `ANTHROPIC_*`，旧实现（setenv 注入进程环境）会被 settings.json 压住 → **选了等于没选**。
+
+顶层键（如 `model`、`permissions`）的合并规则与 env 块不同，详见
+[Claude Code 的 `--settings` 合并语义（实测结论）](docs/claude-code-settings-merge-semantics.md)：
+列表键取**并集**，标量键取**最高层**。
+
+> **一个例外**：`ANTHROPIC_MODEL` 环境变量的优先级高于任何文件里的 `model` 键，
+> 而你 settings.json 的 env 块又压过进程环境。所以 provider 的顶层 `model` 键
+> 由 ccl 转成 `ANTHROPIC_MODEL` 放进交付的 env 块——这是唯一能同时压过
+> settings.json 与进程环境的通道。
 
 **`--settings` 的载体**：`~/.cc-launcher/cache/settings-<sha256(内容)[:16]>.json`
 

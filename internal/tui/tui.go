@@ -266,9 +266,14 @@ func (m model) renderProviderView(sb *strings.Builder) {
 			marker = "[*]"
 		}
 		line := fmt.Sprintf("  %s %s", marker, p.Name)
-		if p.Error != "" {
+		switch {
+		case p.Error != "":
 			line += dimStyle.Render(fmt.Sprintf(" — %s", p.Error))
-		} else if p.Note != "" {
+		case len(p.ValidationErrors) > 0:
+			// 配置有已知键类型写错 → 启动时会被拦（Claude Code 会拒绝整个
+			// settings 文件，provider 的凭证跟着一起消失）。选之前就标出来。
+			line += dimStyle.Render(" — ⚠️ 配置有误: " + p.ValidationErrors[0])
+		case p.Note != "":
 			// success 路径追加 note；errored 不追加（避免双 dim 段）
 			line += dimStyle.Render("  " + p.Note)
 		}
