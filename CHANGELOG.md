@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-10-30 — provider-settings-passthrough
+
+### Features
+- **provider 文件的顶层键现在会跟着 provider 一起生效**：此前**只有 `env` 块**被交付，写在顶层的 `model` / `permissions` / `hooks` / `outputStyle` 等键被**静默丢弃**——没有报错、没有警告，Claude Code 照常按默认跑。按 `requirement.md` 里"提供商配置要和 claude code 的本身的配置结构一样"去写这些键的用户，会得到一个"配了但永远不生效"的陷阱
+  - 顶层键（除 ccl 自己的 `note` / `order` 元数据）按 Claude Code 的 settings 结构**原样**进 `--settings`，与 env 块、OTel 环境、launch 上下文在同一个 settings 对象里
+  - **列表类键取并集**（`permissions.allow` 等）：provider 的规则与用户 `settings.json` 里的规则**并存**，不是替换（Claude Code 的官方语义，实测确认）
+  - **`model` 键额外作为 `ANTHROPIC_MODEL` 放进交付的 env 块**——真机实测：`ANTHROPIC_MODEL` 环境变量压过任何文件里的 `model` 键，而用户 `settings.json` 的 env 块又压过进程环境，**只 setenv 进程环境是不够的**（用户 settings.json 里一个同名键就能压掉它），env 块是唯一同时压过两者的通道
+- **`ccl provider validate <name>`**：手改 provider 文件后自查配置能不能被 Claude Code 接受（列出 env 键数、顶层透传键、逐条报错）
+- **`ccl provider --list` 的标注**：配置有误的 provider 显示 `⚠️ 配置有误: <哪个键> <期望什么类型>`；带顶层透传键的显示 `（N 个透传键）`
+- **TUI 里选之前就能看到配置问题**：provider 列表直接标 `⚠️ 配置有误`，不用选完走到启动那一步才发现
+
+### Fixes
+- **交付前校验 provider 配置，把"静默失效"变成"启动前报错"**：Claude Code 的 settings 校验粒度是**整个文件**——一个已知键的类型写错（如 `"model": {...}`），Claude Code 会**丢弃整个 settings 文件**（`These settings files did not load…`），**provider 的凭证跟着一起消失**，Claude Code 静默退回用户自己的 provider，而 ccl 一个字都不说
+  - 现在 ccl 在**启动前**校验并拒绝启动，指出是哪个键、期望什么类型
+  - **未知顶层键不拦**（Claude Code 自己也是静默忽略）——Claude Code 升级新增的键不会导致 ccl 突然拒绝启动
+  - 校验在 **ccl 侧**完成：Unix 上 launcher 用 `syscall.Exec` 替换进程，之后没有观察 Claude Code 输出的时机
+  - 已知键类型表来自官方 settings-reference（Claude Code CLI 2.1.308）
+- **Claude Code 不支持 `--settings` 时明确报错**，而不是让 provider 静默失效：启动前探测一次（结果按可执行文件的路径 + 大小 + mtime 缓存，命中即跳过）
+
+### Refactor
+- 交付逻辑从 TUI 里抽成 `buildLaunchOptions`——TUI 是交互式的，"选完 provider 到底交付了什么"原本没法测；抽出来之后整条交付链路都有测试覆盖
+- 新增 `internal/settingsschema`：Claude Code settings 顶层键 → 类型白名单 + 校验器（未知键放行、已知键类型错阻断、数组坏元素剔除 + 警告）
+- **进程环境里的 provider 副本重新定位**：它是给 daemon 转发用的（forwarder 读进程环境的代理变量），**不是** provider 生效的保障——用户 `settings.json` 的 env 块压过进程环境，这份副本压不住用户的同名键。provider 生效靠的是 `--settings` 这条通道
+
+### Tests
+- `internal/settingsschema`：已知键类型错 → 报错；未知键 → 放行；数组坏元素 → 剔除 + 警告；`env` 里的非字符串值 → 不阻断（实测 Claude Code 自己会转成字符串）；白名单自检
+- `cmd/cc-launcher`：交付内容端到端（交付文件含 env 与顶层透传键、不含 `note`/`order`、argv 无明文凭证、文件 0600）；`model` 键进 env 块；配置类型错 → 不产出 `--settings` 参数；`--settings` 支持性探测（支持 / 不支持 / 缓存命中 / claude 换了重新探测）
+- `internal/cli`：`ccl provider validate`（合法 / 类型错 / 不存在）与 `provider --list` 的透传键标注
+- 真机（真 claude + 假 API 服务器）：provider 的凭证**赢过**用户 settings.json 里的同名键（请求 auth 头是 provider 的 token）；`model` 经 env 块交付后**赢过**用户 settings.json 的 `env.ANTHROPIC_MODEL`（请求里的 model 是 provider 的值）；只 setenv 进程环境时**输**给用户 settings.json 的 env 块
+- 真机：`ccl provider validate` 对类型错的配置报错并以退出码 1 退出；`ccl provider --list` 提前标出 `⚠️ 配置有误`
+
+### OpenSpec
+- `provider-settings-passthrough`（归档：`openspec/specs/provider-settings-passthrough`、`provider-settings-load-guard` 新增；`claude-settings-delivery`、`provider-settings-injection` 修改）
+- 新增 `docs/claude-code-settings-merge-semantics.md`：Claude Code `--settings` 的合并语义、优先级与校验粒度的**实测结论**（外部行为的事实基础，Claude Code 升级后要重验）
+
+### Compatibility
+- provider 文件格式**向后兼容**：只有 `env` 的老 provider 文件行为不变；回滚 ccl 后新增的顶层键只是被忽略（无害，无需清理）
+- `ccl provider --list` 输出多了标注（`⚠️ 配置有误` / `（N 个透传键）`）；若脚本解析该输出需注意
+- 新增 `ccl provider validate <name>` 子命令（不影响既有子命令；名字叫 `validate` 的 provider 仍可用 `ccl provider validate` 切换）
+
 ## [0.17.0] - 2026-10-29 — provider-env-via-settings
 
 ### Fixes
