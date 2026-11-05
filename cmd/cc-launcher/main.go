@@ -279,6 +279,27 @@ func buildLaunchOptions(pm *provider.Manager, cm *config.Manager, sm *state.Mana
 		_ = os.Setenv("ANTHROPIC_MODEL", model)
 	}
 
+	// provider-name-in-statusline：把本次选中的 provider 名交给**仓库外**的
+	// 消费方——最典型的是 Claude Code 的状态栏脚本（statusLine）。它的 stdin
+	// JSON 里没有 provider 信息，能拿到 provider 名的唯一通道就是环境变量。
+	//
+	// 两条通道，与 OTEL 启动上下文同构：
+	//  1. --settings 的 env 块（主通道，优先级最高：命令行层压过用户
+	//     settings.json 的 env 块，也压过进程环境）
+	//  2. 进程环境（冗余第二通道：万一上游某版不把 settings 的 env 块落到
+	//     子进程环境，这一份还在）
+	//
+	// 放在 deliver 汇流**之后** → provider 自己的 env 块里若写了同名键，
+	// ccl 的值覆盖它（"ccl 自己的键赢"的纪律）。同理，进程环境那份也排在
+	// provider env 的 setenv 之后。
+	//
+	// providerName 为空时**不注入**：spec 要求"缺席"与"空串"可区分
+	//（变量不存在 = 这个会话不是 ccl 起的）。
+	if providerName != "" {
+		deliver[provider.EnvProviderName] = providerName
+		_ = os.Setenv(provider.EnvProviderName, providerName)
+	}
+
 	// 注入 launch 上下文（provider / cwd / 端点 host → OTEL_RESOURCE_ATTRIBUTES）。
 	// 必须在 provider 选定之后、launcher.Launch 之前——上下文描述的是"这次启动"。
 	//

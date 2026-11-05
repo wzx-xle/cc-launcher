@@ -11,6 +11,33 @@ import (
 	"cc-launcher/internal/settingsschema"
 )
 
+// EnvProviderName 是 ccl 注入给消费方的环境变量名，值是本次启动选中的
+// provider 的 Name（provider 配置文件名去掉 .json）。
+//
+// 用途：让**仓库外**的程序知道"这次 Claude Code 是用哪个 provider 起的"。
+// 最典型的消费者是 Claude Code 的状态栏脚本（statusLine）——它拿到的 stdin
+// JSON 里没有 provider 信息，唯一能拿到 provider 名的通道就是环境变量：
+//
+//	const provider = process.env.CCL_PROVIDER
+//
+// 交付方式（两条通道，见 cmd/cc-launcher/main.go 的 buildLaunchOptions）：
+//
+//  1. --settings 交付对象的 env 块（主通道，优先级最高）
+//  2. 进程环境（冗余第二通道）
+//
+// **这是对外契约**：变量名与值的语义都不能随便改，改名按 breaking change
+// 处理（会静默弄坏所有仓库外的消费方）。两条硬约束：
+//
+//   - 名字**不能带凭证特征**（TOKEN / KEY / SECRET / PASSWORD）：Claude Code
+//     的 CLAUDE_CODE_SUBPROCESS_ENV_SCRUB 会把凭证类变量从子进程环境里删掉，
+//     带凭证特征的变量名会被误伤（provider-name-in-statusline 实测）。
+//   - 值是**原值**，不转义不拼接：消费方渲染到终端前要自己剥 ANSI 转义序列
+//     并限长。
+//
+// 它**不承载** provider 的生效语义——provider 的生效靠 --settings 交付
+// provider 自己的 env 块（provider-settings-injection）。这个变量只传名字。
+const EnvProviderName = "CCL_PROVIDER"
+
 // Info 提供商概要信息。
 type Info struct {
 	Name  string // 文件名去掉 .json
