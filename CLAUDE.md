@@ -21,6 +21,10 @@ Claude Code Launcher — 一个终端启动器，在启动 Claude Code 时提供
    - Claude Code settings.json 不再保留 provider 字段；老 ccl 注入的 ANTHROPIC_* 由 migrate 函数首次启动时自动清理
    - `--settings` 指向 `~/.cc-launcher/cache/` 下**内容哈希命名**的常驻文件（argv 里没有明文凭证；同内容复用、同名即同内容 → 并发启动各读各的）
    - 外部行为（合并语义、优先级、校验粒度）的实测结论见 `docs/claude-code-settings-merge-semantics.md`——改交付逻辑前先看它，Claude Code 升级后要重验
+   - **`CCL_PROVIDER` 是 ccl 注入给消费方的只读变量**（provider-name-in-statusline change 起）：值 = 本次选中的 provider 名，走同一条 `--settings` env 块通道 + 进程环境冗余一份；它**与 provider 的生效链路无关**（生效靠 provider 自己的 env 块），只负责把名字告诉仓库外的程序（如状态栏脚本）。变量名与值语义都是对外契约，改名 = breaking change；名字不能带凭证特征（`TOKEN`/`KEY`/`SECRET`）——Claude Code 的 subprocess scrub 会把凭证类变量从子进程环境删掉。完整契约见 `docs/provider-name-env.md`
+7. **改函数签名 / 删函数 / 跨包重构前，用 LSP `findReferences` 确认影响面**，不用 `grep -rn`
+   - grep 是文本匹配，会把同名方法一并算进来：改 `provider.Manager.Get` 时，`grep "\.Get("` 会把 `internal/web/server.go` 里 7 处 `url.Values.Get` 甩出来，误判成要动一片无关代码；LSP 是符号级匹配，能精确区分
+   - LSP 工具已启用（`ENABLE_LSP_TOOL=1` + `gopls-lsp` 插件），但它是 deferred 的——先用 `ToolSearch` 加载 schema 再调
 
 ## OpenSpec 工作流
 
