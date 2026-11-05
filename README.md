@@ -281,6 +281,40 @@ Claude Code 的优先级是 **`--settings` > `settings.json` > 进程环境**（
 
 > **用户手写了 `ANTHROPIC_*` 的情况**：migrate 会**保留**它们（值与 snapshot 不等视为用户意图）——但现在 **ccl 选的 provider 会覆盖它们**（`--settings` 优先级最高）。这是本程序的意图：配了独立提供商就一定用它。
 
+## provider 名出现在环境里
+
+ccl 启动 Claude Code 时，会把**本次选中的 provider 的名字**放进环境变量
+**`CCL_PROVIDER`**：
+
+```bash
+CCL_PROVIDER=minimax-m3-stliu14
+```
+
+值就是 provider 的配置文件名去掉 `.json`（`~/.cc-launcher/providers/minimax-m3-stliu14.json`
+→ `minimax-m3-stliu14`）。
+
+**这是给仓库外的程序用的**，最典型的消费者是 **Claude Code 的状态栏脚本**
+（`statusLine`）——它拿到的 stdin JSON 里没有 provider 信息，环境变量是唯一
+的通道：
+
+```js
+// ~/.claude/statusline.js
+const provider = process.env.CCL_PROVIDER; // undefined = 这个会话不是 ccl 起的
+```
+
+几点说明：
+
+- **变量不存在 = 这个会话不是 ccl 启动的**（你直接跑了 `claude`）。ccl 不会
+  交付空值。
+- **值是原值**，不转义不拼接——不是 provider 的 `note`（个人备忘），也不是
+  endpoint（多个 provider 可以连同一个 endpoint 但用不同账号，名字才能区分）。
+- **渲染前请自己剥掉 ANSI 转义序列并限长**——provider 名来自文件名，理论上
+  可以含控制字符，而状态栏是直接渲染到终端的。
+- ccl **不接管**你的 `statusLine` 配置，也不分发状态栏脚本——脚本是你的，
+  ccl 只负责把名字放进环境。
+
+完整契约见 [`docs/provider-name-env.md`](docs/provider-name-env.md)。
+
 ## 目录结构
 
 ```
