@@ -38,4 +38,4 @@
 
 - [x] 5.1 `CHANGELOG.md` 的 `[Unreleased]` 下加 `0.19.0` 段（按既有分类格式：Features / Tests / OpenSpec）
 - [x] 5.2 `openspec archive provider-name-in-statusline`
-- [ ] 5.3 按 CLAUDE.md 的 Release Tag 流程：`git commit` CHANGELOG → `git tag -a v0.19.0` → **一次推送** `git push origin main` + 单独推 tag（`bin/bump-version.sh` 建的是 lightweight tag，`--follow-tags` 不会带上，必须单独 `git push origin v0.19.0`）
+- [x] 5.3 按 CLAUDE.md 的 Release Tag 流程：`git commit` CHANGELOG → `git tag -a v0.19.0` → **一次推送** `git push origin main` + 单独推 tag（`bin/bump-version.sh` 建的是 lightweight tag，`--follow-tags` 不会带上，必须单独 `git push origin v0.19.0`）
