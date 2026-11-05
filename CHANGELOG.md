@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-11-05 — provider-name-in-statusline
+
+### Features
+- **当前 provider 的名字出现在环境变量 `CCL_PROVIDER` 里**：Claude Code 的状态栏（`statusLine`）拿到的 stdin JSON 里**没有 provider 信息**（只有模型名、目录、上下文用量、额度条），Claude Code 内部也没有"用了哪个 provider"的概念——provider 是 ccl 这一层的概念。于是状态栏上想显示"这个窗口连的是谁、用的哪个账号"只能靠猜
+  - ccl 现在把本次选中的 provider 名（provider 配置文件名去掉 `.json`）放进环境变量 **`CCL_PROVIDER`**，值形如 `claude-official`、`minimax-m3-stliu14`
+  - **两条通道**：`--settings` 交付对象的 `env` 块（主通道——命令行层压过用户 `settings.json` 的 env 块，也压过进程环境）+ 进程环境（冗余第二通道）
+  - **变量不存在 = 这个会话不是 ccl 起的**（用户直接跑了 `claude`）；ccl 永远不会交付空值，"缺席"与"空串"可区分
+  - 值是**原值**：不是 provider 的 `note`（个人备忘，实际样本里是人名），也不是 endpoint（多个 provider 可以连同一个 endpoint 但用不同账号——名字能区分，endpoint 不能）
+  - **ccl 不接管你的 `statusLine` 配置、不分发状态栏脚本**——渲染成什么样是你自己的事。消费方渲染前记得剥掉 ANSI 转义序列并限长（provider 名来自文件名，理论上可含控制字符）
+  - 完整契约见 `docs/provider-name-env.md`——`CCL_PROVIDER` 是**对外契约**，改名 = breaking change
+
+### Tests
+- `cmd/cc-launcher`：交付的 env 块含 `CCL_PROVIDER` 且值 == provider 名；provider 自己的 env 块写了同名键时 ccl 的值覆盖它；进程环境里有冗余一份；没有 provider 时**不交付这个键**（不是空串）；同一 provider 连续两次构建产出逐字节相同
+- **契约守卫测试**：变量名固定为 `CCL_PROVIDER`，且**不能带凭证特征**（`TOKEN` / `KEY` / `SECRET` / `PASSWORD`）——Claude Code 的 `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` 会把凭证类变量从子进程环境里删掉，带凭证特征的名字会被误伤、特性静默失效
+- 真机（真 ccl + pty 驱动 TUI → 产出交付文件 → 真 claude 消费该文件 → 探针 statusLine 读自己的 env）：statusLine 子进程读得到 `CCL_PROVIDER=test-prov`；对照组（交付里没有 env 块）读不到；`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0/1` 两种配置下都读得到（`=1` 时凭证确实被剥离）
+
+### OpenSpec
+- `provider-name-in-statusline`（归档：新增 `openspec/specs/provider-name-in-statusline`）
+- 新增 `docs/provider-name-env.md`：`CCL_PROVIDER` 的完整对外契约（变量名、值的语义、两条通道、缺席语义、消费方的清洗责任、改名的代价）
+- `docs/claude-code-settings-merge-semantics.md` 增补「子进程的环境」一节：**statusLine / hooks / MCP 到底能看到哪些环境变量**的实测结论——settings `env` 块可见、父进程环境可见、**`OTEL_` 前缀的变量被剥离**（前缀规则，且与 scrub 开关无关）、scrub 会剥凭证类变量、statusLine 用 `/bin/sh -c` 执行、每次刷新新起进程。这一节也是"为什么不能复用 `OTEL_RESOURCE_ATTRIBUTES` 里的 `ccl.provider` 来显示 provider 名"的答案
+
+### Compatibility
+- provider 文件格式不变：不加新键、不改老配置；回滚 ccl 后 `CCL_PROVIDER` 只是不再被注入（消费方读到 `undefined`，无害，无需清理）
+- 用户在 `~/.claude/settings.json` 的 `env` 块里手写同名 `CCL_PROVIDER` 会被 ccl 的值覆盖（`--settings` 层优先级最高）——**这是有意的**：避免用户手写的陈旧值冒充当前 provider
+- 消费方需要注意：`statusLine` 每次刷新都是新进程，`process.env` 现读现用——不要把这个值缓存到会话级
+
 ## [0.18.0] - 2026-10-30 — provider-settings-passthrough
 
 ### Features
