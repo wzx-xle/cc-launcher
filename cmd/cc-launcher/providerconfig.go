@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"cc-launcher/internal/provider"
+	"cc-launcher/internal/quota"
 	"cc-launcher/internal/settingsschema"
 )
 
@@ -15,10 +16,15 @@ type providerConfig struct {
 	// Env 是 provider 的 env 块（值已统一转成字符串）。
 	Env map[string]string
 	// Passthrough 是要透传给 Claude Code 的顶层键（已排除 env 与 ccl 自己的
-	// 元数据键 note / order）。
+	// 元数据键 note / order / quota）。
 	Passthrough map[string]any
 	// BaseURL 是 env 里的 ANTHROPIC_BASE_URL（用于算 launch 上下文的端点 host）。
 	BaseURL string
+	// Quota 是 provider 的额度查询配置（顶层 `quota` 块）。
+	//
+	// nil = 没配。**它不进 Passthrough**——quota 是 ccl 自己的元数据键，
+	// 透传给 Claude Code 没有意义（provider.ReservedKeys 已把它排除）。
+	Quota *quota.Config
 	// Warnings 是校验过程中的非阻断提示。
 	Warnings []string
 }
@@ -78,6 +84,29 @@ func loadProviderConfig(pm *provider.Manager, name string) (providerConfig, erro
 			continue
 		}
 		out.Passthrough[k] = v
+	}
+
+	// quota 块：ccl 自己的元数据（额度查询配置），**不进 Passthrough**。
+	//
+	// 解析失败 → 警告但不阻断启动：额度是锦上添花，provider 能不能生效才是
+	// 生死线（provider-quota design.md §Risks）。
+	if raw, ok := cleaned["quota"]; ok && raw != nil {
+		cfg, err := quota.ParseConfig(raw)
+		if err != nil {
+			out.Warnings = append(out.Warnings,
+				fmt.Sprintf("quota 块解析失败（该 provider 的额度查询不可用）: %v", err))
+		} else {
+			out.Quota = cfg
+		}
+	}
+
+	// 明文 base_url 提示（**非阻断**）。
+	//
+	// ccl **不自动改写**用户的 base_url——那是静默改用户配置语义，ccl 的规矩
+	// 是提示而不是替用户做主。真正的修复点是让用户把配置改成 https。
+	if strings.HasPrefix(out.BaseURL, "http://") {
+		out.Warnings = append(out.Warnings,
+			fmt.Sprintf("ANTHROPIC_BASE_URL 是明文 http://（%s）——API key 会明文传输，建议改成 https://", out.BaseURL))
 	}
 
 	return out, nil

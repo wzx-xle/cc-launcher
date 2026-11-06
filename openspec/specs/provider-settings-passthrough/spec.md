@@ -7,7 +7,7 @@ TBD - created by archiving change provider-settings-passthrough. Update Purpose 
 
 When `ccl` launches Claude Code with a selected provider, every top-level key of that provider configuration other than `env` MUST be delivered through the `--settings` parameter, with the key name and the value preserved exactly as the provider wrote them. ccl MUST NOT rename the key, coerce the value, or wrap the value in another structure.
 
-The keys `note` and `order` MUST NOT be delivered: they are ccl's own metadata for the provider list (the remark line and the sort order), not Claude Code settings.
+The keys `note`, `order` and `quota` MUST NOT be delivered: they are ccl's own metadata — the remark line and the sort order of the provider list, and the provider's quota query configuration (which adapter serves it and which quota endpoint to query) — not Claude Code settings.
 
 The delivered keys MUST be merged into the same settings object that carries the provider's `env` block, the OTel environment and the launch context.
 
@@ -24,11 +24,11 @@ When a delivered key collides with one of ccl's own keys in the same settings ob
 - **THEN** the delivered settings contain the top-level key `permissions` with that object as its value
 
 #### Scenario: ccl's provider metadata is not delivered
-- **WHEN** the selected provider's configuration contains `"note": "a remark"` and `"order": 3` and the user runs `ccl`
-- **THEN** the delivered settings contain neither `note` nor `order`
+- **WHEN** the selected provider's configuration contains `"note": "a remark"`, `"order": 3` and `"quota": {"source": "newapi"}` and the user runs `ccl`
+- **THEN** the delivered settings contain neither `note` nor `order` nor `quota`
 
 #### Scenario: a provider with only an env block delivers the same as before
-- **WHEN** the selected provider's configuration contains only an `env` block and the user runs `ccl`
+- **WHEN** the selected provider's configuration contains only an `env` block
 - **THEN** the delivered settings contain the `env` block and no other provider key
 
 #### Scenario: the delivered content is stable across launches

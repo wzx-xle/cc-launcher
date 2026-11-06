@@ -66,6 +66,8 @@ func runCompletion(args []string) error {
 		completeAtStats(args[1:])
 	case "web":
 		completeAtWeb(args[1:])
+	case "quota":
+		completeAtQuota(args[1:])
 	case "provider":
 		completeAtProvider(args[1:])
 	case "mode":
@@ -196,9 +198,9 @@ func printLines(lines []string) {
 	}
 }
 
-// completeAtTopLevel 输出 `ccl <TAB>` 的候选：5 个子命令 + 3 个 help 旗标。
+// completeAtTopLevel 输出 `ccl <TAB>` 的候选：子命令 + 3 个 help 旗标。
 func completeAtTopLevel() {
-	printLines([]string{"serve", "stats", "web", "provider", "mode", "-h", "--help", "help"})
+	printLines([]string{"serve", "stats", "web", "quota", "provider", "mode", "-h", "--help", "help"})
 }
 
 // completeAtServe 输出 `ccl serve <TAB>` 的候选 flag。
@@ -250,6 +252,18 @@ func completeAtStats(args []string) {
 func completeAtWeb(args []string) {
 	fs := flag.NewFlagSet("web", flag.ContinueOnError)
 	registerWebFlags(fs)
+	candidates := extractFlagNames(fs)
+	candidates = append(candidates, "-h", "--help")
+	printLines(candidates)
+}
+
+// completeAtQuota 输出 `ccl quota <TAB>` 的候选 flag。
+//
+// 与 runQuota 共用 registerQuotaFlags（flag 改动自动同步，cli-shell-completion §D2）。
+// -h / --help 手动追加：runQuota 走 fs.ErrHelp 处理 help，不在 fs 注册。
+func completeAtQuota(args []string) {
+	fs := flag.NewFlagSet("quota", flag.ContinueOnError)
+	registerQuotaFlags(fs)
 	candidates := extractFlagNames(fs)
 	candidates = append(candidates, "-h", "--help")
 	printLines(candidates)

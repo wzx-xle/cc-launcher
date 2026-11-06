@@ -315,6 +315,58 @@ const provider = process.env.CCL_PROVIDER; // undefined = 这个会话不是 ccl
 
 完整契约见 [`docs/provider-name-env.md`](docs/provider-name-env.md)。
 
+## 额度（状态栏显示配额）
+
+Claude Code 的状态栏有两个额度槽位（`5h` / `7d`），数据来自它自己维护的
+`rate_limits`——那是 **Anthropic 官方**的限流。走第三方模型时它拿不到数据，
+槽位就一直是 `--`（用户看不到配额还剩多少，只能等 429 报错才发现）。
+
+ccl 从 **v0.20.0** 起能查各家 provider 的额度：
+
+```bash
+# 看当前 provider 的额度
+ccl quota
+
+# JSON 输出（pipeable to jq）
+ccl quota --provider minimax-m3 --json
+
+# 手动联网刷一次（不需要 serve 在跑）
+ccl quota --refresh --json
+```
+
+额度由 **`ccl serve` 周期刷新**（默认 60 秒，可配）写进
+`~/.cc-launcher/quota.json`；`ccl quota` **默认只读这个本地文件，一次网络都
+不发**（状态栏命令生成过程中约每 300ms 调一次，读取侧不能有网络）。
+
+输出是一个**额度维度列表**（不是一个固定形状）——各家额度形态完全不同：
+
+| provider | 额度形态 | kind |
+|---|---|---|
+| Anthropic 官方 | 5h + 7d 窗口 | `window` |
+| MiniMax 套餐 | 5h + 7d 窗口 | `window` |
+| DeepSeek | 预付费余额（$） | `balance`（无分母，算不出百分比） |
+| 讯飞（New API 部署） | 令牌总额度 | `quota` |
+
+**为什么 Anthropic 官方 provider 下显示的还是 Claude Code 自己的限流**：
+官方 provider 没有可查的额度接口，`ccl quota` 对它返回**退出码 2**（"这个
+provider 没有额度接口"，纯离线可判）——消费方据此回落到 Claude Code 的
+`rate_limits`，**行为一个字都不变**。
+
+内置三个 adapter：`minimax`（5h/7d 窗口）、`deepseek`（余额）、`newapi`
+（New API / one-api 系部署的令牌额度）。在 provider 配置里用 `quota` 块显式
+声明（`source` 选 adapter，`endpoint` 覆盖端点，`refreshInterval` 改周期）：
+
+```jsonc
+{
+  "env": { "ANTHROPIC_BASE_URL": "https://one.example.com/api/llm/console/chat/" },
+  "quota": { "source": "newapi", "quotaPerUnit": 500000, "displayUnit": "USD" }
+}
+```
+
+MiniMax / DeepSeek 不配 `quota` 块也能用（按 base_url 的 host 自动识别）。
+
+完整契约见 [`docs/provider-quota.md`](docs/provider-quota.md)。
+
 ## 目录结构
 
 ```
@@ -328,6 +380,7 @@ const provider = process.env.CCL_PROVIDER; // undefined = 这个会话不是 ccl
 │   └── settings-2026-07-09T15-04-05.json
 ├── state.json              # 运行时状态（激活提供商、权限偏好）
 ├── telemetry.db            # 用量数据（SQLite / WAL）
+├── quota.json              # provider 额度缓存（0600，由 ccl serve 周期刷新）
 └── web-token               # 用量看板的访问 token（0600）
 ```
 

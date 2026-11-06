@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"cc-launcher/internal/collector"
+	"cc-launcher/internal/quota"
 	"cc-launcher/internal/web"
 )
 
@@ -186,6 +187,16 @@ func runServe(args []string) error {
 		log.Printf("ccl serve: cwd 回填完成: resolved=%d failed=%d", resolved, failed)
 	}()
 
+	// 额度刷新（provider-quota）：周期刷新各 provider 的额度，写进
+	// ~/.cc-launcher/quota.json。
+	//
+	// **独立 goroutine + ctx 取消**：不阻塞端口绑定、不干扰 metrics 服务，
+	// graceful shutdown 仍在 5s 预算内完成（ctx 取消会中断在途的 HTTP 请求）。
+	//
+	// **启动即刷一轮**（不等一个周期）→ 用户跑完一次 ccl（它会拉起 serve）
+	// 就能读到数据。
+	go quotaRefreshLoop(ctx, stateBaseDir)
+
 	if err := srv.Start(ctx); err != nil && err != context.Canceled {
 		// Server 异常退出（端口阻塞等不该走到这里——前面已探）。
 		return fmt.Errorf("server 异常: %w", err)
@@ -201,6 +212,62 @@ func runServe(args []string) error {
 
 	log.Printf("ccl serve: 关闭完成")
 	return nil
+}
+
+// quotaRefreshLoop 是 `ccl serve` 的额度刷新循环（provider-quota §7）。
+//
+// **为什么刷新搭在 serve 上**：额度数据的变化速度是分钟级，而消费它的状态栏
+// 命令每秒被调 3 次多——刷新频率与调用频率必须解耦。serve 已经是 ccl 自动
+// 拉起的常驻进程（daemon-lifecycle spec：每次 ccl 启动 Claude Code 前都会
+// 探 :4318 并 fork 它，且它永不自动 idle 退出）→ 不需要新建轮询体系。
+//
+// 行为：
+//   - **启动即刷一轮**（不等一个周期）
+//   - ticker 周期 = 所有待刷 provider 的 refreshInterval 的**最小值**；
+//     每轮遍历 provider，**距上次刷新不足其自身周期的跳过这一轮**
+//     （时间从数据文件的 fetched_at 读，见 quota.RefreshAll）
+//   - **刷新失败只进 serve 日志，不写数据文件** → 旧条目保留，fetched_at
+//     越来越旧 → stale 自动生效（状态栏不会因为一次网络抖动就从数字跳回 --）
+//   - ctx 取消即退出（SIGTERM → graceful shutdown 不被拖慢）
+func quotaRefreshLoop(ctx context.Context, baseDir string) {
+	providersDir := filepath.Join(baseDir, "providers")
+	st := quota.NewStore(baseDir)
+
+	// 刷一轮并返回下一次的 ticker 周期（provider 配置可能变了 → 周期跟着变）。
+	refresh := func() time.Duration {
+		refs, err := quota.Enumerate(providersDir)
+		if err != nil {
+			log.Printf("ccl serve: 枚举 provider 失败: %v", err)
+			return quota.DefaultRefreshInterval
+		}
+		if len(refs) == 0 {
+			return quota.DefaultRefreshInterval
+		}
+		if err := quota.RefreshAll(ctx, refs, st, func(format string, args ...any) {
+			log.Printf("ccl serve: "+format, args...)
+		}); err != nil && ctx.Err() == nil {
+			log.Printf("ccl serve: 额度刷新失败: %v", err)
+		}
+		return quota.MinRefreshInterval(refs)
+	}
+
+	interval := refresh() // 启动即刷一轮
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			iv := refresh()
+			if iv != interval {
+				// provider 的刷新周期被改了 → 重算 ticker。
+				interval = iv
+				ticker.Reset(interval)
+			}
+		}
+	}
 }
 
 // registerServeFlags 把 serve 子命令的 flag 注册到 fs，返回值供 runServe 与

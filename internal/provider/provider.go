@@ -75,6 +75,7 @@ type configFile struct {
 //
 //   - note：provider 列表里的备注行
 //   - order：provider 列表的排序权重
+//   - quota：provider 的额度查询配置（用哪个 adapter、查哪个额度端点）
 //
 // **维护约定**：新增 ccl 元数据键时必须同步加到这里，否则它会被当普通
 // settings 键透传给 Claude Code（虽然会被静默忽略，但语义不对，且 `order`
@@ -82,6 +83,7 @@ type configFile struct {
 var ReservedKeys = map[string]bool{
 	"note":  true,
 	"order": true,
+	"quota": true,
 }
 
 // IsReservedKey 判断一个顶层键是不是 ccl 自己的元数据键。

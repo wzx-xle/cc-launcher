@@ -21,6 +21,7 @@ const topHelp = `用法: ccl [子命令] [选项]
     serve             OTel daemon 模式（启动 / 停 daemon 或还原 settings.json；详见 ccl serve --help）
     stats             显示 token / cost 聚合（直读 SQLite，无需 daemon 在跑）
     web               打印用量看板的访问 URL（浏览器里看 token / cost；详见 ccl web --help）
+    quota             显示 provider 的额度（窗口限额 / 令牌额度 / 余额；详见 ccl quota --help）
     provider          管理提供商（详见 ccl provider --help）
     mode              管理当前目录的权限模式（详见 ccl mode --help）
 
@@ -77,6 +78,8 @@ func run(args []string) error {
 			return runStats(args[1:])
 		case "web":
 			return runWeb(args[1:])
+		case "quota":
+			return runQuota(args[1:])
 		}
 	}
 

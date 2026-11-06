@@ -9,8 +9,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"cc-launcher/internal/config"
+	"cc-launcher/internal/quota"
 	"cc-launcher/internal/stats"
 	"cc-launcher/internal/web"
 )
@@ -380,6 +382,18 @@ func runStatusInner() error {
 		fmt.Printf("       web: http://127.0.0.1:4318/ui?token=%s\n", tok)
 	} else {
 		fmt.Printf("       web: token 不可用（%v）\n", err)
+	}
+
+	// 额度行（provider-quota §7.3）：数据文件由 serve 的刷新任务维护。
+	if qf, err := quota.NewStore(stateBaseDir).Load(); err == nil {
+		if len(qf.Entries) == 0 {
+			fmt.Println("       quota: none yet (没有带额度接口的 provider)")
+		} else {
+			fmt.Printf("       quota: %d providers (updated %s)\n",
+				len(qf.Entries), time.Unix(qf.UpdatedAt, 0).Format("2006-01-02 15:04:05"))
+		}
+	} else {
+		fmt.Printf("       quota: 不可用（%v）\n", err)
 	}
 
 	// db 行（缺失不算 error）
