@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.20.2] - 2026-11-06 — quota-stale-and-backoff-pool
+
+### Fixes
+- **stale 在稳态下不再误报**：stale 的判据是「数据年龄 > 该 provider 的 refreshInterval」，而 `fetched_at` 只存到秒（向下取整）→ 数据年龄最多比真实值大 1 秒。阈值正好等于周期时，**每次刷新前约 1 秒会越过阈值** → 状态栏上的 `(stale)` 偶尔闪一下，而数据其实是新鲜的
+  - 实测（2026-11-06，本机 6 个 provider，42 秒亚秒精度采样）：改前各 provider 的 age 峰值 **60.75~61.48 秒**、每分钟越线 4~8 次；改后峰值 **≤ 59.81 秒** → 不再越线
+  - 阈值额外给 **1 秒容忍**——正好是取整误差的上界（`frac < 1`），而刷新耗时恒 > 0 → 真实年龄峰值恒 < 周期 + 1 秒 → 这个容忍能**完全**覆盖，不会引入新的误报窗口
+- **退避状态改按额度池记录**：退避原先挂在 provider 名对应的条目上，但**限流是厂商针对那把 API key 的**（额度也是按 key 分的）→ 退避期间换了 key（= 换了额度池）时，新 key 也会被老退避拦住，直到退避结束才恢复
+  - 现在退避记在数据文件顶层的 `backoffs` 段，key = 额度池哈希（`sha256(端点 + "\0" + API key)`）→ **换 key 自动绕过老退避**
+  - 同一个池被多个 provider 引用时**只记一份** → 不会出现「同一个池，一半退避一半没退避」的分裂状态
+  - **老数据文件的退避不丢**：v0.20.1 写在条目里的退避在读出时惰性迁移到对应池（写回时自然变成新格式 → 一次性自愈）
+  - 刷新成功时**显式清除**退避（退避搬到顶层段后不再随条目重建自动清零）
+
+### Tests
+- `internal/quota`：退避按池生效（同一 provider 换 key 后**不受老退避影响**，仍会发出请求）；老数据文件的条目级退避被迁移到对应池（不丢）且条目里的旧字段被清掉；429 → 退避、下一轮跳过、退避时长翻倍并封顶 30 分钟、成功后复位
+- `cmd/cc-launcher`：stale 判定——数据年龄 60 秒（周期 60）**不**标 stale、70 秒标 stale；`--refresh` 遇到退避中的 provider → 不发请求 + 提示剩余秒数 + 退出码 1
+- 真机（2026-11-06，本机 6 个 provider）：老格式数据文件（v0.20.1 的条目级退避）升级后 → 内存里即被识别为「正在退避中（275 秒后可再试）」、写盘后落盘为顶层 `backoffs` 段且条目旧字段清空；正常刷新的 provider 的 age 峰值从 60.75~61.48 秒降到 ≤ 59.81 秒；处于退避中的 provider 仍正确标 `stale: true`（age 153 秒）
+
+### OpenSpec
+- `quota-stale-and-backoff-pool`（归档：修改 `openspec/specs/provider-quota`——stale 判定增加取整误差容忍、退避改按额度池记录）
+- `docs/provider-quota.md`：数据文件结构补顶层 `backoffs` 段；stale 语义补「1 秒取整误差容忍」
+
+### Compatibility
+- 数据文件新增顶层**可选**段 `backoffs`；老版本 ccl 不认识会忽略（json 忽略未知字段）→ 退避状态失效（无害：会被重新限流并重新记录）
+- v0.20.1 写在条目里的 `retry_after` / `backoff_seconds` 仍会被读出并迁移（**不丢退避**）；新写入的数据不再带这两个字段
+- `ccl quota` 的输出契约**不变**（维度列表 + 三种 kind + stale 语义都没动）——本次只改判定精度与退避的记录粒度
+
 ## [0.20.1] - 2026-11-06 — quota-refresh-stagger
 
 ### Fixes
