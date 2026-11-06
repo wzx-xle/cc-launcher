@@ -27,6 +27,8 @@ Claude Code Launcher — 一个终端启动器，在启动 Claude Code 时提供
    - **额度刷新由 `ccl serve` 负责**（常驻进程，周期默认 60 秒、per-provider 可配）：serve 写 `~/.cc-launcher/quota.json`（0600、原子写）；`ccl quota` **只读本地文件，一次网络都不发**（状态栏命令约每 300ms 调一次，读取侧不能有网络）
    - **额度接口是外部行为**：厂商改了字段/端点 → 解析失败必须**降级而不是崩**（serve 保留旧条目 → `fetched_at` 变旧 → stale 自动生效；读取侧不受影响；绝不允许影响 Claude Code 启动）。实测结论见 `docs/provider-quota.md`——改 adapter 前先看它
    - 额度输出是**维度列表**（`window`/`quota`/`balance` 三种 kind），不是两个固定槽位：`label`/`unit` 必须纯 ASCII 且**永远不取自厂商响应的原始字符串**
+   - **刷新不得"同一时刻打一批"**（quota-refresh-stagger change）：额度按 key 分，N 个 provider = N 个额度池 = N 个请求。同一刷新周期的一批池必须**各占一个固定相位**（周期长度不变，只是时刻错开），一轮内相邻请求还要留最小间隔；**serve 的 ticker 周期必须细于相位分辨率**（否则窗口边界一次性全到期 → 错开白做）
+   - **被厂商限流（429）必须退避**，不能每轮硬打：退避时长指数增长（1min→2min→…→封顶 30min）且**写进数据文件**（跨 serve / `--refresh` / 重启都生效）；退避期间条目保留（stale 自动生效），`--refresh` 也要遵守退避
 8. **改函数签名 / 删函数 / 跨包重构前，用 LSP `findReferences` 确认影响面**，不用 `grep -rn`
    - grep 是文本匹配，会把同名方法一并算进来：改 `provider.Manager.Get` 时，`grep "\.Get("` 会把 `internal/web/server.go` 里 7 处 `url.Values.Get` 甩出来，误判成要动一片无关代码；LSP 是符号级匹配，能精确区分
    - LSP 工具已启用（`ENABLE_LSP_TOOL=1` + `gopls-lsp` 插件），但它是 deferred 的——先用 `ToolSearch` 加载 schema 再调

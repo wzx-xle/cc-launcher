@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -100,6 +101,55 @@ func DetectAdapter(baseURL string) (Adapter, bool) {
 // 5 秒：实测 MiniMax 的额度接口约 150ms；超时是"厂商接口挂了"的兜底，
 // 不能太长（serve 的刷新要在一个周期内跑完），也不能太短（跨代理时慢）。
 const httpTimeout = 5 * time.Second
+
+// RateLimitError 表示厂商限流（HTTP 429）。
+//
+// **为什么要单独一个类型**：429 不是"接口挂了"——它说的是"你查得太勤了"。
+// 刷新层对这两种失败的处置完全不同：
+//
+//   - 普通失败 → 旧条目保留，下一轮照常再试
+//   - 限流     → **退避**（等一段时间再试），否则每轮硬打会让限流永远不恢复
+//
+// 三家的失败协议各不相同（MiniMax 看 body、DeepSeek 看 HTTP 状态码、New API
+// 看 body 的 code），但 **429 是 HTTP 层的共性** → 在拿到状态码的地方统一
+// 识别。
+type RateLimitError struct {
+	// Status 是 HTTP 状态码（429）。
+	Status int
+	// RetryAfter 是厂商给的 Retry-After（响应头）；没有则 0。
+	RetryAfter time.Duration
+	// Msg 是响应体摘要（截断）。
+	Msg string
+}
+
+// Error 实现 error。
+func (e *RateLimitError) Error() string {
+	if e.RetryAfter > 0 {
+		return fmt.Sprintf("额度接口限流（HTTP %d，厂商建议 %s 后重试）: %s",
+			e.Status, e.RetryAfter.Round(time.Second), e.Msg)
+	}
+	return fmt.Sprintf("额度接口限流（HTTP %d）: %s", e.Status, e.Msg)
+}
+
+// parseRetryAfter 解析 Retry-After 响应头。
+//
+// 两种形式都认：秒数（"120"）与 HTTP-date。没给或解析不了 → 0（调用方退回
+// 自己的退避策略）。
+func parseRetryAfter(v string) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+		return time.Duration(n) * time.Second
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+	}
+	return 0
+}
 
 // newHTTPClient 造一个走 **provider 自己网络路径** 的 HTTP 客户端。
 //

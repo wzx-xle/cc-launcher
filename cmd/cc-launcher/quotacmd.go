@@ -169,6 +169,19 @@ func runQuota(args []string) error {
 				quotaExitFn(2)
 				return nil
 			}
+			// **退避中**：被厂商限流后要等一会儿。手动刷不能冲掉退避——它打的
+			// 是同一个接口。提示还剩多少秒，给用户可行动的信息。
+			var bo *quota.BackoffError
+			if errors.As(err, &bo) {
+				wait := bo.RetryAfter - time.Now().Unix()
+				if wait < 0 {
+					wait = 0
+				}
+				fmt.Fprintf(os.Stderr,
+					"提供商 %q 正在退避中（厂商限流），%d 秒后可再试\n", name, wait)
+				quotaExitFn(1)
+				return nil
+			}
 			// **失败时不写文件**（旧条目保留）→ 退出码 1。
 			fmt.Fprintf(os.Stderr, "刷新 %q 的额度失败: %v\n", name, err)
 			quotaExitFn(1)

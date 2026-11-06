@@ -428,3 +428,49 @@ func TestRunQuota_TextOutput(t *testing.T) {
 
 // quotaFloat 是测试里造 *float64 的小助手。
 func quotaFloat(v float64) *float64 { return &v }
+
+// TestRunQuota_RefreshRespectsBackoff 断言：退避中的 provider → `--refresh`
+// **不发请求**（手动刷不能冲掉退避）+ 提示还剩多少秒。
+func TestRunQuota_RefreshRespectsBackoff(t *testing.T) {
+	baseDir := quotaHome(t)
+
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		fmt.Fprint(w, `{"code":true,"data":{"total_granted":1,"total_used":0,"total_available":1}}`)
+	}))
+	defer srv.Close()
+
+	writeQuotaProvider(t, baseDir, "p1", map[string]any{
+		"env":   map[string]any{"ANTHROPIC_BASE_URL": "https://one.example.com/x"},
+		"quota": map[string]any{"source": "newapi", "endpoint": srv.URL},
+	})
+
+	// 造一条"正在退避中"的记录
+	st := quota.NewStore(baseDir)
+	f := &quota.File{Version: 1, Entries: map[string]quota.Entry{
+		"p1": {
+			Source:     "newapi",
+			Pool:       "pool-1",
+			FetchedAt:  time.Now().Unix(),
+			RetryAfter: time.Now().Add(30 * time.Second).Unix(),
+		},
+	}}
+	if err := st.Save(f); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, code := captureQuotaRun(t, "--provider", "p1", "--refresh", "--json")
+	if code != 1 {
+		t.Fatalf("退出码 = %d, want 1 (stderr=%s)", code, stderr)
+	}
+	if atomic.LoadInt32(&calls) != 0 {
+		t.Errorf("退避中不该发请求, calls=%d", calls)
+	}
+	if !strings.Contains(stderr, "退避") {
+		t.Errorf("stderr 应说明在退避中: %s", stderr)
+	}
+	if strings.Contains(stdout, "dimensions") {
+		t.Errorf("失败时不该打印额度文档: %s", stdout)
+	}
+}

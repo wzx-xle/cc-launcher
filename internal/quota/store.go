@@ -44,6 +44,22 @@ type Entry struct {
 	// 冗余存储：同一个额度池被多个 provider 引用时内容重复——冗余换来读取侧
 	// 零查找成本，且每个条目自带 fetched_at（新鲜度判定不用二次查询）。
 	Dimensions []Dimension `json:"dimensions"`
+
+	// NextAt 是下次该刷的时刻（Unix 秒）——**相位错开**用。
+	//
+	// 每个额度池在自己的刷新周期内占一个固定相位：刷新时刻 = 该相位 + k×周期。
+	// 刷新后用 **NextAt 递推**（NextAt += interval）而不是"now + interval"重算
+	// ——后者会把每次刷新的耗时累积进周期，且相位会漂。
+	//
+	// 0 = 还没分配（老数据文件 / 首次）→ 退回"fetched_at + interval"判定。
+	NextAt int64 `json:"next_at,omitempty"`
+	// RetryAfter 是退避到什么时候才允许再查（Unix 秒）——**429 退避**用。
+	//
+	// 持久化（而不是记在 daemon 内存里）：`ccl quota --refresh` 是另一个
+	// 进程，它不知道要退避；serve 重启后记忆也会丢。
+	RetryAfter int64 `json:"retry_after,omitempty"`
+	// BackoffSeconds 是当前退避时长（秒）——下次再被限流时翻倍的基数。
+	BackoffSeconds int64 `json:"backoff_seconds,omitempty"`
 }
 
 // Store 管理额度数据文件（~/.cc-launcher/quota.json）。
@@ -146,17 +162,38 @@ func (s *Store) Save(f *File) error {
 //
 // 最坏后果是"某个条目短暂缺失一个刷新周期"，serve 下轮自愈——不需要文件锁。
 func (s *Store) Update(name, source, pool string, dims []Dimension) error {
+	return s.UpdateEntry(name, Entry{Source: source, Pool: pool, Dimensions: dims})
+}
+
+// UpdateEntry 写一个**完整**的条目（含相位 next_at 与退避字段）。
+//
+// FetchedAt 由本函数盖上（写文件的那一刻就是抓取的那一刻）；其余字段由调用
+// 方填好带进来。
+func (s *Store) UpdateEntry(name string, e Entry) error {
 	f, err := s.Load()
 	if err != nil {
 		// 文件损坏 → 从空白开始重建（不让一个坏文件永久挡住刷新）。
 		f = &File{Version: quotaFileVersion, Entries: map[string]Entry{}}
 	}
-	f.Entries[name] = Entry{
-		Source:     source,
-		Pool:       pool,
-		FetchedAt:  time.Now().Unix(),
-		Dimensions: dims,
+	e.FetchedAt = time.Now().Unix()
+	f.Entries[name] = e
+	return s.Save(f)
+}
+
+// UpdateBackoff 只更新某个条目的退避字段（**不动**额度数据与 fetched_at）。
+//
+// 失败时用它：额度数据要保持旧值（fetched_at 变旧 → stale 自动生效），
+// 只有退避状态是新的。**不能走 Update**——Update 会盖上 FetchedAt=now，
+// 那会让旧数据看起来是新的（stale 永远不生效）。
+func (s *Store) UpdateBackoff(name string, retryAfter, backoffSeconds int64) error {
+	f, err := s.Load()
+	if err != nil {
+		f = &File{Version: quotaFileVersion, Entries: map[string]Entry{}}
 	}
+	e := f.Entries[name]
+	e.RetryAfter = retryAfter
+	e.BackoffSeconds = backoffSeconds
+	f.Entries[name] = e
 	return s.Save(f)
 }
 

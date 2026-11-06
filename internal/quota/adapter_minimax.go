@@ -231,5 +231,18 @@ func fetchJSON(ctx context.Context, client *http.Client, endpoint, apiKey string
 	if err != nil {
 		return nil, resp.StatusCode, fmt.Errorf("读额度响应失败: %w", err)
 	}
+	// **429 单独识别**：它不是"接口挂了"，是"你查得太勤了" → 刷新层要退避，
+	// 而不是每轮硬打（见 RateLimitError）。
+	if resp.StatusCode == http.StatusTooManyRequests {
+		msg := strings.TrimSpace(string(raw))
+		if len(msg) > 200 {
+			msg = msg[:200] + "…"
+		}
+		return nil, resp.StatusCode, &RateLimitError{
+			Status:     resp.StatusCode,
+			RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
+			Msg:        msg,
+		}
+	}
 	return raw, resp.StatusCode, nil
 }

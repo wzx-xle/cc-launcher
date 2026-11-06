@@ -248,7 +248,9 @@ func quotaRefreshLoop(ctx context.Context, baseDir string) {
 		}); err != nil && ctx.Err() == nil {
 			log.Printf("ccl serve: 额度刷新失败: %v", err)
 		}
-		return quota.MinRefreshInterval(refs)
+		// ticker 周期必须**细于相位分辨率**（quota.TickInterval 的注释）——
+		// 否则多个 provider 会在同一个 tick 上一起到期，相位错开白做。
+		return quota.TickInterval(refs)
 	}
 
 	interval := refresh() // 启动即刷一轮
@@ -262,7 +264,7 @@ func quotaRefreshLoop(ctx context.Context, baseDir string) {
 		case <-ticker.C:
 			iv := refresh()
 			if iv != interval {
-				// provider 的刷新周期被改了 → 重算 ticker。
+				// provider 的刷新周期或数量被改了 → 重算 ticker。
 				interval = iv
 				ticker.Reset(interval)
 			}

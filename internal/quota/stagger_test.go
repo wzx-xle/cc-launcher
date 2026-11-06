@@ -1,0 +1,457 @@
+package quota
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"sync"
+	"testing"
+	"time"
+)
+
+// TestAssignPhases_SpreadsProviders 断言：同一刷新周期的一批额度池**均分周期
+// 内的相位**——这是"8 个 provider 不挤在一起"的机制。
+func TestAssignPhases_SpreadsProviders(t *testing.T) {
+	const n = 8
+	const intervalSec = 60
+
+	jobs := map[string]job{}
+	for i := 0; i < n; i++ {
+		jobs[fmt.Sprintf("pool-%02d", i)] = job{interval: intervalSec * time.Second}
+	}
+	assignPhases(jobs)
+
+	seen := map[int64]bool{}
+	var phases []int64
+	for pool, j := range jobs {
+		sec := int64(j.phase.Seconds())
+		if sec < 0 || sec >= intervalSec {
+			t.Errorf("%s 相位越界: %d", pool, sec)
+		}
+		if seen[sec] {
+			t.Errorf("相位重复: %d", sec)
+		}
+		seen[sec] = true
+		phases = append(phases, sec)
+	}
+
+	// 均匀性：任意两个相邻相位的间隔 ≤ ceil(60/8)=8 秒
+	sortInt64(phases)
+	for i := 1; i < len(phases); i++ {
+		if gap := phases[i] - phases[i-1]; gap > 8 {
+			t.Errorf("相位间隔 %d 秒（%d → %d），应 ≤ 8", gap, phases[i-1], phases[i])
+		}
+	}
+	// 首尾也要能接上（跨周期边界）
+	if wrap := intervalSec - phases[len(phases)-1] + phases[0]; wrap > 8 {
+		t.Errorf("跨周期边界的相位间隔 %d 秒，应 ≤ 8", wrap)
+	}
+}
+
+// TestAssignPhases_KeepsExistingPhase 断言：已分配过相位的池**保持**自己的
+// 相位（新的池不重排老的）。
+func TestAssignPhases_KeepsExistingPhase(t *testing.T) {
+	const intervalSec = 60
+	// oldNext 的相位是 23（网格点 + 23 秒）
+	oldNext := int64(1793950000/intervalSec*intervalSec + intervalSec + 23)
+
+	jobs := map[string]job{
+		"pool-old": {interval: intervalSec * time.Second, oldNext: oldNext},
+		"pool-new": {interval: intervalSec * time.Second},
+	}
+	assignPhases(jobs)
+
+	if got := int64(jobs["pool-old"].phase.Seconds()); got != 23 {
+		t.Errorf("老池的相位应保持 23, got %d", got)
+	}
+	if got := int64(jobs["pool-new"].phase.Seconds()); got == 23 {
+		t.Errorf("新池不该占用老池的相位 23")
+	}
+}
+
+// TestNextRefreshAt_KeepsPhase 断言：next_at **递推**（不是 now+interval 重算）
+// → 相位永久保持；错过周期后相位仍然保持。
+func TestNextRefreshAt_KeepsPhase(t *testing.T) {
+	const intervalSec = 60
+	now := time.Unix(1793950000, 0)
+	oldNext := int64(1793950000/intervalSec*intervalSec + intervalSec + 23)
+
+	next := nextRefreshAt(now, intervalSec*time.Second, 0, oldNext)
+	if phaseOf(next, intervalSec) != 23 {
+		t.Errorf("递推后相位应仍是 23, got %d", phaseOf(next, intervalSec))
+	}
+	if next != oldNext+intervalSec {
+		t.Errorf("next_at 应是 oldNext + interval, got %d", next)
+	}
+
+	// 错过了很多周期（serve 停了很久）→ 相位仍保持，且跳到未来
+	stale := oldNext - 300
+	next2 := nextRefreshAt(now, intervalSec*time.Second, 0, stale)
+	if phaseOf(next2, intervalSec) != phaseOf(stale, intervalSec) {
+		t.Errorf("错过周期后相位应保持, got %d want %d", phaseOf(next2, intervalSec), phaseOf(stale, intervalSec))
+	}
+	if next2 <= now.Unix() {
+		t.Errorf("next_at 应跳到未来, got %d", next2)
+	}
+}
+
+// TestNextRefreshAt_NewPoolLandsOnGrid 断言：新分配的池落在 interval 网格 +
+// 相位上。
+func TestNextRefreshAt_NewPoolLandsOnGrid(t *testing.T) {
+	const intervalSec = 60
+	now := time.Unix(1793950030, 0) // 网格内
+	next := nextRefreshAt(now, intervalSec*time.Second, 15*time.Second, 0)
+	if next <= now.Unix() {
+		t.Fatalf("next_at 应在未来, got %d", next)
+	}
+	if phaseOf(next, intervalSec) != 15 {
+		t.Errorf("相位应落在 15, got %d", phaseOf(next, intervalSec))
+	}
+}
+
+// TestRefreshAll_MinGapBetweenRequests 断言：一轮里相邻两个请求之间**至少隔
+// Configured 的间隔**（厂商侧限流的兜底）。
+func TestRefreshAll_MinGapBetweenRequests(t *testing.T) {
+	var mu sync.Mutex
+	var times []time.Time
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		times = append(times, time.Now())
+		mu.Unlock()
+		fmt.Fprint(w, `{"code":true,"data":{"total_granted":1,"total_used":0,"total_available":1}}`)
+	}))
+	defer srv.Close()
+
+	const gapMs = 120
+	refs := []ProviderRef{}
+	for i := 0; i < 3; i++ {
+		refs = append(refs, ProviderRef{
+			Name:   fmt.Sprintf("p%d", i),
+			Config: &Config{Source: "newapi", Endpoint: srv.URL, MinRequestGap: gapMs * time.Millisecond},
+			APIKey: fmt.Sprintf("sk-%d", i),
+		})
+	}
+	st := NewStore(t.TempDir())
+	if err := RefreshAll(context.Background(), refs, st, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(times) != 3 {
+		t.Fatalf("应发 3 个请求, got %d", len(times))
+	}
+	for i := 1; i < len(times); i++ {
+		gap := times[i].Sub(times[i-1])
+		if gap < gapMs*time.Millisecond {
+			t.Errorf("第 %d 与 %d 个请求间隔 %v, 应 ≥ %dms", i, i-1, gap, gapMs)
+		}
+	}
+}
+
+// TestRefreshAll_RateLimitBacksOff 断言：429 → 写退避 → 下一轮**不再请求**；
+// 退避结束后再请求且**退避时长翻倍**；成功后**复位**。
+func TestRefreshAll_RateLimitBacksOff(t *testing.T) {
+	var mu sync.Mutex
+	requests := 0
+	limited := true
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		isLimited := limited
+		mu.Unlock()
+		if isLimited {
+			w.Header().Set("Retry-After", "30")
+			w.WriteHeader(http.StatusTooManyRequests)
+			fmt.Fprint(w, "too many requests")
+			return
+		}
+		fmt.Fprint(w, `{"code":true,"data":{"total_granted":1,"total_used":0,"total_available":1}}`)
+	}))
+	defer srv.Close()
+
+	refs := []ProviderRef{{
+		Name:   "p1",
+		Config: &Config{Source: "newapi", Endpoint: srv.URL},
+		APIKey: "sk-1",
+	}}
+	st := NewStore(t.TempDir())
+
+	// 第 1 轮：被限流 → 退避
+	if err := RefreshAll(context.Background(), refs, st, nil); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	if requests != 1 {
+		t.Fatalf("应发 1 个请求, got %d", requests)
+	}
+	mu.Unlock()
+
+	f, err := st.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, ok := f.EntryFor("p1")
+	if !ok {
+		t.Fatal("应有条目")
+	}
+	if e.RetryAfter <= time.Now().Unix() {
+		t.Errorf("应记录退避到未来, got %d", e.RetryAfter)
+	}
+	// 厂商 Retry-After=30 小于缺省的 60s → 取**较大者**（缺省 60s）
+	if e.BackoffSeconds != 60 {
+		t.Errorf("退避基数应为 60, got %d", e.BackoffSeconds)
+	}
+
+	// 第 2 轮：退避中 → **不发请求**
+	if err := RefreshAll(context.Background(), refs, st, nil); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	if requests != 1 {
+		t.Errorf("退避中不该再发请求, requests=%d", requests)
+	}
+	mu.Unlock()
+
+	// 把退避时间改到过去 → 第 3 轮：又请求 → 仍被限流 → 退避翻倍
+	f2, _ := st.Load()
+	e2 := f2.Entries["p1"]
+	e2.RetryAfter = time.Now().Unix() - 1
+	f2.Entries["p1"] = e2
+	if err := st.Save(f2); err != nil {
+		t.Fatal(err)
+	}
+	if err := RefreshAll(context.Background(), refs, st, nil); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	if requests != 2 {
+		t.Errorf("退避结束后应再发 1 个请求, requests=%d", requests)
+	}
+	mu.Unlock()
+	f3, _ := st.Load()
+	if got := f3.Entries["p1"].BackoffSeconds; got != 120 {
+		t.Errorf("连续限流后退避应翻倍到 120, got %d", got)
+	}
+
+	// 厂商恢复 → 刷新成功 → 退避复位
+	mu.Lock()
+	limited = false
+	mu.Unlock()
+	f4, _ := st.Load()
+	e4 := f4.Entries["p1"]
+	e4.RetryAfter = time.Now().Unix() - 1
+	f4.Entries["p1"] = e4
+	if err := st.Save(f4); err != nil {
+		t.Fatal(err)
+	}
+	if err := RefreshAll(context.Background(), refs, st, nil); err != nil {
+		t.Fatal(err)
+	}
+	f5, _ := st.Load()
+	e5 := f5.Entries["p1"]
+	if e5.BackoffSeconds != 0 || e5.RetryAfter != 0 {
+		t.Errorf("成功后退避状态应复位, got backoff=%d retryAfter=%d", e5.BackoffSeconds, e5.RetryAfter)
+	}
+}
+
+// TestRefreshAll_RateLimitKeepsOldQuota 断言：被限流时**旧额度数据保留**
+// （fetched_at 不变 → stale 自动生效），不是清空。
+func TestRefreshAll_RateLimitKeepsOldQuota(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	refs := []ProviderRef{{
+		Name:   "p1",
+		Config: &Config{Source: "newapi", Endpoint: srv.URL},
+		APIKey: "sk-1",
+	}}
+	st := NewStore(t.TempDir())
+	// 先造一条旧数据（fetched_at 是 10 分钟前 → 会触发刷新）
+	f := &File{Version: 1, Entries: map[string]Entry{
+		"p1": {
+			Source:     "newapi",
+			Pool:       "pool-1",
+			FetchedAt:  time.Now().Add(-10 * time.Minute).Unix(),
+			Dimensions: []Dimension{{ID: "quota", Kind: KindQuota, Unit: "USD"}},
+		},
+	}}
+	if err := st.Save(f); err != nil {
+		t.Fatal(err)
+	}
+	before := f.Entries["p1"]
+
+	if err := RefreshAll(context.Background(), refs, st, nil); err != nil {
+		t.Fatal(err)
+	}
+	after, err := st.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := after.Entries["p1"]
+	if e.FetchedAt != before.FetchedAt {
+		t.Errorf("被限流时 fetched_at 不该变（否则 stale 不生效）: %d → %d", before.FetchedAt, e.FetchedAt)
+	}
+	if len(e.Dimensions) != 1 {
+		t.Errorf("旧额度数据不该被丢: %+v", e.Dimensions)
+	}
+	if e.RetryAfter == 0 {
+		t.Error("应记录退避时间")
+	}
+}
+
+// TestFetchJSON_RateLimitError 断言：429 → RateLimitError（带 Retry-After）。
+func TestFetchJSON_RateLimitError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "42")
+		w.WriteHeader(http.StatusTooManyRequests)
+		fmt.Fprint(w, "too many requests")
+	}))
+	defer srv.Close()
+
+	_, _, err := fetchJSON(context.Background(), newHTTPClient(nil), srv.URL, "sk")
+	if err == nil {
+		t.Fatal("429 应报错")
+	}
+	var rl *RateLimitError
+	if !errors.As(err, &rl) {
+		t.Fatalf("应能用 errors.As 识别 RateLimitError, got %T", err)
+	}
+	if rl.Status != 429 {
+		t.Errorf("Status = %d", rl.Status)
+	}
+	if rl.RetryAfter != 42*time.Second {
+		t.Errorf("RetryAfter = %v, want 42s", rl.RetryAfter)
+	}
+}
+
+// TestParseRetryAfter 断言 Retry-After 两种形式都能解析。
+func TestParseRetryAfter(t *testing.T) {
+	if got := parseRetryAfter("120"); got != 120*time.Second {
+		t.Errorf("秒数形式解析错: %v", got)
+	}
+	if got := parseRetryAfter(""); got != 0 {
+		t.Errorf("空值应返回 0, got %v", got)
+	}
+	if got := parseRetryAfter("garbage"); got != 0 {
+		t.Errorf("非法值应返回 0, got %v", got)
+	}
+	// HTTP-date 形式（过去的日期 → 0）
+	past := time.Now().Add(-time.Hour).UTC().Format(http.TimeFormat)
+	if got := parseRetryAfter(past); got != 0 {
+		t.Errorf("过去的日期应返回 0, got %v", got)
+	}
+}
+
+// TestNextBackoff 断言：连续被限流 → 翻倍、封顶 30 分钟；厂商给了更大的
+// Retry-After → 取它。
+func TestNextBackoff(t *testing.T) {
+	if got := nextBackoff(0, 0); got != time.Minute {
+		t.Errorf("首次应退避 1 分钟, got %v", got)
+	}
+	if got := nextBackoff(60, 0); got != 2*time.Minute {
+		t.Errorf("连续应翻倍到 2 分钟, got %v", got)
+	}
+	if got := nextBackoff(1800, 0); got != 30*time.Minute {
+		t.Errorf("应封顶 30 分钟, got %v", got)
+	}
+	if got := nextBackoff(60, 5*time.Minute); got != 5*time.Minute {
+		t.Errorf("厂商 Retry-After 更大时应取它, got %v", got)
+	}
+}
+
+// TestStore_BackwardCompatible 断言：老格式数据文件能被读出（新增的三个字段
+// 是零值）→ 退化成旧行为，不报错。
+func TestStore_BackwardCompatible(t *testing.T) {
+	st := NewStore(t.TempDir())
+	// 手写一个老格式文件（没有 next_at / retry_after / backoff_seconds）
+	old := `{
+  "version": 1,
+  "updated_at": 1793950000,
+  "entries": {
+    "p1": {
+      "source": "minimax",
+      "pool": "pool-1",
+      "fetched_at": 1793950000,
+      "dimensions": [{"id": "interval", "label": "5h", "kind": "window"}]
+    }
+  }
+}`
+	if err := writeFile(st.Path(), old); err != nil {
+		t.Fatal(err)
+	}
+	f, err := st.Load()
+	if err != nil {
+		t.Fatalf("老格式文件不该报错: %v", err)
+	}
+	e, ok := f.EntryFor("p1")
+	if !ok {
+		t.Fatal("条目应存在")
+	}
+	if e.NextAt != 0 || e.RetryAfter != 0 || e.BackoffSeconds != 0 {
+		t.Errorf("新字段应为零值: %+v", e)
+	}
+	if len(e.Dimensions) != 1 || e.Dimensions[0].Label != "5h" {
+		t.Errorf("维度应能读出: %+v", e.Dimensions)
+	}
+}
+
+// TestRefreshAll_SkipsWhenNextAtInFuture 断言：next_at 在未来 → 跳过（相位
+// 错开的核心判定）。
+func TestRefreshAll_SkipsWhenNextAtInFuture(t *testing.T) {
+	var mu sync.Mutex
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		mu.Unlock()
+		fmt.Fprint(w, `{"code":true,"data":{"total_granted":1,"total_used":0,"total_available":1}}`)
+	}))
+	defer srv.Close()
+
+	refs := []ProviderRef{{
+		Name:   "p1",
+		Config: &Config{Source: "newapi", Endpoint: srv.URL},
+		APIKey: "sk-1",
+	}}
+	st := NewStore(t.TempDir())
+	// fetched_at 是 10 分钟前（按旧判定会刷新），但 next_at 在未来 → 应跳过
+	f := &File{Version: 1, Entries: map[string]Entry{
+		"p1": {
+			Source:    "newapi",
+			Pool:      "pool-1",
+			FetchedAt: time.Now().Add(-10 * time.Minute).Unix(),
+			NextAt:    time.Now().Add(30 * time.Second).Unix(),
+		},
+	}}
+	if err := st.Save(f); err != nil {
+		t.Fatal(err)
+	}
+	if err := RefreshAll(context.Background(), refs, st, nil); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if requests != 0 {
+		t.Errorf("next_at 在未来 → 不该发请求, requests=%d", requests)
+	}
+}
+
+// sortInt64 就地排序（测试辅助）。
+func sortInt64(a []int64) {
+	for i := 1; i < len(a); i++ {
+		for j := i; j > 0 && a[j-1] > a[j]; j-- {
+			a[j-1], a[j] = a[j], a[j-1]
+		}
+	}
+}
+
+// writeFile 写文件（测试辅助）。
+func writeFile(path, content string) error {
+	return os.WriteFile(path, []byte(content), 0600)
+}
