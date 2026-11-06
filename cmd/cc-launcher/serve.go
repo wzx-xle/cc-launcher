@@ -251,7 +251,10 @@ func quotaRefreshLoop(ctx context.Context, baseDir string, activity *collector.A
 		// 删了"，混在一起会误删它的额度条目。
 		active := activeProviders(refs, activity)
 		if err := quota.RefreshAll(ctx, refs, st, func(format string, args ...any) {
-			log.Printf("ccl serve: "+format, args...)
+			// **[quota] 前缀**：让"额度相关"的行可以被 ASCII 关键词精确筛出来
+			// （Windows 上日志里��中文可能显示成乱码，但标记、时间戳、provider
+			// 名、HTTP 状态码都是 ASCII → 照样能解析）。
+			log.Printf("ccl serve: [quota] "+format, args...)
 		}, active); err != nil && ctx.Err() == nil {
 			log.Printf("ccl serve: 额度刷新失败: %v", err)
 		}
