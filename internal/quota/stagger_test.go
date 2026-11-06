@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -683,5 +684,35 @@ func TestRefreshOne_WritesWholePool(t *testing.T) {
 	}
 	if len(eb.Dimensions) != 1 {
 		t.Errorf("同池的 b 也该拿到新数据: %+v", eb.Dimensions)
+	}
+}
+
+// TestRefreshAll_LogsRoundSummary 断言：每轮刷新打一行**汇总**（四个分类计数），
+// 用于诊断"这一轮到底查了几个、是不是被限流了"。
+func TestRefreshAll_LogsRoundSummary(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"code":true,"data":{"total_granted":1,"total_used":0,"total_available":1}}`)
+	}))
+	defer srv.Close()
+
+	refs := []ProviderRef{
+		{Name: "a", Config: &Config{Source: "newapi", Endpoint: srv.URL}, APIKey: "sk-a"},
+		{Name: "b", Config: &Config{Source: "newapi", Endpoint: srv.URL}, APIKey: "sk-b"},
+	}
+	st := NewStore(t.TempDir())
+
+	var logged []string
+	err := RefreshAll(context.Background(), refs, st, func(format string, args ...any) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}, map[string]bool{"a": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(logged, "\n")
+	if !strings.Contains(joined, "查了 1") {
+		t.Errorf("汇总行应含「查了 1」（只有 a 活跃）, got:\n%s", joined)
+	}
+	if !strings.Contains(joined, "不活跃跳过 1") {
+		t.Errorf("汇总行应含「不活跃跳过 1」, got:\n%s", joined)
 	}
 }

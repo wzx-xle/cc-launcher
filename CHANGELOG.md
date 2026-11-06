@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.20.5] - 2026-11-06 — serve-log-to-file
+
+### Fixes
+- **serve 的日志不再无处可查**：daemon 是被 `ccl` 自动拉起的（detached、无终端），`cmd.Stdout/Stderr = nil` → Go 把子进程的输出接到 **os.DevNull** → **日志全部丢弃**。而 serve 恰恰是出问题时最需要日志的地方（额度接口 429、厂商改了字段、刷新失败……），用户遇到这些只能猜
+  - 日志现在落到 **`~/.cc-launcher/serve.log`**（UTF-8、0600、超过 2MB 截断）
+  - 额度刷新每轮多打一行**汇总**：`查了 N / 不活跃跳过 N / 未到期或退避跳过 N / 失败 N` → **这四个数直接对应"为什么 429"的几种可能**：查了 8（全部）= 活跃判定没生效或都活跃（总量超限）；查了 1~2 = 活跃过滤生效；失败 8 = 全被限流
+  - 额度相关的日志行加 **`[quota]` ASCII 标记** → Windows 控制台把 UTF-8 按 GBK 显示成乱码时，仍能用 `findstr quota` / `Select-String` 精确筛出这些行（时间戳、provider 名、HTTP 状态码、数字都是 ASCII）
+
+### Tests
+- `internal/quota`：每轮汇总行含四个分类计数（查了 / 不活跃跳过 / 未到期或退避跳过 / 失败）
+
+### OpenSpec
+- `serve-log-to-file`（归档：新增 `openspec/specs/daemon-lifecycle` 的「ccl serve records its log to a local file」要求）
+
+### Compatibility
+- 新增 `~/.cc-launcher/serve.log`（0600，可能含本机路径与 provider 名）
+- 不改任何既有行为；只是把原本被丢弃的日志留下来
+
 ## [0.20.4] - 2026-11-06 — quota-on-demand-pool-consistency
 
 ### Fixes
