@@ -49,9 +49,24 @@ func forkDaemon() error {
 
 	cmd := exec.Command(exe, "serve")
 	cmd.Stdin = nil
-	cmd.Stdout = nil
-	cmd.Stderr = nil
 	configureSetpgid(cmd) // 跨平台：unix + windows 都设 best-effort
+
+	// **stdout/stderr 必须落到文件**：自动拉起的 daemon 没有终端，日志若丢给
+	// nil 就**无处可查**——而 serve 恰恰是出问题时最需要日志的地方（额度接口
+	// 429、厂商改了字段、刷新失败……）。用户问"serve 有日志吗"时的答案是
+	// "自动拉起的没有" → 这不是可接受的答案。
+	//
+	// 日志文件：~/.cc-launcher/serve.log（0600，可能含本机路径信息）。
+	// 父进程退出时 Close 自己那份句柄 → 子进程那份仍然有效（Unix fork 与
+	// Windows CreateProcess 都复制句柄）。
+	if logFile, err := openServeLog(); err == nil {
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
+		defer logFile.Close()
+	} else {
+		cmd.Stdout = nil
+		cmd.Stderr = nil
+	}
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("fork ccl serve 失败: %w", err)
@@ -94,4 +109,35 @@ func cclLauncherBaseDir() string {
 		return ".cc-launcher"
 	}
 	return filepath.Join(home, ".cc-launcher")
+}
+
+// serveLogFileName 是 serve 日志的文件名（放在 ~/.cc-launcher/ 下）。
+const serveLogFileName = "serve.log"
+
+// serveLogMaxSize 是日志文件的大小上限（超过就截断重来）。
+//
+// 日志是"出事时看"的，不是归档品 → 保持小而新。2MB 足够看清最近几次刷新
+// 的上下文（每轮每个 provider 一两行）。
+const serveLogMaxSize = 2 << 20
+
+// openServeLog 打开 serve 的日志文件（追加模式）。
+//
+// 文件不存在 → 建；超过上限 → **截断**（保留最新的内容，从头写）。
+// 打开失败 → 返回 error（调用方退回"日志丢弃"的旧行为，不阻断 daemon 启动）。
+func openServeLog() (*os.File, error) {
+	dir := cclLauncherBaseDir()
+	if dir == "" || dir == ".cc-launcher" {
+		return nil, fmt.Errorf("无法定位 ~/.cc-launcher 目录")
+	}
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, fmt.Errorf("创建 %s 失败: %w", dir, err)
+	}
+	path := filepath.Join(dir, serveLogFileName)
+
+	// 超限 → 截断（O_TRUNC）。
+	flags := os.O_CREATE | os.O_WRONLY | os.O_APPEND
+	if fi, err := os.Stat(path); err == nil && fi.Size() > serveLogMaxSize {
+		flags = os.O_CREATE | os.O_WRONLY | os.O_TRUNC
+	}
+	return os.OpenFile(path, flags, 0600)
 }

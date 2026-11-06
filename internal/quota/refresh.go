@@ -500,6 +500,11 @@ type RefreshResult struct {
 	Refreshed int
 	// Skipped 是因为没到刷新周期或正在退避而跳过的 provider 数。
 	Skipped int
+	// SkippedInactive 是因为**最近没有活动**而跳过的 provider 数
+	// （额度数据的唯一消费者是状态栏，没人用就不查）。
+	SkippedInactive int
+	// SkippedNotDue 是因为还没到刷新周期而跳过的 provider 数。
+	SkippedNotDue int
 	// Failed 是查询失败（**旧条目保留**）的 provider 数。
 	Failed int
 }
@@ -566,6 +571,7 @@ func RefreshAll(ctx context.Context, refs []ProviderRef, st *Store, logf func(fo
 		// 不活跃 → 本轮不刷（但条目保留，下次活跃时继续用）。
 		if active != nil && !active[ref.Name] {
 			res.Skipped++
+			res.SkippedInactive++
 			continue
 		}
 
@@ -587,6 +593,7 @@ func RefreshAll(ctx context.Context, refs []ProviderRef, st *Store, logf func(fo
 		// 换池 → 老退避不该拦住它）。
 		if b := file.BackoffFor(pool); b.RetryAfter > now.Unix() {
 			res.Skipped++
+			res.SkippedNotDue++
 			continue
 		}
 
@@ -598,6 +605,7 @@ func RefreshAll(ctx context.Context, refs []ProviderRef, st *Store, logf func(fo
 			}
 			if now.Unix() < dueAt {
 				res.Skipped++
+				res.SkippedNotDue++
 				continue
 			}
 		}
@@ -693,6 +701,11 @@ func RefreshAll(ctx context.Context, refs []ProviderRef, st *Store, logf func(fo
 	if err := st.Prune(live); err != nil {
 		logf("清理残留额度条目失败: %v", err)
 	}
+
+	// **每轮汇总**（一行）：这一轮查了几个、跳过了几个、失败几个。
+	// 出问题时第一眼看这行就知道"是不是全查了""是不是被限流了"。
+	logf("额度刷新一轮：查了 %d / 不活跃跳过 %d / 未到期或退避跳过 %d / 失败 %d",
+		res.Refreshed, res.SkippedInactive, res.SkippedNotDue, res.Failed)
 	return nil
 }
 
