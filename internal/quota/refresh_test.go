@@ -209,7 +209,7 @@ func TestRefreshAll_DedupesSharedPool(t *testing.T) {
 		{Name: "other", Config: &Config{Source: "newapi", Endpoint: srv.URL}, APIKey: "sk-other"},
 	}
 	st := NewStore(t.TempDir())
-	if err := RefreshAll(context.Background(), refs, st, nil); err != nil {
+	if err := RefreshAll(context.Background(), refs, st, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	// 两个额度池（sk-same / sk-other）→ 2 次请求，不是 3 次
@@ -253,14 +253,14 @@ func TestRefreshAll_SkipsWithinInterval(t *testing.T) {
 	st := NewStore(t.TempDir())
 
 	// 第一轮：刷新
-	if err := RefreshAll(context.Background(), refs, st, nil); err != nil {
+	if err := RefreshAll(context.Background(), refs, st, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if atomic.LoadInt32(&calls) != 1 {
 		t.Fatalf("第一轮应发 1 次请求")
 	}
 	// 第二轮：fetched_at 是刚才 → 跳过
-	if err := RefreshAll(context.Background(), refs, st, nil); err != nil {
+	if err := RefreshAll(context.Background(), refs, st, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if atomic.LoadInt32(&calls) != 1 {
@@ -287,7 +287,7 @@ func TestRefreshAll_IntervalFromFile(t *testing.T) {
 	if err := st.Update("p1", "newapi", "pool", []Dimension{{ID: "quota", Kind: KindQuota}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := RefreshAll(context.Background(), refs, st, nil); err != nil {
+	if err := RefreshAll(context.Background(), refs, st, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if atomic.LoadInt32(&calls) != 0 {
@@ -323,7 +323,7 @@ func TestRefreshAll_RefreshesWhenStale(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := RefreshAll(context.Background(), refs, st, nil); err != nil {
+	if err := RefreshAll(context.Background(), refs, st, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if atomic.LoadInt32(&calls) != 1 {
@@ -363,7 +363,7 @@ func TestRefreshAll_KeepsOldEntryOnFailure(t *testing.T) {
 	var logged []string
 	if err := RefreshAll(context.Background(), refs, st, func(format string, args ...any) {
 		logged = append(logged, fmt.Sprintf(format, args...))
-	}); err != nil {
+	}, nil); err != nil {
 		t.Fatal(err)
 	}
 	f2, err := st.Load()
@@ -391,7 +391,7 @@ func TestRefreshAll_PrunesRemovedProviders(t *testing.T) {
 	if err := st.Update("gone", "newapi", "pool", nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := RefreshAll(context.Background(), nil, st, nil); err != nil {
+	if err := RefreshAll(context.Background(), nil, st, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	f, err := st.Load()

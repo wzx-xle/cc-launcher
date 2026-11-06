@@ -174,7 +174,7 @@ The command MUST report how many rows were resolved and how many could not be re
 
 ### Requirement: ccl serve refreshes the quotas of the configured providers
 
-`ccl serve` MUST refresh the quota of every provider that declares a quota interface, and MUST do so on a periodic schedule while it is running.
+`ccl serve` MUST refresh the quota of every provider that declares a quota interface **and that has reported activity recently**, and MUST do so on a periodic schedule while it is running. A provider that has not reported activity recently MUST NOT be queried, because its quota is not being used.
 
 The refresh interval MUST default to 60 seconds. A provider MUST be able to override it through its own configuration.
 

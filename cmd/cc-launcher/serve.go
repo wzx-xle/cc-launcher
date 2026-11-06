@@ -187,15 +187,15 @@ func runServe(args []string) error {
 		log.Printf("ccl serve: cwd 回填完成: resolved=%d failed=%d", resolved, failed)
 	}()
 
-	// 额度刷新（provider-quota）：周期刷新各 provider 的额度，写进
-	// ~/.cc-launcher/quota.json。
+	// 额度刷新（provider-quota）：周期刷新**最近有活动的** provider 的额度，
+	// 写进 ~/.cc-launcher/quota.json。
 	//
 	// **独立 goroutine + ctx 取消**：不阻塞端口绑定、不干扰 metrics 服务，
 	// graceful shutdown 仍在 5s 预算内完成（ctx 取消会中断在途的 HTTP 请求）。
 	//
 	// **启动即刷一轮**（不等一个周期）→ 用户跑完一次 ccl（它会拉起 serve）
 	// 就能读到数据。
-	go quotaRefreshLoop(ctx, stateBaseDir)
+	go quotaRefreshLoop(ctx, stateBaseDir, srv.Activity())
 
 	if err := srv.Start(ctx); err != nil && err != context.Canceled {
 		// Server 异常退出（端口阻塞等不该走到这里——前面已探）。
@@ -229,7 +229,7 @@ func runServe(args []string) error {
 //   - **刷新失败只进 serve 日志，不写数据文件** → 旧条目保留，fetched_at
 //     越来越旧 → stale 自动生效（状态栏不会因为一次网络抖动就从数字跳回 --）
 //   - ctx 取消即退出（SIGTERM → graceful shutdown 不被拖慢）
-func quotaRefreshLoop(ctx context.Context, baseDir string) {
+func quotaRefreshLoop(ctx context.Context, baseDir string, activity *collector.Activity) {
 	providersDir := filepath.Join(baseDir, "providers")
 	st := quota.NewStore(baseDir)
 
@@ -243,9 +243,16 @@ func quotaRefreshLoop(ctx context.Context, baseDir string) {
 		if len(refs) == 0 {
 			return quota.DefaultRefreshInterval
 		}
+		// **只刷新最近有活动的 provider**：额度数据的唯一消费者是状态栏，
+		// 而状态栏只显示当前会话那个 provider 的额度 → 其余 provider 的额度
+		// 数据当前根本没人看（查它们 = 纯浪费 + 触发厂商限流）。
+		//
+		// 注意：**refs 仍是全部**（Prune 的依据）——"这轮没刷它" ≠ "provider 被
+		// 删了"，混在一起会误删它的额度条目。
+		active := activeProviders(refs, activity)
 		if err := quota.RefreshAll(ctx, refs, st, func(format string, args ...any) {
 			log.Printf("ccl serve: "+format, args...)
-		}); err != nil && ctx.Err() == nil {
+		}, active); err != nil && ctx.Err() == nil {
 			log.Printf("ccl serve: 额度刷新失败: %v", err)
 		}
 		// ticker 周期必须**细于相位分辨率**（quota.TickInterval 的注释）——
@@ -270,6 +277,40 @@ func quotaRefreshLoop(ctx context.Context, baseDir string) {
 			}
 		}
 	}
+}
+
+// quotaActiveWindow 是"最近有 OTel 活动"的判定窗口。
+//
+// **为什么是 5 分钟**：实测 Claude Code **每 60 秒**推一次 OTel metrics
+// （2026-11-06，本机 telemetry.db：相邻两条间隔 60000/60001 秒）→ 窗口必须
+// > 60 秒，否则两次推送之间会被误判成"没人用"（额度无故停更）。
+//
+// 5 分钟 = 4 个 OTel 周期 → 容忍 3 次连续丢失（网络抖动、SDK 暂停导出）。
+// 更长 → 用户离开半小时后还在查他的额度（回到"全查"的毛病）。
+const quotaActiveWindow = 5 * time.Minute
+
+// activeProviders 返回"最近有 OTel 活动"的 provider 名集合。
+//
+// **返回 nil 的含义是"不过滤"**（全部都要刷）；返回空集合的含义是"一个都不
+// 刷"（没人用 → 一个请求都不发）。两者语义不同，不能混。
+//
+// 活动信号来自 collector（它解析每条 metrics 时就知道是哪个 provider——ccl
+// 注入的 ccl.provider resource attribute），详见 internal/collector/activity.go。
+//
+// activity 为 nil（拿不到活动信息）→ **不过滤**：宁可多查几个，也不要在信息缺失
+// 时一个都不查。
+func activeProviders(refs []quota.ProviderRef, activity *collector.Activity) map[string]bool {
+	if activity == nil {
+		return nil
+	}
+	recent := activity.Recent(quotaActiveWindow)
+	out := make(map[string]bool, len(refs))
+	for _, ref := range refs {
+		if recent[ref.Name] {
+			out[ref.Name] = true
+		}
+	}
+	return out
 }
 
 // registerServeFlags 把 serve 子命令的 flag 注册到 fs，返回值供 runServe 与

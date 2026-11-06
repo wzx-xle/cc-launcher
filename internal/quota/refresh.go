@@ -519,7 +519,14 @@ type job struct {
 	phase time.Duration
 }
 
-// RefreshAll 刷新所有 provider 的额度（serve 的周期任务用）。
+// RefreshAll 刷新 provider 的额度（serve 的周期任务用）。
+//
+// refs 是**全部**声明了额度接口的 provider —— 它同时是 Prune 的依据
+// （"provider 配置被删了"才清条目）。
+//
+// active 决定其中哪些**本轮要刷**：nil = 全部都刷；非 nil 时只有名单里的才刷。
+// **两者必须分开**：不刷 ≠ 不存在。用同一个集合会让"这轮没轮到它"被当成
+// "provider 被删了"→ 它的额度条目被 Prune 掉（真机验证时抓到的 bug）。
 //
 // 流程：
 //  1. 读数据文件拿到每个 provider 的 fetched_at（**从文件读，不是内存**——
@@ -534,7 +541,7 @@ type job struct {
 //  7. 清理已不存在的 provider 的残留条目
 //
 // logf 用于记录失败原因（进 serve 的日志，不进数据文件）。
-func RefreshAll(ctx context.Context, refs []ProviderRef, st *Store, logf func(format string, args ...any)) error {
+func RefreshAll(ctx context.Context, refs []ProviderRef, st *Store, logf func(format string, args ...any), active map[string]bool) error {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
@@ -553,7 +560,15 @@ func RefreshAll(ctx context.Context, refs []ProviderRef, st *Store, logf func(fo
 	live := map[string]bool{}
 
 	for _, ref := range refs {
+		// live = **全部**枚举到的 provider（Prune 只删"配置真被删了"的）。
 		live[ref.Name] = true
+
+		// 不活跃 → 本轮不刷（但条目保留，下次活跃时继续用）。
+		if active != nil && !active[ref.Name] {
+			res.Skipped++
+			continue
+		}
+
 		ad, endpoint, err := ref.Resolve()
 		if err != nil {
 			if !errors.Is(err, ErrNoQuotaInterface) {

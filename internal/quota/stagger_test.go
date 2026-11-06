@@ -135,7 +135,7 @@ func TestRefreshAll_MinGapBetweenRequests(t *testing.T) {
 		})
 	}
 	st := NewStore(t.TempDir())
-	if err := RefreshAll(context.Background(), refs, st, nil); err != nil {
+	if err := RefreshAll(context.Background(), refs, st, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -181,7 +181,7 @@ func TestRefreshAll_RateLimitBacksOff(t *testing.T) {
 	st := NewStore(t.TempDir())
 
 	// 第 1 轮：被限流 → 退避
-	if err := RefreshAll(context.Background(), refs, st, nil); err != nil {
+	if err := RefreshAll(context.Background(), refs, st, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	mu.Lock()
@@ -210,7 +210,7 @@ func TestRefreshAll_RateLimitBacksOff(t *testing.T) {
 	}
 
 	// 第 2 轮：退避中 → **不发请求**
-	if err := RefreshAll(context.Background(), refs, st, nil); err != nil {
+	if err := RefreshAll(context.Background(), refs, st, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	mu.Lock()
@@ -225,7 +225,7 @@ func TestRefreshAll_RateLimitBacksOff(t *testing.T) {
 	if err := st.Save(f2); err != nil {
 		t.Fatal(err)
 	}
-	if err := RefreshAll(context.Background(), refs, st, nil); err != nil {
+	if err := RefreshAll(context.Background(), refs, st, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	mu.Lock()
@@ -247,7 +247,7 @@ func TestRefreshAll_RateLimitBacksOff(t *testing.T) {
 	if err := st.Save(f4); err != nil {
 		t.Fatal(err)
 	}
-	if err := RefreshAll(context.Background(), refs, st, nil); err != nil {
+	if err := RefreshAll(context.Background(), refs, st, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	f5, _ := st.Load()
@@ -285,7 +285,7 @@ func TestRefreshAll_RateLimitKeepsOldQuota(t *testing.T) {
 	}
 	before := f.Entries["p1"]
 
-	if err := RefreshAll(context.Background(), refs, st, nil); err != nil {
+	if err := RefreshAll(context.Background(), refs, st, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	after, err := st.Load()
@@ -431,7 +431,7 @@ func TestRefreshAll_SkipsWhenNextAtInFuture(t *testing.T) {
 	if err := st.Save(f); err != nil {
 		t.Fatal(err)
 	}
-	if err := RefreshAll(context.Background(), refs, st, nil); err != nil {
+	if err := RefreshAll(context.Background(), refs, st, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	mu.Lock()
@@ -475,7 +475,7 @@ func TestRefreshAll_BackoffIsPerPool(t *testing.T) {
 
 	// 用 key-A → 池 A → 被限流 → 池 A 进入退避
 	refA := ProviderRef{Name: "p1", Config: &Config{Source: "newapi", Endpoint: srv.URL}, APIKey: "key-A"}
-	if err := RefreshAll(context.Background(), []ProviderRef{refA}, st, nil); err != nil {
+	if err := RefreshAll(context.Background(), []ProviderRef{refA}, st, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	mu.Lock()
@@ -489,7 +489,7 @@ func TestRefreshAll_BackoffIsPerPool(t *testing.T) {
 
 	// 同一个 provider 名，但换成 key-B（= 池 B）→ 不该被池 A 的退避拦住
 	refB := ProviderRef{Name: "p1", Config: &Config{Source: "newapi", Endpoint: srv.URL}, APIKey: "key-B"}
-	if err := RefreshAll(context.Background(), []ProviderRef{refB}, st, nil); err != nil {
+	if err := RefreshAll(context.Background(), []ProviderRef{refB}, st, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	mu.Lock()
@@ -533,5 +533,109 @@ func TestStore_MigratesLegacyBackoff(t *testing.T) {
 	e, _ := f.EntryFor("p1")
 	if e.RetryAfter != 0 || e.BackoffSeconds != 0 {
 		t.Errorf("条目里的旧退避字段应被清掉: %+v", e)
+	}
+}
+
+// TestRefreshAll_InactiveProviderKeepsEntry 断言：**不活跃的 provider 本轮不刷，
+// 但它的条目保留**（"这轮没轮到它" ≠ "provider 被删了"）。
+//
+// 这是真机验证时抓到的 bug：Prune 的 live 集合误用了"过滤后的 refs" →
+// 不活跃的 provider 的额度条目被当成残留清掉 → 用户 `ccl quota --provider X`
+// 变成"没有记录"。
+func TestRefreshAll_InactiveProviderKeepsEntry(t *testing.T) {
+	var mu sync.Mutex
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		mu.Unlock()
+		fmt.Fprint(w, `{"code":true,"data":{"total_granted":1,"total_used":0,"total_available":1}}`)
+	}))
+	defer srv.Close()
+
+	refs := []ProviderRef{
+		{Name: "active", Config: &Config{Source: "newapi", Endpoint: srv.URL}, APIKey: "sk-a"},
+		{Name: "idle", Config: &Config{Source: "newapi", Endpoint: srv.URL}, APIKey: "sk-b"},
+	}
+	st := NewStore(t.TempDir())
+	// 先给两个都造条目（idle 的 fetched_at 很旧 → 若被刷就会被更新）
+	if err := st.Update("idle", "newapi", "pool-b", []Dimension{{ID: "quota", Kind: KindQuota}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Update("active", "newapi", "pool-a", []Dimension{{ID: "quota", Kind: KindQuota}}); err != nil {
+		t.Fatal(err)
+	}
+	// 两个条目的 fetched_at 都改旧 → 唯一的变量是"活跃与否"
+	f0, _ := st.Load()
+	for _, n := range []string{"idle", "active"} {
+		e := f0.Entries[n]
+		e.FetchedAt = time.Now().Add(-10 * time.Minute).Unix()
+		f0.Entries[n] = e
+	}
+	if err := st.Save(f0); err != nil {
+		t.Fatal(err)
+	}
+
+	// 只有 active 在活跃名单里
+	active := map[string]bool{"active": true}
+	if err := RefreshAll(context.Background(), refs, st, nil, active); err != nil {
+		t.Fatal(err)
+	}
+
+	mu.Lock()
+	got := requests
+	mu.Unlock()
+	if got != 1 {
+		t.Errorf("只该查活跃的那个, requests=%d", got)
+	}
+
+	f, err := st.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := f.EntryFor("idle"); !ok {
+		t.Error("不活跃的 provider 的条目不该被删（这轮没刷它 ≠ provider 被删了）")
+	}
+	if _, ok := f.EntryFor("active"); !ok {
+		t.Error("活跃的 provider 应有条目")
+	}
+}
+
+// TestRefreshAll_NoneActiveKeepsAllEntries 断言：一个都不活跃 → 一个请求都不发，
+// 但**所有条目都保留**。
+func TestRefreshAll_NoneActiveKeepsAllEntries(t *testing.T) {
+	var mu sync.Mutex
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		mu.Unlock()
+		fmt.Fprint(w, `{"code":true,"data":{}}`)
+	}))
+	defer srv.Close()
+
+	refs := []ProviderRef{
+		{Name: "p1", Config: &Config{Source: "newapi", Endpoint: srv.URL}, APIKey: "sk-1"},
+		{Name: "p2", Config: &Config{Source: "newapi", Endpoint: srv.URL}, APIKey: "sk-2"},
+	}
+	st := NewStore(t.TempDir())
+	for _, n := range []string{"p1", "p2"} {
+		if err := st.Update(n, "newapi", "pool-"+n, []Dimension{{ID: "quota", Kind: KindQuota}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := RefreshAll(context.Background(), refs, st, nil, map[string]bool{}); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	got := requests
+	mu.Unlock()
+	if got != 0 {
+		t.Errorf("没人活跃时不该发请求, requests=%d", got)
+	}
+	f, _ := st.Load()
+	if len(f.Entries) != 2 {
+		t.Errorf("条目不该被删: %+v", f.Entries)
 	}
 }

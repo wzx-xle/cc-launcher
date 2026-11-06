@@ -35,6 +35,12 @@ type Server struct {
 	fwd   *Forwarder
 	srv   *http.Server
 
+	// activity 跟踪各 provider 最近的 OTel 活动（谁在用）。
+	//
+	// 额度刷新靠它决定"查哪些 provider"——额度数据的唯一消费者是状态栏，
+	// 而状态栏只显示当前会话那个 provider 的额度（见 activity.go 的注释）。
+	activity *Activity
+
 	shuttingDown atomic.Bool // SIGTERM 时置 true → metrics handler 返回 503
 }
 
@@ -59,9 +65,10 @@ func NewServer(opts ServerOptions) *Server {
 		addr = ":4318"
 	}
 	s := &Server{
-		addr:  addr,
-		store: opts.Store,
-		fwd:   opts.Forward,
+		addr:     addr,
+		store:    opts.Store,
+		fwd:      opts.Forward,
+		activity: NewActivity(),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/metrics", s.handleMetrics)
@@ -159,6 +166,9 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 
 	// 写 SQLite（异步；不阻塞 HTTP 响应）
 	for _, sess := range result.Sessions {
+		// 记活跃：这条 metrics 是哪个 provider 推来的（ccl 注入的
+		// ccl.provider resource attribute）→ 额度刷新据此决定查谁。
+		s.activity.Mark(sess.Provider, time.Now())
 		if err := s.store.WriteSession(sess); err != nil {
 			log.Printf("collector: WriteSession 失败: %v", err)
 		}
@@ -196,6 +206,12 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(respBytes)
 }
+
+// Activity 返回 provider 活跃度跟踪器。
+//
+// 供 cmd 层（ccl serve 的额度刷新）判断"哪些 provider 最近有人在用"——
+// 不活跃的 provider 不需要查额度（省请求 + 不触发厂商限流）。
+func (s *Server) Activity() *Activity { return s.activity }
 
 // handleAckOnly 处理 logs/traces：仅回 200，不解析、不持久、不转发。
 //

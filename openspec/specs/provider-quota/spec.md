@@ -237,7 +237,7 @@ ccl MUST refresh the quota of the providers that declare a quota interface, on a
 
 The refresh interval MUST default to 60 seconds, and a provider MUST be able to override it through its `quota` configuration.
 
-The daemon MUST refresh every provider that declares a quota interface, and MUST NOT refresh a provider that declares none. Two providers that resolve to the same quota endpoint and the same API key MUST be queried once for that cycle, and the result MUST be recorded for both.
+The daemon MUST refresh every provider that declares a quota interface **and that has reported activity recently**, and MUST NOT refresh a provider that declares none. A provider counts as recently active when it has reported activity within the recent window, and the daemon MUST NOT query a provider that falls outside that window, because the quota of a provider that nobody is using is not worth the request. Two providers that resolve to the same quota endpoint and the same API key MUST be queried once for that cycle, and the result MUST be recorded for both.
 
 The daemon MUST NOT query a provider whose recorded quota is younger than that provider's refresh interval. The age of a recorded quota MUST be derived from the time recorded in the local data file rather than from a time kept only in the daemon's memory, so that a quota recorded by an on-demand refresh counts as a recent refresh.
 
@@ -264,6 +264,14 @@ The wait MUST be recorded against the quota pool rather than against the provide
 #### Scenario: providers sharing a key are queried once
 - **WHEN** two providers resolve to the same quota endpoint and the same API key
 - **THEN** ccl queries the quota interface once for that cycle and records the result for both providers
+
+#### Scenario: a provider that was not active recently is not queried
+- **WHEN** a provider declares a quota interface but has not reported activity within the recent window
+- **THEN** ccl does not query the quota interface for that provider
+
+#### Scenario: a provider that is active is queried
+- **WHEN** a provider has reported activity within the recent window
+- **THEN** ccl queries the quota interface for that provider
 
 #### Scenario: a recently recorded quota is not queried again
 - **WHEN** the recorded quota of a provider was fetched less than that provider's refresh interval ago

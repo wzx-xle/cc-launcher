@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"cc-launcher/internal/collector"
 	"cc-launcher/internal/quota"
 )
 
@@ -540,5 +541,28 @@ func TestRunQuota_StaleTolerance(t *testing.T) {
 	}
 	if !out2.Stale {
 		t.Errorf("age 70 秒应标 stale")
+	}
+}
+
+// TestActiveProviders 断言：serve 只刷新**最近有活动的** provider。
+func TestActiveProviders(t *testing.T) {
+	act := collector.NewActivity()
+	act.Mark("p1", time.Now())
+
+	refs := []quota.ProviderRef{{Name: "p1"}, {Name: "p2"}, {Name: "p3"}}
+	out := activeProviders(refs, act)
+	if len(out) != 1 || !out["p1"] {
+		t.Errorf("只该把活跃的 p1 放进名单, got %+v", out)
+	}
+
+	// 一个都不活跃 → 名单为空（一个请求都不发）
+	act2 := collector.NewActivity()
+	if out := activeProviders(refs, act2); len(out) != 0 {
+		t.Errorf("没人活跃时不该查任何 provider, got %+v", out)
+	}
+
+	// 拿不到活动信息 → nil（= 不过滤，宁可多查不要不查）
+	if out := activeProviders(refs, nil); out != nil {
+		t.Errorf("activity 为 nil 时应返回 nil（不过滤）, got %+v", out)
 	}
 }

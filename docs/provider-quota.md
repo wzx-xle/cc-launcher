@@ -125,6 +125,10 @@ ccl quota --refresh --json
 | `unlimited` | 无限额度（此时无 `used_percentage`） |
 | `raw` | 厂商原始字段（排查用） |
 
+**查一个"最近没用过"的 provider**：`ccl quota --provider X` 是**纯本地读**，
+而 serve 只刷新最近有活动的 provider → X 没有条目 → **退出码 1、没有输出**。
+想立刻拿到 X 的额度，用 `ccl quota --provider X --refresh`（联网查一次并写回）。
+
 ### 三种 kind
 
 | kind | 语义 | 典型 | 状态栏画法 |
@@ -274,6 +278,17 @@ provider 的 `ANTHROPIC_BASE_URL` 是 `http://` 时，ccl 会给一条**非阻�
 
 **`ccl serve`**（常驻，ccl 自动拉起，永不自动 idle 退出）：
 
+- **只刷新"最近有活动"的 provider** —— 活动信号取自 **OTel**：ccl 启动 Claude Code
+  时把 provider 名注入了 `OTEL_RESOURCE_ATTRIBUTES` 的 `ccl.provider`，collector
+  解析每条 metrics 时就知道是哪个 provider → serve 只查**最近 5 分钟内有 OTel
+  活动**的 provider（5 分钟 = 4 个 OTel 周期；实测 Claude Code 每 60 秒推一次
+  metrics）
+  - **为什么**：额度数据的唯一消费者是状态栏，而状态栏显示的是**当前会话那个
+    provider** 的额度 → 其余 provider 的额度数据**当前根本没人看**。查它们 =
+    纯浪费 + 触发厂商的速率限制（实测：8 个 provider 的机器一轮就 429）
+  - 用户离开超过 5 分钟 → 该 provider 停止被刷新 → 数据变旧 → 状态栏标 stale
+    （**可见**，不是静默失效）。"没人用就别查"正是这个意思
+  - `ccl quota --provider X --refresh` **不受此限制**（用户显式点名 → 照查）
 - **启动即刷一轮**（不等一个周期）→ 跑完一次 `ccl` 就能读到数据
 - ticker 周期 = 所有待刷 provider 的 `refreshInterval` 的**最小值**；每轮遍历
   provider，**距上次刷新不足其自身周期的跳过这一轮**
