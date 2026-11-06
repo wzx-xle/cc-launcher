@@ -301,6 +301,29 @@ bump_scoop() {
 
     local repo="wzx-xle/cc-launcher"
     local base="https://github.com/${repo}/releases/download/${version}"
+
+    # pre_uninstall 钩子（scoop 卸载前先停 daemon、杀掉占用 app 目录的进程）。
+    #
+    # **它必须在模板里**：Windows 上 scoop 拒绝删除"目录里有进程占用"的 app，
+    # 而 cc-launcher.exe 常驻（serve daemon）——不先停就会卸载失败。这个钩子
+    # 2026-10-21 加进 bucket 文件后一直靠**人工保留**：模板漏了它 → 每次拿
+    # 脚本输出直接覆盖 bucket 文件，都会静默丢掉这个钩子（2026-11-06 bump
+    # v0.20.0 时发现）。
+    #
+    # 用 quoted heredoc（'PRE_EOF'）：内容里的 `$d` / `$_` 不能被 bash 展开。
+    # 变量内容在主 heredoc 里只被展开一次，不会二次展开。
+    local pre_uninstall
+    pre_uninstall=$(cat <<'PRE_EOF'
+    "pre_uninstall": [
+        "Write-Host '[cc-launcher] scoop uninstall hook: stopping processes that hold the app directory'",
+        "try { ccl serve --stop } catch { }",
+        "$d = $null; try { $d = (appdir 'cc-launcher') } catch { }",
+        "if ($d) { Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -like \"$d*\" } | Stop-Process -Force -ErrorAction SilentlyContinue }",
+        "Start-Sleep -Milliseconds 500"
+    ]
+PRE_EOF
+    )
+
     cat <<EOF
 {
     "version": "${version#v}",
@@ -313,7 +336,8 @@ bump_scoop() {
             "hash": "${release_hash}",
             "bin": ["ccl.cmd"]
         }
-    }
+    },
+${pre_uninstall}
 }
 EOF
 }

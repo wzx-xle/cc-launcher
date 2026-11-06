@@ -182,7 +182,14 @@ $manifest = @"
             "hash": "$hash",
             "bin": ["ccl.cmd"]
         }
-    }
+    },
+    "pre_uninstall": [
+        "Write-Host '[cc-launcher] scoop uninstall hook: stopping processes that hold the app directory'",
+        "try { ccl serve --stop } catch { }",
+        "`$d = `$null; try { `$d = (appdir 'cc-launcher') } catch { }",
+        "if (`$d) { Get-Process -ErrorAction SilentlyContinue | Where-Object { `$_.Path -like \"`$d*\" } | Stop-Process -Force -ErrorAction SilentlyContinue }",
+        "Start-Sleep -Milliseconds 500"
+    ]
 }
 "@
 
