@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-11-06 — provider-quota
+
+### Features
+- **能查到各家 provider 的额度了**：Claude Code 状态栏上那两个额度槽位（`5h` / `7d`）的数据来自 Claude Code 自己维护的 `rate_limits`——那是 **Anthropic 官方**的限流。走第三方模型时它拿不到数据，槽位就一直是 `--`，用户看不到配额还剩多少，只能等 429 报错才发现
+  - 新增 **`ccl quota`** 子命令：显示 provider 的额度。**默认只读本地数据文件，一次网络都不发**（数据由 `ccl serve` 周期刷新写进 `~/.cc-launcher/quota.json`）
+  - 输出是**额度维度列表**（`dimensions[]`），不是一个固定形状——各家额度形态完全不同：MiniMax 是 5h/7d 窗口、DeepSeek 是只有剩余额的余额（**没有分母，算不出百分比**）、讯飞那种 New API 部署是令牌总额度。固定成"5 小时 + 7 天"两个槽位**表达不了这个多样性**（只有月额度的厂商塞进去就是标签说谎）
+  - 三种 `kind`：`window`（有周期 + 有分母，画条形图）、`quota`（无周期 + 有分母，条形图 + 绝对值）、`balance`（无分母，**只显示数字**）
+  - **退出码分级**：`0` 读到额度 / `1` 没有记录（serve 没跑、还没刷新过）/ `2` 该 provider 没有额度接口（**纯离线可判**——读 provider 配置就知道）。消费方据此区分"这厂商没额度"和"数据还没准备好"
+  - provider 三级回落：显式 `--provider` > 环境变量 `CCL_PROVIDER` > `state.json` 的 active provider
+  - **`ccl quota --refresh`**：联网查一次 → 写回数据文件 → 照常输出（**不需要 serve 在跑**——serve 被 `ccl serve --stop` 关掉时的逃生舱）
+- **额度刷新由 `ccl serve` 负责**（常驻进程，ccl 自动拉起、永不自动 idle 退出）：默认 **60 秒**周期、per-provider 可配，**启动即刷一轮**（跑完一次 `ccl` 就能读到数据）。**刷新频率与调用频率解耦**——状态栏命令实测生成过程中约每 300ms 调一次，读取侧不能有网络
+  - 额度池按 **`(端点, key)` 去重**：额度是按 key 分的不是按 provider 名分的，共用一把 key 的 provider（`minimax-m3` 与 `minimax-m3.1-flash`）**一轮只发一次网络请求**，结果写进所有引用它的条目
+  - **刷新失败只进 serve 日志，不写数据文件** → 旧条目保留、`fetched_at` 越来越旧 → **stale 自动生效**。额度不会因为一次网络抖动就变没（状态栏从数字跳回 `--` 会让人以为额度用光了）
+  - 周期判定从**数据文件里的 `fetched_at`** 读（不是 daemon 的内存 map）→ `--refresh` 与 serve **天然互斥**，不需要文件锁
+- **内置三个 adapter**：`minimax`（5h/7d 窗口）、`deepseek`（余额）、`newapi`（New API / one-api 系部署的令牌额度）。厂商差异（识别规则、端点推导、响应解析、成败判据）全部关在 adapter 里——三家的失败协议零交集（MiniMax 错误也返回 HTTP 200，判据在 body；DeepSeek 看 HTTP 状态码且错误体**可能是纯文本**；New API 看 body 的 `code`）
+- **provider 配置新增可选的 `quota` 块**：`source`（选 adapter）/ `endpoint`（覆盖自动推导）/ `quotaPerUnit`（额度点换算）/ `displayUnit`（显示单位）/ `refreshInterval`（刷新周期，秒，缺省 60）。它是 **ccl 自己的元数据键**（与 `note` / `order` 同等），**不交付**给 Claude Code
+- **额度查询走 provider 自己的网络路径**：`HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` 从**该 provider 的 `env` 块**取（不是 daemon 进程的环境）——provider 的 env 是经 `--settings` 交付给 Claude Code 的，daemon 从 ccl fork 继承的是用户 shell 的环境。**一个"必须走代理才能访问"的 provider，Claude Code 能用而额度查询会超时** → 两者必须走同一条路
+
+### Fixes
+- **明文 base_url 会给警告了**：provider 的 `ANTHROPIC_BASE_URL` 是 `http://` 时提示"API key 会明文传输"（**非阻断**）。ccl **不自动改写**用户的 base_url——那是静默改用户配置语义，ccl 只提示不替用户做主
+
+### Tests
+- `internal/quota`：`UsedPct()` 的各种边界（无分母 / 零分母 / 无限额度 / 有分母）与 label 的派生规则；三个 adapter 的端点推导与响应解析（正常 / 失败 / 边界：MiniMax 的 HTTP 200 错误体与 `general` 条目优先、DeepSeek 的纯文本错误体与 `is_available:false`、New API 的 `code:false` 与 401 `error` 对象）；重定向跟随且保留 `Authorization`；尾斜杠规范化；额度池去重（共用 key 只查一次）；周期判定（未到周期跳过、且 `fetched_at` 读的是**文件**不是内存 map）；数据文件的原子写（并发读不到半个文件）/ 0600 / 不含明文 key / 残留条目清理；`NO_PROXY` 命中直连、未命中走代理、小写形式同样生效
+- `cmd/cc-launcher`：`quota` 块能被读到且**不出现在透传键里**、没配时为空、`refreshInterval` 缺省 60；明文 base_url 产生 warning 而 https 不产生；`ccl quota` 不带 `--refresh` **一次网络都不发**（strace 实测零 `connect`）、`--refresh` 失败不覆盖旧条目、无额度接口时退出码 2 且**不联网**
+- 真机（2026-11-06，本机 6 个 provider）：`minimax-m3` 解析出已用 47% / 窗口 18000s / 周窗口 604800s；`minimax-m3` 与 `minimax-m3.1-flash` 共用 pool（哈希相同、`fetched_at` 相同）→ 一轮 3 次请求而非 6 次；`deepseek-v4` 解析出 CNY 余额且**无分母无百分比**；`iflytek-jlcao3` 的 `total_granted - total_used == total_available` 代数自洽、单位换算 ÷500000、端点无双斜杠；`claude-official` 退出码 2
+- 真机 serve：启动即有第一份数据（不等 60 秒）、60 秒后自动再刷一轮（`fetched_at` 变化）；厂商接口故障时旧条目保留 + `stale: true` + 失败原因进日志，其余 provider 不受影响
+- 真机端到端：pty 驱动真 Claude Code → 状态栏第二行从 `5h: -- | 7d: --` 变成 `5h: ██████░░░░ 55% -> 18:45 | 7d: ████░░░░░░ 38% -> 11/10 23:12`
+
+### OpenSpec
+- `provider-quota`（归档：新增 `openspec/specs/provider-quota`，修改 `daemon-lifecycle` 与 `provider-settings-passthrough`）
+- 新增 `docs/provider-quota.md`：`ccl quota` 的用法与输出契约（维度列表 + 三种 kind + stale 语义）、数据文件由 serve 维护、支持的 adapter 与各自的 `source` 名、provider 配置里 `quota` 块的写法、**外部行为实测结论**（厂商改了字段怎么办）
+- `provider-settings-passthrough` 的排除清单从 `note` / `order` 扩到 `note` / `order` / `quota`
+
+### Compatibility
+- provider 文件格式**不变**：不加新键也能用（MiniMax / DeepSeek 按 base_url 的 host 自动识别），`quota` 块整体可选；回滚 ccl 后 provider 配置里的 `quota` 块只是被忽略（无害，无需清理）
+- `ccl quota` 是**新增子命令**，不影响既有子命令；`ccl --help` 与 shell 补全（bash / zsh / powershell）同步补上
+- **状态栏侧两条分支不合并**：ccl quota 退出码 0 → 完全用 quota 的维度清单；非 0 → 保持今天 Claude Code 的 `rate_limits` 两个固定槽位（缺就显示 `--`）→ **Anthropic 官方 provider 的输出一个字节都不变**
+- 状态栏脚本侧的 `execSync` timeout 设 **250ms**（Claude Code 状态栏有 300ms 去抖窗口且每次执行前 abort 上一次——超时 10 分钟不是瓶颈，300ms 窗口才是），任何失败**静默**回落
+
 ## [0.19.0] - 2026-11-05 — provider-name-in-statusline
 
 ### Features
