@@ -22,6 +22,6 @@
 
 - [x] 4.1 真机：本机数据文件升级后（老格式 → 新格式）退避不丢、stale 不再误报
 - [x] 4.2 回归：`go test ./...` + `go test -tags smoke ./...`
-- [ ] 4.3 `CHANGELOG.md` 加 `0.20.2` 段（按既有格式，分类用 Fixes）
-- [ ] 4.4 `openspec archive quota-stale-and-backoff-pool`
-- [ ] 4.5 打 tag `v0.20.2` + 推送（**本次不发 scoop**，用户明确要求）
+- [x] 4.3 `CHANGELOG.md` 加 `0.20.2` 段（按既有格式，分类用 Fixes）
+- [x] 4.4 `openspec archive quota-stale-and-backoff-pool`
+- [x] 4.5 打 tag `v0.20.2` + 推送（**本次不发 scoop**，用户明确要求）
