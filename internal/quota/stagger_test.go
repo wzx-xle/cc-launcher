@@ -639,3 +639,49 @@ func TestRefreshAll_NoneActiveKeepsAllEntries(t *testing.T) {
 		t.Errorf("条目不该被删: %+v", f.Entries)
 	}
 }
+
+// TestRefreshOne_WritesWholePool 断言：手动刷新一个 provider 时，
+// **同池的其他 provider 也一起更新**（同一把 key 的数据必须同源）。
+func TestRefreshOne_WritesWholePool(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"code":true,"data":{"total_granted":100,"total_used":1,"total_available":99}}`)
+	}))
+	defer srv.Close()
+
+	st := NewStore(t.TempDir())
+	// 两个 provider 共用同一把 key → 同一个池
+	refA := ProviderRef{Name: "a", Config: &Config{Source: "newapi", Endpoint: srv.URL}, APIKey: "same-key"}
+	refB := ProviderRef{Name: "b", Config: &Config{Source: "newapi", Endpoint: srv.URL}, APIKey: "same-key"}
+	pool := PoolID(srv.URL, "same-key")
+	for _, r := range []ProviderRef{refA, refB} {
+		if err := st.Update(r.Name, "newapi", pool, []Dimension{{ID: "quota", Kind: KindQuota}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if refA.APIKey != refB.APIKey {
+		t.Fatal("两个 provider 应共用同一把 key（同一池）")
+	}
+
+	if _, err := RefreshOne(context.Background(), refA, st); err != nil {
+		t.Fatal(err)
+	}
+
+	f, err := st.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ea, ok := f.EntryFor("a")
+	if !ok {
+		t.Fatal("a 应有条目")
+	}
+	eb, ok := f.EntryFor("b")
+	if !ok {
+		t.Fatal("b 应有条目")
+	}
+	if eb.FetchedAt != ea.FetchedAt {
+		t.Errorf("同池的两个 provider 应同时更新: a=%d b=%d", ea.FetchedAt, eb.FetchedAt)
+	}
+	if len(eb.Dimensions) != 1 {
+		t.Errorf("同池的 b 也该拿到新数据: %+v", eb.Dimensions)
+	}
+}

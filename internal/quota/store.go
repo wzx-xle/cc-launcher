@@ -250,6 +250,42 @@ func (s *Store) SetBackoff(pool string, retryAfter, seconds int64) error {
 	return s.Save(f)
 }
 
+// UpdatePoolEntries 把额度数据写给**所有引用该额度池的 provider**。
+//
+// **为什么必须一起写**：额度是按 key 分的，同一把 key 的多个 provider 引用的是
+// **同一个额度池** → 它们的数据必须同源。只写被点名的那个，会让两个 provider
+// 显示同一把 key 的不同时刻数据（手动刷新路径踩过：serve 那条路本来就是一起
+// 写的）。
+func (s *Store) UpdatePoolEntries(name, pool, source string, dims []Dimension, nextAt int64) error {
+	f, err := s.Load()
+	if err != nil {
+		f = &File{Version: quotaFileVersion, Entries: map[string]Entry{}}
+	}
+	now := time.Now().Unix()
+	for n, e := range f.Entries {
+		if n != name && e.Pool != pool {
+			continue
+		}
+		e.Source = source
+		e.Pool = pool
+		e.Dimensions = dims
+		e.NextAt = nextAt
+		e.FetchedAt = now
+		f.Entries[n] = e
+	}
+	// 被点名的那个即使还没有条目，也要写进去。
+	if _, ok := f.Entries[name]; !ok {
+		f.Entries[name] = Entry{
+			Source:     source,
+			Pool:       pool,
+			Dimensions: dims,
+			NextAt:     nextAt,
+			FetchedAt:  now,
+		}
+	}
+	return s.Save(f)
+}
+
 // ClearBackoff 清除某个额度池的退避状态（读-改-写）。
 //
 // 刷新成功时调用：退避状态不再随条目重建自动清零（它住在 File.Backoffs 里，

@@ -740,13 +740,9 @@ func RefreshOne(ctx context.Context, ref ProviderRef, st *Store) ([]Dimension, e
 	interval := ref.Config.Interval()
 	nextAt := nextRefreshAt(time.Now(), interval, 0, oldNext)
 
-	e := Entry{
-		Source:     ad.Name(),
-		Pool:       pool,
-		Dimensions: dims,
-		NextAt:     nextAt,
-	}
-	if err := st.UpdateEntry(ref.Name, e); err != nil {
+	// 写给**所有引用该池的 provider**（同池的数据必须同源——同一把 key 的两个
+	// provider 不能显示不同时刻的数据）。
+	if err := st.UpdatePoolEntries(ref.Name, pool, ad.Name(), dims, nextAt); err != nil {
 		return nil, err
 	}
 	// 成功 → 退避状态复位。
