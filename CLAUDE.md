@@ -28,7 +28,8 @@ Claude Code Launcher — 一个终端启动器，在启动 Claude Code 时提供
    - **额度接口是外部行为**：厂商改了字段/端点 → 解析失败必须**降级而不是崩**（serve 保留旧条目 → `fetched_at` 变旧 → stale 自动生效；读取侧不受影响；绝不允许影响 Claude Code 启动）。实测结论见 `docs/provider-quota.md`——改 adapter 前先看它
    - 额度输出是**维度列表**（`window`/`quota`/`balance` 三种 kind），不是两个固定槽位：`label`/`unit` 必须纯 ASCII 且**永远不取自厂商响应的原始字符串**
    - **刷新不得"同一时刻打一批"**（quota-refresh-stagger change）：额度按 key 分，N 个 provider = N 个额度池 = N 个请求。同一刷新周期的一批池必须**各占一个固定相位**（周期长度不变，只是时刻错开），一轮内相邻请求还要留最小间隔；**serve 的 ticker 周期必须细于相位分辨率**（否则窗口边界一次性全到期 → 错开白做）
-   - **被厂商限流（429）必须退避**，不能每轮硬打：退避时长指数增长（1min→2min→…→封顶 30min）且**写进数据文件**（跨 serve / `--refresh` / 重启都生效）；退避期间条目保留（stale 自动生效），`--refresh` 也要遵守退避
+   - **只刷新"最近有活动"的 provider**（quota-active-providers-only change）：额度数据的唯一消费者是状态栏，而状态栏显示的是**当前会话那个 provider** 的额度 → 其余 provider 的额度数据**当前没人看**，查它们 = 纯浪费 + 触发厂商限流。活动信号取自 **OTel**（`ccl.provider` resource attribute → collector 解析 metrics 时就知道是哪个 provider；实测 Claude Code 每 60 秒推一次 → 窗口 5 分钟）。**"本轮不刷它" ≠ "provider 被删了"**：`Prune` 的 live 集合必须用**全部** provider，不能用过滤后的
+   - **被厂商限流（429）必须退避**，不能每轮硬打：退避时长指数增长（1min→2min→…→封顶 30min）且**写进数据文件**（跨 serve / `--refresh` / 重启都生效）；退避期间条目保留（stale 自动生效），`--refresh` 也要遵守退避。退避**按额度池**记录（限流针对 key，provider 换 key = 换池 → 不该被老退避拦住）
 8. **改函数签名 / 删函数 / 跨包重构前，用 LSP `findReferences` 确认影响面**，不用 `grep -rn`
    - grep 是文本匹配，会把同名方法一并算进来：改 `provider.Manager.Get` 时，`grep "\.Get("` 会把 `internal/web/server.go` 里 7 处 `url.Values.Get` 甩出来，误判成要动一片无关代码；LSP 是符号级匹配，能精确区分
    - LSP 工具已启用（`ENABLE_LSP_TOOL=1` + `gopls-lsp` 插件），但它是 deferred 的——先用 `ToolSearch` 加载 schema 再调
