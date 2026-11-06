@@ -20,6 +20,6 @@
 
 - [x] 4.1 真机：停掉部分 provider 的活动后，观察它们不再被查；用起来后重新被查
 - [x] 4.2 回归：`go test ./...` + `go test -tags smoke ./...`
-- [ ] 4.3 `CHANGELOG.md` 加 `0.20.3` 段（patch：起因是修 429，用户不需新动作；但"刷新的对象变少"是可见的行为变化，版本号若有异议按用户定）
-- [ ] 4.4 `openspec archive quota-active-providers-only`
-- [ ] 4.5 打 tag + 推送（scoop 是否跟发由用户定）
+- [x] 4.3 `CHANGELOG.md` 加 `0.20.3` 段（patch：起因是修 429，用户不需新动作；但"刷新的对象变少"是可见的行为变化，版本号若有异议按用户定）
+- [x] 4.4 `openspec archive quota-active-providers-only`
+- [x] 4.5 打 tag + 推送（scoop 是否跟发由用户定）
