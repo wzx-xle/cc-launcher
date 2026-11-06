@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.20.3] - 2026-11-06 — quota-active-providers-only
+
+### Fixes
+- **serve 只刷新"最近有活动"的 provider，其余的一个请求都不发**：额度数据的唯一消费者是状态栏，而状态栏显示的是**当前会话那个 provider** 的额度 → 其余 provider 的额度数据**当前根本没人看**。但原先 serve 是**全量刷新**的，一轮把 8 个 provider 都查一遍 → **为了没人看的 7 份数据把厂商的额度接口打到 429**（实测，Windows 机器）
+  - **活动信号取自 OTel**（零新增状态）：ccl 启动 Claude Code 时把 provider 名注入了 `OTEL_RESOURCE_ATTRIBUTES` 的 `ccl.provider`，Claude Code 的 OTel SDK 把它当 resource attribute 随 metrics 推给 `:4318` → **collector 解析每条 metrics 时就知道是哪个 provider**（`internal/collector/parser.go` 里已经在读这个属性）
+  - serve 只查**最近 5 分钟内有 OTel 活动**的 provider。窗口取 5 分钟的依据：实测 Claude Code **每 60 秒**推一次 metrics（本机 telemetry.db：相邻间隔 60000/60001 秒）→ 窗口必须 > 60 秒，否则两次推送之间会被误判成"没人用"；5 分钟 = 4 个周期，容忍 3 次连续丢失
+  - **用户离开超过 5 分钟 → 该 provider 停止被刷新 → 数据变旧 → 状态栏标 stale**（可见，不是静默失效）。"没人用就别查"正是这个意思
+  - **`ccl quota --provider X --refresh` 不受此限制**：用户显式点名 → 无论 X 最近有没有活动都照查（`--refresh` 是 serve 没跑时的逃生舱）
+
+### Fixes（实现过程中抓到的 bug）
+- **"这轮没刷它"被当成"provider 被删了"**：刷新前按活跃度过滤 provider 列表，而 `Prune` 的 live 集合恰好取自这个过滤后的列表 → 不活跃的 provider 的额度条目被当残留清掉 → `ccl quota --provider X` 变成"没有记录"。已把「全部 provider」（Prune 的依据）与「本轮要刷的」（活跃名单）**拆成两个集合**
+
+### Tests
+- `internal/collector`：`Activity` 的标记与窗口判定（刚标记的算活跃、超窗口的不算、空 provider 名不记、并发安全）
+- `internal/quota`：**不活跃的 provider 本轮不刷，但它的条目必须保留**（"这轮没轮到它" ≠ "provider 被删了"——真机验证时抓到的 bug）；一个都不活跃时零请求且所有条目保留
+- `cmd/cc-launcher`：活跃名单的生成（只有活跃的进名单、没人活跃时名单为空、拿不到活动信息时**不过滤**）
+- 真机（2026-11-06，本机 8 个 provider、其中仅 1 个有 OTel 活动）：重启 serve 后**只有活跃的那个被刷新**（`fetched_at` 变化），其余 5 个 `fetched_at` 不动（一个请求都没发），且 6 个条目**全部保留**
+
+### OpenSpec
+- `quota-active-providers-only`（归档：修改 `openspec/specs/provider-quota` 与 `openspec/specs/daemon-lifecycle`——刷新的对象改为"最近有活动的 provider"）
+- `docs/provider-quota.md`：说明"只刷新最近有活动的 provider"（活动信号 = OTel、窗口 5 分钟）
+
+### Compatibility
+- **可见的行为变化**：不活跃的 provider（5 分钟无 OTel 活动）不再被刷新 → `ccl quota --provider X` 对它返回**退出码 1、没有输出**（之前有数据）。想立刻拿到它的额度用 `ccl quota --provider X --refresh`
+- 不改任何数据文件格式；不改 `state.json`；`ccl quota` 的输出契约不变（维度列表 + 三种 kind + stale 语义都没动）
+- **serve 重启后活跃度清空** → 要等下一次 OTel（≤60 秒）才恢复 → 期间不查任何 provider（保守；额度数据文件里的旧条目还在，状态栏显示旧值 + stale）
+- Claude Code 启动的前 ~60 秒状态栏可能还没额度数据（要等第一条 OTel + 一个刷新周期）→ 回落 Claude Code 的 `rate_limits`（显示 `--`），**不影响启动**
+
 ## [0.20.2] - 2026-11-06 — quota-stale-and-backoff-pool
 
 ### Fixes
