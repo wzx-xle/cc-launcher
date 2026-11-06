@@ -7,18 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.21.0] - 2026-11-06 — quota-refresh-stagger
+## [0.20.1] - 2026-11-06 — quota-refresh-stagger
 
-### Features
-- **多 provider 的额度刷新不再"挤在一起"**：额度是**按 key 分**的——8 个 provider 用 8 把不同的 key 就是 8 个额度池，一轮必然 8 个请求。它们若同时打出去，厂商侧的速率限制直接返回 **429**，而且**每一轮都打** → 8 个 provider 的额度全部变 stale，额度功能实际瘫掉（实测：8 个 iflytek provider，`ccl serve` 起来第一轮就 429）
+### Fixes
+- **多 provider 的额度刷新不再撞厂商限流**：额度是**按 key 分**的——8 个 provider 用 8 把不同的 key 就是 8 个额度池，一轮必然 8 个请求。v0.20.0 里它们**同时打出去**，厂商侧的速率限制直接返回 **429**，而且**每一轮都打** → 8 个 provider 的额度全部变 stale，额度功能实际瘫掉（实测：8 个 iflytek provider，`ccl serve` 起来第一轮就 429）
   - **相位错开**：每个额度池在自己的刷新周期内占一个**固定相位**，相位由"同周期的一批池"均分（8 个 → 周期内每 7.5 秒一个）。**刷新周期长度不变**——刷新时刻 = 周期网格点 + 相位，相邻两次恰好差一个 `refreshInterval`（配 60 秒就是 60 秒，不是 1-2 倍）
   - 相位分配一次后**永久保持**（记在数据文件的 `next_at` 里，用 `next_at += interval` **递推**，不用"now + interval"重算——后者会把刷新耗时累积进周期、相位还会漂）。**serve 重启也保持**：重启后只有"相位已到"的池会被请求，不会一次性打一批
   - **轮内最小间隔**：首轮（还没分配相位）时请求仍密集 → 相邻两个请求之间强制间隔，缺省 500ms，可按 provider 配 `quota.minRequestGapMs`
   - **429 指数退避**：命中限流 → 自动把该 provider 的刷新间隔拉长（1min → 2min → 4min … 封顶 30min）。厂商给了 `Retry-After` 响应头就取它与退避时长的**较大者**
   - 退避状态**写在数据文件里** → serve 与 `ccl quota --refresh` 两个写者都遵守、跨 serve 重启也生效；**退避期间条目保留**（`fetched_at` 变旧 → stale 自动生效，用户看得出"数据不新鲜"而不是"额度没了"）；连续成功一次后复位
   - `ccl quota --refresh` **也遵守退避**（手动刷冲掉退避等于让限流持续），并提示还剩多少秒可再试
-
-### Fixes
 - **serve 的刷新 ticker 周期必须细于相位分辨率**：原先 ticker 周期 = 最小 `refreshInterval`（60 秒），而相位都以秒为单位分布在同一个 60 秒窗口里 → ticker 在窗口边界**一次性把所有到期的都叫醒** → 相位错开形同虚设。现在周期 = 最小周期 ÷ 该周期下的额度池数（**向下取整到整秒**，8 个 provider 配 60 秒 → 每 7 秒一次，每轮恰好一个到期）
 
 ### Tests
