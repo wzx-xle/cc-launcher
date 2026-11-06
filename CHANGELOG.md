@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.20.4] - 2026-11-06 — quota-on-demand-pool-consistency
+
+### Fixes
+- **手动刷新也要写给同池的所有 provider**：额度按 key 分，同一把 key 的多个 provider 引用**同一个额度池** → 它们的额度是同一个事实，必须同源。serve 的周期刷新本来就是一起写的（结果给所有引用该池的 provider），但**手动刷新**（`ccl quota --provider X --refresh`）只写了被点名的那个 → 同池的两个 provider 会显示同一把 key 的不同时刻数据
+  - 真机实测（`minimax-m3` 与 `minimax-m3.1-flash` 共用同一把 key）：改前 `--refresh minimax-m3` 后两者 `fetched_at` 相差 2300 秒；改后同时更新
+  - 已加回归测试锁住
+
+### Tests
+- `internal/quota`：手动刷新一个 provider → 同池的另一个也同时更新（`fetched_at` 与维度都一致）
+
+### OpenSpec
+- `quota-on-demand-pool-consistency`（归档：修改 `openspec/specs/provider-quota`——on-demand refresh 也必须让同池的 provider 记录到同一份结果）
+
+### Compatibility
+- 不改任何数据文件格式；`ccl quota` 的输出契约不变
+- 仅让**同池** provider 的数据一致（不同池之间本来就无关）
+
 ## [0.20.3] - 2026-11-06 — quota-active-providers-only
 
 ### Fixes

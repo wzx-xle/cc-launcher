@@ -401,7 +401,7 @@ A missing quota MUST NOT prevent the launch of Claude Code, and MUST NOT affect 
 
 ### Requirement: ccl can refresh a provider's quota on demand
 
-ccl MUST provide an option that makes the quota command query the quota interface of the selected provider, record the result in the local data file, and report it. When that option is given, the command MUST make a request to the quota interface; without it, the command MUST make none.
+ccl MUST provide an option that makes the quota command query the quota interface of the selected provider, record the result in the local data file, and report it. When that option is given, the command MUST make a request to the quota interface; without it, the command MUST make none. Providers that share the quota pool MUST receive the same recorded result, because the quota of a pool is a single fact and MUST NOT be recorded with different values for different providers.
 
 The on-demand refresh MUST NOT require the daemon to be running.
 
@@ -412,6 +412,10 @@ A provider that has no quota interface MUST be reported with status 2 without an
 #### Scenario: the on-demand refresh records the quota
 - **WHEN** the command runs with the on-demand refresh option for a provider with a quota interface
 - **THEN** it queries the quota interface, records the result in the local data file, and reports it
+
+#### Scenario: providers of the same pool record the same result
+- **WHEN** the command runs with the on-demand refresh option for a provider whose quota pool is also referenced by another provider
+- **THEN** it records the result for the other provider as well, so that both report the same quota
 
 #### Scenario: the on-demand refresh needs no daemon
 - **WHEN** the command runs with the on-demand refresh option while the daemon is not running
