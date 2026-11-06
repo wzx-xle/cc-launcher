@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-11-06 — quota-refresh-stagger
+
+### Features
+- **多 provider 的额度刷新不再"挤在一起"**：额度是**按 key 分**的——8 个 provider 用 8 把不同的 key 就是 8 个额度池，一轮必然 8 个请求。它们若同时打出去，厂商侧的速率限制直接返回 **429**，而且**每一轮都打** → 8 个 provider 的额度全部变 stale，额度功能实际瘫掉（实测：8 个 iflytek provider，`ccl serve` 起来第一轮就 429）
+  - **相位错开**：每个额度池在自己的刷新周期内占一个**固定相位**，相位由"同周期的一批池"均分（8 个 → 周期内每 7.5 秒一个）。**刷新周期长度不变**——刷新时刻 = 周期网格点 + 相位，相邻两次恰好差一个 `refreshInterval`（配 60 秒就是 60 秒，不是 1-2 倍）
+  - 相位分配一次后**永久保持**（记在数据文件的 `next_at` 里，用 `next_at += interval` **递推**，不用"now + interval"重算——后者会把刷新耗时累积进周期、相位还会漂）。**serve 重启也保持**：重启后只有"相位已到"的池会被请求，不会一次性打一批
+  - **轮内最小间隔**：首轮（还没分配相位）时请求仍密集 → 相邻两个请求之间强制间隔，缺省 500ms，可按 provider 配 `quota.minRequestGapMs`
+  - **429 指数退避**：命中限流 → 自动把该 provider 的刷新间隔拉长（1min → 2min → 4min … 封顶 30min）。厂商给了 `Retry-After` 响应头就取它与退避时长的**较大者**
+  - 退避状态**写在数据文件里** → serve 与 `ccl quota --refresh` 两个写者都遵守、跨 serve 重启也生效；**退避期间条目保留**（`fetched_at` 变旧 → stale 自动生效，用户看得出"数据不新鲜"而不是"额度没了"）；连续成功一次后复位
+  - `ccl quota --refresh` **也遵守退避**（手动刷冲掉退避等于让限流持续），并提示还剩多少秒可再试
+
+### Fixes
+- **serve 的刷新 ticker 周期必须细于相位分辨率**：原先 ticker 周期 = 最小 `refreshInterval`（60 秒），而相位都以秒为单位分布在同一个 60 秒窗口里 → ticker 在窗口边界**一次性把所有到期的都叫醒** → 相位错开形同虚设。现在周期 = 最小周期 ÷ 该周期下的额度池数（**向下取整到整秒**，8 个 provider 配 60 秒 → 每 7 秒一次，每轮恰好一个到期）
+
+### Tests
+- `internal/quota`：相位分配（8 个同周期 provider → 相位互不相同且均匀分布、相邻间隔 ≤ 8 秒、跨周期边界也满足）；相位保持（`next_at` 递推不漂、错过周期后仍保持、新池落在周期网格上）；轮内间隔（相邻请求间隔 ≥ 配置值）；429 退避（下一轮跳过、退避结束后恢复、连续被限流则时长翻倍并封顶 30min、成功后复位）；被限流时**旧额度数据保留**（`fetched_at` 不变 → stale 生效）；`RateLimitError` 识别与 `Retry-After` 解析；老格式数据文件能被读出（新增字段为零值 → 退化成旧行为）
+- `cmd/cc-launcher`：`--refresh` 遇到退避中的 provider → **不发请求** + stderr 提示剩余秒数 + 退出码 1
+- 真机（8 个 provider 打到本地 mock 接口，实测请求时间戳）：首轮 8 个请求间隔 **0.502s**（轮内间隔）；之后每轮 **每 7.00s 一个**，各 provider 相位 0/8/15/23/30/38/45/53 秒互不相同；mock 返 429 后 → 被限流的 provider 记录退避（1min→2min 翻倍）、**旧条目保留**、退避期间**零请求**，退避到期的照常请求
+
+### OpenSpec
+- `quota-refresh-stagger`（归档：修改 `openspec/specs/provider-quota`——刷新不再"同一时刻打一批"，新增相位错开 / 轮内间隔 / 429 退避三条要求）
+- `docs/provider-quota.md` 增补「刷新错开与退避」一节
+
+### Compatibility
+- 数据文件 `quota.json` 的条目新增三个**可选**字段（`next_at` / `retry_after` / `backoff_seconds`）——老版本 ccl 不认识会忽略（json 忽略未知字段），新版本读老文件时它们是零值 → 退化成 v0.20.0 的行为
+- provider 配置新增可选的 `quota.minRequestGapMs`（不配 = 缺省 500ms）；`quota` 块其余字段与语义不变
+- `ccl quota` 的输出契约**不变**（维度列表 + 三种 kind + stale 语义都没动）——本次只改刷新侧
+
 ## [0.20.0] - 2026-11-06 — provider-quota
 
 ### Features
