@@ -251,6 +251,8 @@ Within a single refresh cycle, the daemon MUST leave a minimum gap between two c
 
 When an interface reports that it is rate limiting the caller, ccl MUST stop querying that provider for a while instead of retrying on every cycle. The wait MUST grow with each consecutive rejection and MUST be capped, and it MUST be recorded in the local data file so that it also applies to an on-demand refresh and survives a restart of the daemon. A provider that is not being queried MUST keep its previously recorded quota.
 
+The wait MUST be recorded against the quota pool rather than against the provider, because the interface limits the API key and not the provider's name. A provider whose API key is replaced MUST therefore not be held back by a wait that was recorded for the previous key.
+
 #### Scenario: the quota is refreshed on the default interval
 - **WHEN** a provider declares a quota interface and no refresh interval
 - **THEN** ccl refreshes its quota every 60 seconds
@@ -307,6 +309,10 @@ When an interface reports that it is rate limiting the caller, ccl MUST stop que
 - **WHEN** a provider is waiting after a rate limit rejection
 - **THEN** ccl keeps the previously recorded quota of that provider
 
+#### Scenario: a replaced key is not held back
+- **WHEN** a quota pool was recorded as waiting after a rate limit rejection and the provider's API key is replaced
+- **THEN** ccl queries the provider with the new key instead of holding it back for the recorded wait
+
 ### Requirement: ccl stores the quota in a local data file
 
 ccl MUST store the quota of every provider in a single local data file, and MUST record for each provider the time at which its quota was fetched.
@@ -341,7 +347,7 @@ Its JSON output MUST carry the dimensions of the quota as a list, each with a ki
 
 The command MUST accept the provider to report on as an explicit option. When no option is given, it MUST fall back to the provider named by the `CCL_PROVIDER` environment variable, and then to the provider recorded as active. This lets a consumer that runs inside a session started by ccl name the provider without knowing ccl's own state.
 
-The command MUST report whether the quota it returns is stale, by comparing the time at which the quota was fetched against the refresh interval of that provider. When the refresh interval of that provider cannot be read, the command MUST use 60 seconds for that comparison.
+The command MUST report whether the quota it returns is stale, by comparing the time at which the quota was fetched against the refresh interval of that provider. When the refresh interval of that provider cannot be read, the command MUST use 60 seconds for that comparison. The comparison MUST allow for the fact that the time of the fetch is recorded with a resolution of one second, so that a quota that is refreshed on schedule is not reported as stale between two refreshes.
 
 The command MUST report the time at which the quota it returns was fetched, so that a consumer can tell how old the data is without consulting the data file.
 
@@ -376,6 +382,10 @@ A missing quota MUST NOT prevent the launch of Claude Code, and MUST NOT affect 
 #### Scenario: an old quota is reported as stale
 - **WHEN** the recorded quota of a provider was fetched longer ago than that provider's refresh interval
 - **THEN** the command reports the quota and marks it stale
+
+#### Scenario: a quota refreshed on schedule is not reported as stale
+- **WHEN** the quota of a provider was refreshed on schedule and the recorded fetch time is up to one second older than the refresh interval because of its resolution
+- **THEN** the command reports the quota without marking it stale
 
 #### Scenario: a missing quota does not block the launch
 - **WHEN** no quota has been recorded for the selected provider

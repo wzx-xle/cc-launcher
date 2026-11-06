@@ -218,11 +218,15 @@ func runQuota(args []string) error {
 
 	// stale 判定：用条目的 fetched_at 算 age，超过该 provider 的
 	// refreshInterval（**兜底 60 秒**）→ 标 stale。
+	//
+	// 阈值额外给 1 秒容忍（quota.StaleTolerance）：fetched_at 只有秒精度，
+	// 取整误差最多 +1 秒 → 阈值正好等于周期时，稳态下每次刷新前约 1 秒会
+	// 误报 stale（状态栏上表现为 "(stale)" 偶尔闪一下）。
 	interval := quota.DefaultRefreshInterval
 	if ref.Config != nil {
 		interval = ref.Config.Interval()
 	}
-	stale := time.Since(time.Unix(fetchedAt, 0)) > interval
+	stale := time.Since(time.Unix(fetchedAt, 0)) > interval+quota.StaleTolerance
 
 	out := quotaOutput{
 		Provider:   name,

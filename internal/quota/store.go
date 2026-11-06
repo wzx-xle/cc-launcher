@@ -24,6 +24,23 @@ type File struct {
 	UpdatedAt int64 `json:"updated_at"`
 	// Entries 是各 provider 的额度条目。
 	Entries map[string]Entry `json:"entries"`
+	// Backoffs 是各**额度池**的退避状态（key = pool 哈希）。
+	//
+	// **为什么按池而不是按 provider**：限流是厂商针对**那把 API key** 的，
+	// 而额度也是按 key 分的。一个 provider 换了 key = 换了池 → 老退避不该
+	// 拦住它（否则用户修好了 key 还要干等退避结束）。
+	//
+	// 同一个池被多个 provider 引用时只记一份 → 不会出现"同一个池，一半退避
+	// 一半没退避"的分裂状态。
+	Backoffs map[string]Backoff `json:"backoffs,omitempty"`
+}
+
+// Backoff 是一个额度池的退避状态。
+type Backoff struct {
+	// RetryAfter 是可以再查的时刻（Unix 秒）。
+	RetryAfter int64 `json:"retry_after"`
+	// Seconds 是当前退避时长（秒）——下次再被限流时翻倍的基数。
+	Seconds int64 `json:"seconds"`
 }
 
 // Entry 是单个 provider 的额度条目。
@@ -53,10 +70,14 @@ type Entry struct {
 	//
 	// 0 = 还没分配（老数据文件 / 首次）→ 退回"fetched_at + interval"判定。
 	NextAt int64 `json:"next_at,omitempty"`
-	// RetryAfter 是退避到什么时候才允许再查（Unix 秒）——**429 退避**用。
+
+	// ↓↓↓ 以下两个字段已废弃（v0.20.2 起退避改记在 File.Backoffs 里，按额度池）↓↓↓
 	//
-	// 持久化（而不是记在 daemon 内存里）：`ccl quota --refresh` 是另一个
-	// 进程，它不知道要退避；serve 重启后记忆也会丢。
+	// 保留它们**只为读老数据文件**：v0.20.1 把退避写在条目里，读出时会惰性
+	// 迁移到 File.Backoffs（见 migrateBackoffs）。新写入的数据不再带这两个
+	// 字段（omitempty）。
+	//
+	// RetryAfter 是退避到什么时候才允许再查（Unix 秒）。
 	RetryAfter int64 `json:"retry_after,omitempty"`
 	// BackoffSeconds 是当前退避时长（秒）——下次再被限流时翻倍的基数。
 	BackoffSeconds int64 `json:"backoff_seconds,omitempty"`
@@ -99,7 +120,36 @@ func (s *Store) Load() (*File, error) {
 	if f.Version == 0 {
 		f.Version = quotaFileVersion
 	}
+	f.migrateBackoffs()
 	return &f, nil
+}
+
+// migrateBackoffs 把老数据文件里写在条目中的退避状态并入 File.Backoffs。
+//
+// v0.20.1 把退避挂在 provider 名对应的条目上；v0.20.2 起按**额度池**记录
+// （限流是针对 key 的，provider 换 key = 换池 = 不该被老退避拦住）。
+//
+// **惰性迁移**：读的时候并一次，写回时自然变成新格式 → 一次性自愈。
+// 条目里没有 pool 字段（极老的数据文件）→ 丢弃该退避（无害：会被重新限流
+// 并重新记录）。
+func (f *File) migrateBackoffs() {
+	if f.Backoffs == nil {
+		f.Backoffs = map[string]Backoff{}
+	}
+	for name, e := range f.Entries {
+		if e.RetryAfter <= 0 {
+			continue
+		}
+		if e.Pool != "" {
+			if b, ok := f.Backoffs[e.Pool]; !ok || b.RetryAfter < e.RetryAfter {
+				f.Backoffs[e.Pool] = Backoff{RetryAfter: e.RetryAfter, Seconds: e.BackoffSeconds}
+			}
+		}
+		// 清掉条目里的旧字段 → 写回时不再带（omitempty）。
+		e.RetryAfter = 0
+		e.BackoffSeconds = 0
+		f.Entries[name] = e
+	}
 }
 
 // Save 原子写数据文件。
@@ -180,21 +230,48 @@ func (s *Store) UpdateEntry(name string, e Entry) error {
 	return s.Save(f)
 }
 
-// UpdateBackoff 只更新某个条目的退避字段（**不动**额度数据与 fetched_at）。
+// SetBackoff 写某个**额度池**的退避状态（读-改-写）。
 //
-// 失败时用它：额度数据要保持旧值（fetched_at 变旧 → stale 自动生效），
-// 只有退避状态是新的。**不能走 Update**——Update 会盖上 FetchedAt=now，
-// 那会让旧数据看起来是新的（stale 永远不生效）。
-func (s *Store) UpdateBackoff(name string, retryAfter, backoffSeconds int64) error {
+// 按池而不是按 provider 名：限流是厂商针对那把 key 的，provider 换 key =
+// 换池 = 老退避不该拦住它（quota-stale-and-backoff-pool §决策 2）。
+//
+// 失败时用它：额度数据不动（fetched_at 变旧 → stale 自动生效），只有退避
+// 状态是新的。**不能走 Update**——Update 会盖上 FetchedAt=now，那会让旧数据
+// 看起来是新的。
+func (s *Store) SetBackoff(pool string, retryAfter, seconds int64) error {
 	f, err := s.Load()
 	if err != nil {
 		f = &File{Version: quotaFileVersion, Entries: map[string]Entry{}}
 	}
-	e := f.Entries[name]
-	e.RetryAfter = retryAfter
-	e.BackoffSeconds = backoffSeconds
-	f.Entries[name] = e
+	if f.Backoffs == nil {
+		f.Backoffs = map[string]Backoff{}
+	}
+	f.Backoffs[pool] = Backoff{RetryAfter: retryAfter, Seconds: seconds}
 	return s.Save(f)
+}
+
+// ClearBackoff 清除某个额度池的退避状态（读-改-写）。
+//
+// 刷新成功时调用：退避状态不再随条目重建自动清零（它住在 File.Backoffs 里，
+// 不在条目里）→ 必须显式清。
+func (s *Store) ClearBackoff(pool string) error {
+	f, err := s.Load()
+	if err != nil {
+		return err
+	}
+	if _, ok := f.Backoffs[pool]; !ok {
+		return nil
+	}
+	delete(f.Backoffs, pool)
+	return s.Save(f)
+}
+
+// BackoffFor 取某个额度池的退避状态；没有则返回零值。
+func (f *File) BackoffFor(pool string) Backoff {
+	if f == nil || f.Backoffs == nil {
+		return Backoff{}
+	}
+	return f.Backoffs[pool]
 }
 
 // Prune 删掉已不存在的 provider 的条目（读-改-写）。

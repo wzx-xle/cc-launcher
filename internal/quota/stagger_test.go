@@ -194,16 +194,19 @@ func TestRefreshAll_RateLimitBacksOff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e, ok := f.EntryFor("p1")
-	if !ok {
-		t.Fatal("应有条目")
+	// 被限流时**不写额度条目**（只记退避状态）——额度数据是旧的或没有，
+	// 不能被一次失败写成"空"。
+	if _, ok := f.EntryFor("p1"); ok {
+		t.Error("被限流时不该写额度条目")
 	}
-	if e.RetryAfter <= time.Now().Unix() {
-		t.Errorf("应记录退避到未来, got %d", e.RetryAfter)
+	pool := PoolID(srv.URL, "sk-1")
+	b := f.BackoffFor(pool)
+	if b.RetryAfter <= time.Now().Unix() {
+		t.Errorf("应记录退避到未来, got %d", b.RetryAfter)
 	}
 	// 厂商 Retry-After=30 小于缺省的 60s → 取**较大者**（缺省 60s）
-	if e.BackoffSeconds != 60 {
-		t.Errorf("退避基数应为 60, got %d", e.BackoffSeconds)
+	if b.Seconds != 60 {
+		t.Errorf("退避基数应为 60, got %d", b.Seconds)
 	}
 
 	// 第 2 轮：退避中 → **不发请求**
@@ -218,9 +221,7 @@ func TestRefreshAll_RateLimitBacksOff(t *testing.T) {
 
 	// 把退避时间改到过去 → 第 3 轮：又请求 → 仍被限流 → 退避翻倍
 	f2, _ := st.Load()
-	e2 := f2.Entries["p1"]
-	e2.RetryAfter = time.Now().Unix() - 1
-	f2.Entries["p1"] = e2
+	f2.Backoffs[pool] = Backoff{RetryAfter: time.Now().Unix() - 1, Seconds: f2.BackoffFor(pool).Seconds}
 	if err := st.Save(f2); err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +234,7 @@ func TestRefreshAll_RateLimitBacksOff(t *testing.T) {
 	}
 	mu.Unlock()
 	f3, _ := st.Load()
-	if got := f3.Entries["p1"].BackoffSeconds; got != 120 {
+	if got := f3.BackoffFor(pool).Seconds; got != 120 {
 		t.Errorf("连续限流后退避应翻倍到 120, got %d", got)
 	}
 
@@ -242,9 +243,7 @@ func TestRefreshAll_RateLimitBacksOff(t *testing.T) {
 	limited = false
 	mu.Unlock()
 	f4, _ := st.Load()
-	e4 := f4.Entries["p1"]
-	e4.RetryAfter = time.Now().Unix() - 1
-	f4.Entries["p1"] = e4
+	f4.Backoffs[pool] = Backoff{RetryAfter: time.Now().Unix() - 1, Seconds: f4.BackoffFor(pool).Seconds}
 	if err := st.Save(f4); err != nil {
 		t.Fatal(err)
 	}
@@ -252,9 +251,9 @@ func TestRefreshAll_RateLimitBacksOff(t *testing.T) {
 		t.Fatal(err)
 	}
 	f5, _ := st.Load()
-	e5 := f5.Entries["p1"]
-	if e5.BackoffSeconds != 0 || e5.RetryAfter != 0 {
-		t.Errorf("成功后退避状态应复位, got backoff=%d retryAfter=%d", e5.BackoffSeconds, e5.RetryAfter)
+	b5 := f5.BackoffFor(pool)
+	if b5.Seconds != 0 || b5.RetryAfter != 0 {
+		t.Errorf("成功后退避状态应复位, got backoff=%d retryAfter=%d", b5.Seconds, b5.RetryAfter)
 	}
 }
 
@@ -300,7 +299,7 @@ func TestRefreshAll_RateLimitKeepsOldQuota(t *testing.T) {
 	if len(e.Dimensions) != 1 {
 		t.Errorf("旧额度数据不该被丢: %+v", e.Dimensions)
 	}
-	if e.RetryAfter == 0 {
+	if after.BackoffFor(PoolID(srv.URL, "sk-1")).RetryAfter == 0 {
 		t.Error("应记录退避时间")
 	}
 }
@@ -454,4 +453,85 @@ func sortInt64(a []int64) {
 // writeFile 写文件（测试辅助）。
 func writeFile(path, content string) error {
 	return os.WriteFile(path, []byte(content), 0600)
+}
+
+// TestRefreshAll_BackoffIsPerPool 断言：退避按**额度池**记录——provider 换了
+// key（= 换了池）后，不该被老退避拦住。
+//
+// 这正是"限流是针对 key 的，额度也是按 key 分的"在实现上的落地。
+func TestRefreshAll_BackoffIsPerPool(t *testing.T) {
+	var mu sync.Mutex
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		mu.Unlock()
+		w.Header().Set("Retry-After", "5")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	st := NewStore(t.TempDir())
+
+	// 用 key-A → 池 A → 被限流 → 池 A 进入退避
+	refA := ProviderRef{Name: "p1", Config: &Config{Source: "newapi", Endpoint: srv.URL}, APIKey: "key-A"}
+	if err := RefreshAll(context.Background(), []ProviderRef{refA}, st, nil); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	if requests != 1 {
+		t.Fatalf("应发 1 个请求, got %d", requests)
+	}
+	mu.Unlock()
+	if f, _ := st.Load(); f.BackoffFor(PoolID(srv.URL, "key-A")).RetryAfter == 0 {
+		t.Fatal("池 A 应进入退避")
+	}
+
+	// 同一个 provider 名，但换成 key-B（= 池 B）→ 不该被池 A 的退避拦住
+	refB := ProviderRef{Name: "p1", Config: &Config{Source: "newapi", Endpoint: srv.URL}, APIKey: "key-B"}
+	if err := RefreshAll(context.Background(), []ProviderRef{refB}, st, nil); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if requests != 2 {
+		t.Errorf("换 key（换池）后不该被老退避拦住, requests=%d（期望 2）", requests)
+	}
+}
+
+// TestStore_MigratesLegacyBackoff 断言：v0.20.1 写在**条目**里的退避状态，
+// 读出时并入对应池的 backoffs（不丢退避），并清掉条目里的旧字段。
+func TestStore_MigratesLegacyBackoff(t *testing.T) {
+	st := NewStore(t.TempDir())
+	old := `{
+  "version": 1,
+  "updated_at": 1793950000,
+  "entries": {
+    "p1": {
+      "source": "newapi",
+      "pool": "pool-abc",
+      "fetched_at": 1793950000,
+      "retry_after": 1793959999,
+      "backoff_seconds": 120
+    }
+  }
+}`
+	if err := writeFile(st.Path(), old); err != nil {
+		t.Fatal(err)
+	}
+	f, err := st.Load()
+	if err != nil {
+		t.Fatalf("老文件不该报错: %v", err)
+	}
+	b := f.BackoffFor("pool-abc")
+	if b.RetryAfter != 1793959999 {
+		t.Errorf("老退避应迁移到对应池: got %+v", b)
+	}
+	if b.Seconds != 120 {
+		t.Errorf("退避基数应迁移: got %d", b.Seconds)
+	}
+	e, _ := f.EntryFor("p1")
+	if e.RetryAfter != 0 || e.BackoffSeconds != 0 {
+		t.Errorf("条目里的旧退避字段应被清掉: %+v", e)
+	}
 }

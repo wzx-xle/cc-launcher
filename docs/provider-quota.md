@@ -147,7 +147,12 @@ ccl quota --refresh --json
 ### stale 语义
 
 `stale` 由 ccl 判定：条目的 `fetched_at` 距今超过该 provider 的
-`refreshInterval`（**兜底 60 秒**）→ `stale: true`。
+`refreshInterval`（**兜底 60 秒**）**+ 1 秒容忍** → `stale: true`。
+
+**那 1 秒容忍是必须的**：`fetched_at` 只存到秒（向下取整），而数据年龄的峰值
+≈ 周期 − 刷新耗时 → **取整误差最多 +1 秒**。阈值正好等于周期时，稳态下每次刷新
+前约 1 秒会误报 stale（实测 age 峰值 60.75~61.48 秒，42 秒采样里每个 provider
+越线 4~8 次）——状态栏上表现为 `(stale)` 偶尔闪一下，而数据其实是新鲜的。
 
 **stale 是连续的状态**，不是"这次请求失败"：serve 刷新失败时**保留旧条目**
 （`fetched_at` 不变 → 越来越旧 → stale 自动变 true）。所以：
@@ -170,8 +175,14 @@ ccl quota --refresh --json
       "source": "minimax",
       "pool": "3f2a9c…",        // sha256(端点 + "\0" + API key)，**不含明文 key**
       "fetched_at": 1793943914,
+      "next_at": 1793943974,    // 下次该刷的时刻（相位错开用）
       "dimensions": [ … ]
     }
+  },
+  // 退避状态：**按额度池**记录（限流是厂商针对那把 key 的，provider 换 key
+  // = 换池 → 老退避不该拦住它）
+  "backoffs": {
+    "3f2a9c…": { "retry_after": 1793944332, "seconds": 60 }
   }
 }
 ```
@@ -311,8 +322,11 @@ interval` 递推，不用"now + interval"重算——后者会把刷新耗时累
 ```
 
 - 厂商给了 `Retry-After` 响应头 → 取它与退避时长的**较大者**
-- 退避状态**写在数据文件里**（`retry_after` / `backoff_seconds`）→ serve 与
+- 退避状态**写在数据文件里**（顶层的 `backoffs` 段，**按额度池**记）→ serve 与
   `ccl quota --refresh` 两个写者都遵守，跨 serve 重启也生效
+- **按池而不是按 provider 名**：限流是厂商针对**那把 key** 的，额度也是按 key
+  分的。provider 换了 key = 换了池 → 老退避不该拦住它（否则用户修好了 key 还要
+  干等退避结束）
 - **退避期间条目保留** → `fetched_at` 变旧 → stale 自动生效（用户看得出"数据
   不新鲜"，而不是"额度没了"）
 - 连续成功一次后**复位**（下次 429 从 1min 重新开始）

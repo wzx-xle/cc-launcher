@@ -568,7 +568,9 @@ func RefreshAll(ctx context.Context, refs []ProviderRef, st *Store, logf func(fo
 		interval := ref.Config.Interval()
 
 		// **退避中 → 跳过**（429 之后不要每轮硬打）。
-		if has && entry.RetryAfter > now.Unix() {
+		// 退避按**额度池**记录（限流是厂商针对那把 key 的，provider 换 key =
+		// 换池 → 老退避不该拦住它）。
+		if b := file.BackoffFor(pool); b.RetryAfter > now.Unix() {
 			res.Skipped++
 			continue
 		}
@@ -627,18 +629,14 @@ func RefreshAll(ctx context.Context, refs []ProviderRef, st *Store, logf func(fo
 		dims, err := j.adapter.Fetch(ctx, j.ref.providerInfo(j.endpoint))
 		if err != nil {
 			res.Failed++
-			// **429 → 退避**（持久化）：不在这一轮硬打，也不让下一轮接着打。
+			// **429 → 退避**（持久化，按额度池）：不在这一轮硬打，也不让下一轮
+			// 接着打。
 			var rl *RateLimitError
 			if errors.As(err, &rl) {
-				backoff := nextBackoff(j.oldEntry.BackoffSeconds, rl.RetryAfter)
+				backoff := nextBackoff(file.BackoffFor(pool).Seconds, rl.RetryAfter)
 				retryAfter := now.Unix() + int64(backoff.Seconds())
-				for _, ref := range refs {
-					if poolOf[ref.Name] != pool {
-						continue
-					}
-					if err := st.UpdateBackoff(ref.Name, retryAfter, int64(backoff.Seconds())); err != nil {
-						logf("写 provider %s 的退避状态失败: %v", ref.Name, err)
-					}
+				if err := st.SetBackoff(pool, retryAfter, int64(backoff.Seconds())); err != nil {
+					logf("写额度池 %s 的退避状态失败: %v", poolLabel(pool), err)
 				}
 				logf("provider %s 被厂商限流（HTTP %d），退避 %s 后再试", j.ref.Name, rl.Status, backoff)
 				continue
@@ -647,6 +645,12 @@ func RefreshAll(ctx context.Context, refs []ProviderRef, st *Store, logf func(fo
 			continue
 		}
 		res.Refreshed++
+
+		// 成功 → **退避状态复位**（退避住在 File.Backoffs 里，不随条目重建
+		// 自动清零 → 必须显式清）。
+		if err := st.ClearBackoff(pool); err != nil {
+			logf("清除额度池 %s 的退避状态失败: %v", poolLabel(pool), err)
+		}
 
 		// 相位保持：next_at **递推**（oldNext + interval），不是 now + interval
 		// ——后者会把刷新耗时累积进周期，且相位会漂。
@@ -688,11 +692,13 @@ func RefreshOne(ctx context.Context, ref ProviderRef, st *Store) ([]Dimension, e
 	if err != nil {
 		return nil, err
 	}
+	pool := PoolID(endpoint, ref.APIKey)
 
 	// **退避中 → 不发请求**（手动刷不能冲掉退避：它打的是同一个接口）。
+	// 退避按**额度池**记录 → 换 key（换池）后不受老退避影响。
 	if f, err := st.Load(); err == nil {
-		if e, ok := f.EntryFor(ref.Name); ok && e.RetryAfter > time.Now().Unix() {
-			return nil, &BackoffError{RetryAfter: e.RetryAfter}
+		if b := f.BackoffFor(pool); b.RetryAfter > time.Now().Unix() {
+			return nil, &BackoffError{RetryAfter: b.RetryAfter}
 		}
 	}
 
@@ -700,16 +706,15 @@ func RefreshOne(ctx context.Context, ref ProviderRef, st *Store) ([]Dimension, e
 	if err != nil {
 		var rl *RateLimitError
 		if errors.As(err, &rl) {
-			backoff := nextBackoff(currentBackoff(st, ref.Name), rl.RetryAfter)
+			backoff := nextBackoff(currentBackoff(st, pool), rl.RetryAfter)
 			retryAfter := time.Now().Unix() + int64(backoff.Seconds())
-			if werr := st.UpdateBackoff(ref.Name, retryAfter, int64(backoff.Seconds())); werr != nil {
-				log.Printf("quota: 写 %s 的退避状态失败: %v", ref.Name, werr)
+			if werr := st.SetBackoff(pool, retryAfter, int64(backoff.Seconds())); werr != nil {
+				log.Printf("quota: 写额度池 %s 的退避状态失败: %v", poolLabel(pool), werr)
 			}
 		}
 		return nil, err
 	}
 
-	pool := PoolID(endpoint, ref.APIKey)
 	// 相位保持：已有 next_at 就递推（保持它在周期里的固定位置）。
 	var oldNext int64
 	if f, err := st.Load(); err == nil {
@@ -729,20 +734,28 @@ func RefreshOne(ctx context.Context, ref ProviderRef, st *Store) ([]Dimension, e
 	if err := st.UpdateEntry(ref.Name, e); err != nil {
 		return nil, err
 	}
+	// 成功 → 退避状态复位。
+	if err := st.ClearBackoff(pool); err != nil {
+		log.Printf("quota: 清除额度池 %s 的退避状态失败: %v", poolLabel(pool), err)
+	}
 	return dims, nil
 }
 
-// currentBackoff 读某个 provider 当前的退避基数（秒；没有则 0）。
-func currentBackoff(st *Store, name string) int64 {
+// currentBackoff 读某个额度池当前的退避基数（秒；没有则 0）。
+func currentBackoff(st *Store, pool string) int64 {
 	f, err := st.Load()
 	if err != nil {
 		return 0
 	}
-	e, ok := f.EntryFor(name)
-	if !ok {
-		return 0
+	return f.BackoffFor(pool).Seconds
+}
+
+// poolLabel 给日志用的额度池短标识（截断到 8 位）。
+func poolLabel(pool string) string {
+	if len(pool) <= 8 {
+		return pool
 	}
-	return e.BackoffSeconds
+	return pool[:8]
 }
 
 // MinRefreshInterval 返回一组 provider 里最小的刷新周期。

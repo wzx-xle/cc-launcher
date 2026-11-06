@@ -442,20 +442,29 @@ func TestRunQuota_RefreshRespectsBackoff(t *testing.T) {
 	defer srv.Close()
 
 	writeQuotaProvider(t, baseDir, "p1", map[string]any{
-		"env":   map[string]any{"ANTHROPIC_BASE_URL": "https://one.example.com/x"},
+		"env": map[string]any{
+			"ANTHROPIC_BASE_URL":   "https://one.example.com/x",
+			"ANTHROPIC_AUTH_TOKEN": "sk-x",
+		},
 		"quota": map[string]any{"source": "newapi", "endpoint": srv.URL},
 	})
 
-	// 造一条"正在退避中"的记录
+	// 造一条"正在退避中"的记录（退避按**额度池**记录）
 	st := quota.NewStore(baseDir)
-	f := &quota.File{Version: 1, Entries: map[string]quota.Entry{
-		"p1": {
-			Source:     "newapi",
-			Pool:       "pool-1",
-			FetchedAt:  time.Now().Unix(),
-			RetryAfter: time.Now().Add(30 * time.Second).Unix(),
+	pool := quota.PoolID(srv.URL, "sk-x")
+	f := &quota.File{
+		Version: 1,
+		Entries: map[string]quota.Entry{
+			"p1": {
+				Source:    "newapi",
+				Pool:      pool,
+				FetchedAt: time.Now().Unix(),
+			},
 		},
-	}}
+		Backoffs: map[string]quota.Backoff{
+			pool: {RetryAfter: time.Now().Add(30 * time.Second).Unix(), Seconds: 60},
+		},
+	}
 	if err := st.Save(f); err != nil {
 		t.Fatal(err)
 	}
@@ -472,5 +481,64 @@ func TestRunQuota_RefreshRespectsBackoff(t *testing.T) {
 	}
 	if strings.Contains(stdout, "dimensions") {
 		t.Errorf("失败时不该打印额度文档: %s", stdout)
+	}
+}
+
+// TestRunQuota_StaleTolerance 断言：stale 判定给 1 秒容忍（取整误差）。
+//
+// fetched_at 只存到秒 → 数据年龄最多比真实值大 1 秒。阈值正好等于刷新周期时，
+// 稳态下每次刷新前约 1 秒会误报 stale（实测 age 峰值 60.8~61.5 秒）→ 状态栏
+// 上 "(stale)" 偶尔闪一下。
+func TestRunQuota_StaleTolerance(t *testing.T) {
+	baseDir := quotaHome(t)
+
+	writeQuotaProvider(t, baseDir, "p1", map[string]any{
+		"env": map[string]any{
+			"ANTHROPIC_BASE_URL":   "https://api.minimax.cn/anthropic",
+			"ANTHROPIC_AUTH_TOKEN": "sk-x",
+		},
+	})
+
+	st := quota.NewStore(baseDir)
+	writeEntry := func(age time.Duration) {
+		f := &quota.File{Version: 1, Entries: map[string]quota.Entry{
+			"p1": {
+				Source:    "minimax",
+				Pool:      "pool-1",
+				FetchedAt: time.Now().Add(-age).Unix(),
+				Dimensions: []quota.Dimension{
+					{ID: "interval", Label: "5h", Kind: quota.KindWindow, Unit: "%"},
+				},
+			},
+		}}
+		if err := st.Save(f); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// age ≈ 60 秒（周期 60 + 取整误差 ≤ 1 秒）→ **不**标 stale
+	writeEntry(60 * time.Second)
+	_, stderr, code := captureQuotaRun(t, "--provider", "p1", "--json")
+	if code != 0 {
+		t.Fatalf("退出码 = %d, stderr=%s", code, stderr)
+	}
+	stdout, _, _ := captureQuotaRun(t, "--provider", "p1", "--json")
+	var out quotaOutput
+	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Stale {
+		t.Errorf("age 60 秒（周期 60）不该标 stale（取整误差容忍）")
+	}
+
+	// age 明显超过周期 + 容忍 → 标 stale
+	writeEntry(70 * time.Second)
+	stdout2, _, _ := captureQuotaRun(t, "--provider", "p1", "--json")
+	var out2 quotaOutput
+	if err := json.Unmarshal([]byte(stdout2), &out2); err != nil {
+		t.Fatal(err)
+	}
+	if !out2.Stale {
+		t.Errorf("age 70 秒应标 stale")
 	}
 }

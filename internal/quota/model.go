@@ -28,6 +28,19 @@ import (
 // 5 次/分钟）。
 const DefaultRefreshInterval = 60 * time.Second
 
+// StaleTolerance 是 stale 判定额外给的容忍。
+//
+// **为什么需要**：`fetched_at` 只存到秒（向下取整），而数据年龄的峰值 ≈
+// 刷新周期 − 刷新耗时（刷新是在"该刷新的时刻"**之后**才完成的：HTTP 请求 +
+// 文件写入）。取整误差最多 +1 秒 → 阈值正好等于周期时，**稳态下每次刷新前
+// 约 1 秒会误报 stale**（实测 age 峰值 60.75~61.48 秒，42 秒采样里每个
+// provider 越线 4~8 次）——状态栏上表现为 "(stale)" 偶尔闪一下。
+//
+// **为什么是 1 秒**：取整误差的上界恰是 1 秒（frac < 1），而刷新耗时恒 > 0
+// → 真实年龄峰值恒 < 周期 + 1 秒 → 这个容忍能**完全**覆盖，不会引入新的
+// 误报窗口。
+const StaleTolerance = time.Second
+
 // Kind 是额度维度的类别。
 type Kind string
 
