@@ -237,11 +237,13 @@ ccl MUST refresh the quota of the providers that declare a quota interface, on a
 
 The refresh interval MUST default to 60 seconds, and a provider MUST be able to override it through its `quota` configuration.
 
-The daemon MUST refresh every provider that declares a quota interface **and that has reported activity recently**, and MUST NOT refresh a provider that declares none. A provider counts as recently active when it has reported activity within the recent window, and the daemon MUST NOT query a provider that falls outside that window, because the quota of a provider that nobody is using is not worth the request. Two providers that resolve to the same quota endpoint and the same API key MUST be queried once for that cycle, and the result MUST be recorded for both.
+The daemon MUST refresh every quota pool that has a provider which declares a quota interface **and that has reported activity recently**, and MUST NOT refresh a quota pool that has none. A provider counts as recently active when it has reported activity within the recent window. When any provider of a quota pool is recently active, the daemon MUST refresh that pool and MUST record the result for every provider of that pool, because the quota of a pool is a single fact and MUST NOT be recorded with different values for different providers. The daemon MUST NOT query a pool whose providers are all outside that window, because the quota of a provider that nobody is using is not worth the request. Two providers that resolve to the same quota endpoint and the same API key MUST be queried once for that cycle, and the result MUST be recorded for both.
+
+A quota pool that has no recently active provider MUST still be refreshed when its recorded quota is older than a freshness threshold of 10 minutes, so that a user who switches to such a provider does not see a quota that is far out of date. The freshness threshold MUST bound how often such a pool is queried, so that a pool without active providers is not queried on every refresh cycle.
 
 The daemon MUST NOT query a provider whose recorded quota is younger than that provider's refresh interval. The age of a recorded quota MUST be derived from the time recorded in the local data file rather than from a time kept only in the daemon's memory, so that a quota recorded by an on-demand refresh counts as a recent refresh.
 
-The daemon MUST refresh a provider immediately when it starts, rather than waiting for the first interval to elapse, so that a quota is available as soon as the daemon is up.
+The daemon MUST refresh a provider immediately when it starts, rather than waiting for the first interval to elapse, so that a quota is available as soon as the daemon is up. Starting the daemon MUST NOT leave that first refresh with no provider to query, and the daemon MUST fall back to the recorded active provider when it has no activity of its own yet.
 
 A refresh that fails MUST NOT discard the previously recorded quota of that provider.
 
@@ -266,12 +268,24 @@ The wait MUST be recorded against the quota pool rather than against the provide
 - **THEN** ccl queries the quota interface once for that cycle and records the result for both providers
 
 #### Scenario: a provider that was not active recently is not queried
-- **WHEN** a provider declares a quota interface but has not reported activity within the recent window
-- **THEN** ccl does not query the quota interface for that provider
+- **WHEN** every provider of a quota pool declares a quota interface but none of them has reported activity within the recent window, and the pool's recorded quota is younger than the freshness threshold
+- **THEN** ccl does not query the quota interface for that pool
 
 #### Scenario: a provider that is active is queried
 - **WHEN** a provider has reported activity within the recent window
 - **THEN** ccl queries the quota interface for that provider
+
+#### Scenario: an active provider refreshes the whole pool
+- **WHEN** one provider of a quota pool has reported activity within the recent window and another provider of the same pool has not
+- **THEN** ccl queries that pool once and records the result for both providers, so that both report the same quota
+
+#### Scenario: a pool without active providers is refreshed once it goes out of date
+- **WHEN** no provider of a quota pool has reported activity within the recent window and the pool's recorded quota is older than the freshness threshold
+- **THEN** ccl queries that pool and records the result for every provider of that pool
+
+#### Scenario: a pool without active providers is not queried on every cycle
+- **WHEN** no provider of a quota pool has reported activity within the recent window and the pool's recorded quota is younger than the freshness threshold
+- **THEN** ccl does not query that pool again in that cycle, so that it is not queried more often than the freshness threshold allows
 
 #### Scenario: a recently recorded quota is not queried again
 - **WHEN** the recorded quota of a provider was fetched less than that provider's refresh interval ago
@@ -284,6 +298,10 @@ The wait MUST be recorded against the quota pool rather than against the provide
 #### Scenario: the daemon refreshes without waiting
 - **WHEN** the daemon starts
 - **THEN** ccl refreshes the quotas immediately instead of waiting for the first interval to elapse
+
+#### Scenario: the first refresh after starting queries the recorded active provider
+- **WHEN** the daemon starts and has not seen any activity of its own yet
+- **THEN** ccl queries the quota pool of the recorded active provider in that first refresh
 
 #### Scenario: a failed refresh keeps the previous quota
 - **WHEN** a refresh of a provider fails
@@ -438,4 +456,30 @@ The warning MUST NOT prevent the launch.
 #### Scenario: a plaintext base URL is reported
 - **WHEN** the selected provider's `ANTHROPIC_BASE_URL` starts with `http://`
 - **THEN** ccl reports a warning naming the provider and the plain-text base URL, and the launch proceeds
+
+### Requirement: ccl declares the provider it selected to the daemon
+
+When ccl starts Claude Code with a selected provider, it MUST tell the daemon which provider that session uses, so that the quota of that provider is refreshed right away instead of waiting for the session to report activity.
+
+The declaration MUST NOT delay the launch of Claude Code, and a daemon that cannot be reached MUST NOT stop the launch.
+
+The daemon MUST treat a declared provider as recently active, and MUST refresh the quota pool of that provider in that cycle. A provider that becomes active this way MUST be queried without waiting for its refresh interval to elapse, when its recorded quota is older than that interval.
+
+The daemon MUST accept a provider name only when it names a provider that is configured, and MUST reject a name that names no configured provider.
+
+#### Scenario: the selected provider is declared to the daemon
+- **WHEN** ccl starts Claude Code with a selected provider
+- **THEN** ccl tells the daemon which provider that session uses
+
+#### Scenario: the declaration does not delay the launch
+- **WHEN** the daemon cannot be reached while ccl declares the selected provider
+- **THEN** ccl starts Claude Code unaffected
+
+#### Scenario: the declared provider is refreshed in that cycle
+- **WHEN** the daemon receives a declaration for a provider whose recorded quota is older than its refresh interval
+- **THEN** the daemon queries that provider's quota pool in that cycle
+
+#### Scenario: an unknown provider name is rejected
+- **WHEN** the daemon receives a declaration for a name that matches no configured provider
+- **THEN** the daemon rejects it and queries no quota interface
 

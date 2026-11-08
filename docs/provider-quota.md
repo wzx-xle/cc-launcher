@@ -165,6 +165,10 @@ ccl quota --refresh --json
   （用户会以为额度用光了）
 - 用户看得出"数据不新鲜"，而不是"额度没了"
 
+（**当前没人在用的** provider 靠兜底保鲜每 10 分钟才刷新一次 → 它们的 `stale`
+会持续为 true，因为数据**确实**已经旧了。这是**可见**的，不是静默失效。切换到
+这样的 provider 时，ccl 会立刻声明并触发刷新，数字随即变新。）
+
 ## 数据文件
 
 `~/.cc-launcher/quota.json`，权限 **0600**，**原子写**（临时文件 + rename）→
@@ -278,22 +282,58 @@ provider 的 `ANTHROPIC_BASE_URL` 是 `http://` 时，ccl 会给一条**非阻�
 
 **`ccl serve`**（常驻，ccl 自动拉起，永不自动 idle 退出）：
 
-- **只刷新"最近有活动"的 provider** —— 活动信号取自 **OTel**：ccl 启动 Claude Code
-  时把 provider 名注入了 `OTEL_RESOURCE_ATTRIBUTES` 的 `ccl.provider`，collector
-  解析每条 metrics 时就知道是哪个 provider → serve 只查**最近 5 分钟内有 OTel
-  活动**的 provider（5 分钟 = 4 个 OTel 周期；实测 Claude Code 每 60 秒推一次
-  metrics）
+- **刷新的粒度是"额度池"，不是 provider** —— 同一把 key 的多个 provider 共用一个
+  池，额度是**一个事实**，必须同源。池内任一 provider 活跃 → 整池刷新 → 结果
+  写给池内**所有** provider（它们的 `fetched_at` 完全相同）
+  - **为什么**：按 provider 过滤会让同池的两个 provider 显示不同时刻的数据
+    （实测：`minimax-m3` 与 `minimax-m3.1-flash` 同 key，`fetched_at` 差 38
+    分钟）——用户看到的是"同一把 key 的余额，两个数字"
+- **优先刷新"最近有活动"的池** —— 活动信号有两个来源：
+  1. **ccl 的主动声明**（主路径，见下节）：ccl 启动 Claude Code 前就知道这次用
+     哪个 provider → 立刻告诉 daemon → daemon **立即**刷新该池（不等 ticker）
+  2. **OTel**（兜底）：ccl 启动时把 provider 名注入了 `OTEL_RESOURCE_ATTRIBUTES`
+     的 `ccl.provider`，collector 解析每条 metrics 时就知道是哪个 provider →
+     serve 查**最近 5 分钟内有 OTel 活动**的池（5 分钟 = 4 个 OTel 周期；实测
+     Claude Code 每 60 秒推一次 metrics）
   - **为什么**：额度数据的唯一消费者是状态栏，而状态栏显示的是**当前会话那个
-    provider** 的额度 → 其余 provider 的额度数据**当前根本没人看**。查它们 =
-    纯浪费 + 触发厂商的速率限制（实测：8 个 provider 的机器一轮就 429）
-  - 用户离开超过 5 分钟 → 该 provider 停止被刷新 → 数据变旧 → 状态栏标 stale
-    （**可见**，不是静默失效）。"没人用就别查"正是这个意思
+    provider** 的额度 → 其余池的额度数据**当前根本没人看**。查它们 = 纯浪费 +
+    触发厂商的速率限制（实测：8 个 provider 的机器一轮就 429）
   - `ccl quota --provider X --refresh` **不受此限制**（用户显式点名 → 照查）
+- **兜底保鲜：超过 10 分钟没更新的池也会被刷一次** —— 即便当前没有活跃成员
+  - **为什么**：用户切到一个几小时没用过的 provider 时，状态栏显示的是那个时刻
+    的旧数字（带 stale 标记）。保鲜给"最旧能有多旧"设了个上限
+  - **量级**：每个池每 10 分钟 1 次 → 4 个池 ≈ 24 请求/小时（可忽略）；8 个池的
+    机器 ≈ 48 请求/小时（仍远低于限流阈值）
+  - **它不是刷新周期**：`refreshInterval`（默认 60 秒）管"有人在用时多久刷
+    一次"，保鲜管"没人用时数据最多能旧多久"
+  - **限流优先于保鲜**：正在退避的池即使超过 10 分钟也不会被刷
 - **启动即刷一轮**（不等一个周期）→ 跑完一次 `ccl` 就能读到数据
+  - daemon 的活跃度是**纯内存**状态，刚起来时是空的 → 那一轮会一个池都不查
+    （实测 serve.log：`查了 0 / 不活跃跳过 6`，且整整 60 秒才恢复）→ 所以
+    daemon 启动时会把 `state.json` 里记录的 active provider 标为活跃，**兜住**
+    这个空窗
 - ticker 周期 = 所有待刷 provider 的 `refreshInterval` 的**最小值**；每轮遍历
-  provider，**距上次刷新不足其自身周期的跳过这一轮**
+  额度池，**距上次刷新不足其自身周期的跳过这一轮**
 - **刷新失败只进 serve 的日志，不写数据文件** → 旧条目保留 → stale 自动生效
+- **刷新轮次的汇总日志按"池"计数**（请求本来就按池发）：
+  `[quota] 额度刷新一轮（池）：查了 1 / 不活跃跳过 3 / 未到期或退避跳过 1 / 失败 0`
 - 独立 goroutine + ctx 取消，不干扰 metrics 服务与 graceful shutdown
+
+### ccl → daemon 的激活通道
+
+`ccl` 启动 Claude Code 前会向 daemon 发一个 `POST /ccl/activate?provider=X`，
+daemon 收到后**立刻**标记该 provider 活跃，并**立即触发一轮刷新**（不等 15 秒
+的 ticker）。
+
+- **为什么需要它**：daemon 判断"谁在用"的信号原本只有 Claude Code 推来的
+  OTel —— 但那要等 Claude Code 起来（实测 daemon 重启后**整整 60 秒**盲窗，
+  60 秒 = Claude Code 的 OTel 推送周期）。**ccl 才是唯一确知这次用哪个 provider
+  的角色**（它在 exec Claude Code 之前就选定了）→ 用最权威、最早可得的信号
+- **fire-and-forget**：ccl 不等响应、不阻塞启动；daemon 没起来就连不上 → 静默
+  忽略（Claude Code 的 OTel 是兜底路径，功能不会因此坏掉）
+- **白名单校验**：daemon 只接受 `providers/` 目录里**真实存在**的 provider 名
+  （否则这个端点就成了"让 daemon 带用户的 key 去访问任意 URL"的放大器）
+- daemon 独立启动（不经 ccl）时，靠 `state.json` 里记录的 active provider 兜底
 
 **`ccl quota --refresh`** 是 serve 被 `ccl serve --stop` 关掉时的**逃生舱**：
 联网查一次 → 写回数据文件 → 照常输出（**不需要 serve 在跑**）。

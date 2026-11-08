@@ -182,7 +182,7 @@ The refresh MUST happen in the daemon process rather than in the process that re
 
 The daemon MUST NOT query a provider whose recorded quota is younger than that provider's refresh interval, and MUST derive that age from the recorded quota rather than from a time kept only in the daemon's memory.
 
-When the daemon starts, it MUST refresh the quotas once immediately instead of waiting for the first interval to elapse.
+When the daemon starts, it MUST refresh the quotas once immediately instead of waiting for the first interval to elapse. That first refresh MUST NOT be left with nothing to query because the daemon has not seen any activity yet, and the daemon MUST fall back to the provider recorded as active.
 
 A refresh that fails MUST NOT discard the quota that was recorded for that provider previously, and MUST NOT stop the daemon's refresh schedule.
 
@@ -201,6 +201,10 @@ The refresh MUST NOT delay or fail the daemon's other duties: the metrics endpoi
 #### Scenario: the daemon refreshes without waiting
 - **WHEN** the daemon starts
 - **THEN** it refreshes the quotas immediately rather than waiting for the first interval to elapse
+
+#### Scenario: the first refresh after starting is not left empty
+- **WHEN** the daemon starts and has not received any activity yet
+- **THEN** it queries the quota pool of the provider recorded as active in that first refresh
 
 #### Scenario: providers sharing a key are queried once
 - **WHEN** two providers resolve to the same quota endpoint and the same API key
@@ -233,4 +237,32 @@ Lines that report the quota refresh MUST carry a marker that consists only of AS
 #### Scenario: quota lines can be selected without reading the text
 - **WHEN** the daemon reports the outcome of a quota refresh
 - **THEN** that line carries an ASCII marker that identifies it as a quota line
+
+### Requirement: ccl serve accepts a provider activation request
+
+`ccl serve` MUST accept a request that names a provider as in use for the running session, so that the quota of that provider can be refreshed without waiting for the session's first report.
+
+The request MUST name the provider in the query of a `POST` to a dedicated path on the daemon's own HTTP port, and MUST be answered without disturbing the metrics endpoint.
+
+The daemon MUST accept the request only when the name matches a provider that is configured, and MUST reject any other name without querying a quota interface.
+
+The daemon MUST refresh the quota pool of an accepted provider in the same cycle, without waiting for the refresh interval to elapse.
+
+The request MUST NOT be able to make the daemon query an endpoint that belongs to no configured provider.
+
+#### Scenario: an activation request is accepted
+- **WHEN** the daemon receives a request that names a configured provider
+- **THEN** it accepts the request and treats that provider as in use
+
+#### Scenario: an activation request refreshes the quota at once
+- **WHEN** the daemon receives an activation request for a provider whose recorded quota is older than its refresh interval
+- **THEN** the daemon queries that provider's quota pool in that cycle
+
+#### Scenario: an unknown provider is not accepted
+- **WHEN** the daemon receives a request that names no configured provider
+- **THEN** it rejects the request and queries no quota interface
+
+#### Scenario: the activation path does not disturb the metrics endpoint
+- **WHEN** the daemon receives an activation request
+- **THEN** the metrics endpoint keeps serving and the daemon's graceful shutdown still completes within its budget
 

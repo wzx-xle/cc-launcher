@@ -31,6 +31,22 @@ var ErrNoQuotaInterface = errors.New("该 provider 没有额度接口")
 // = 4 秒）。
 const DefaultMinRequestGap = 500 * time.Millisecond
 
+// DefaultFreshnessThreshold 是**兜底保鲜**的默认阈值。
+//
+// **它解决什么**：quota-active-providers-only 只刷新"最近有活动"的 provider，
+// 于是用户切到一个几小时没用过的 provider 时，状态栏显示的是那个时刻的旧
+// 数字（还带着 stale 标记）。保鲜规则让"没有活跃成员的额度池"也保持一定
+// 新鲜度 —— 数据最多旧这么久。
+//
+// **为什么是 10 分钟**：足够短（用户切过去看到的数字不会是几十分钟前的），
+// 又足够长（4 个池 → 每小时 6 次请求，可忽略；8 个池的机器 → 48 次/小时，
+// 仍远低于厂商限流阈值）。
+//
+// **它不是刷新周期**：provider 自己的 refreshInterval（默认 60 秒）管的是
+// "有人在用时多久刷一次"；保鲜管的是"没人用时数据最多能旧多久"。两个阈值
+// 各管一件事。
+const DefaultFreshnessThreshold = 10 * time.Minute
+
 const (
 	// initialBackoff 是首次被限流后的退避时长。
 	initialBackoff = time.Minute
@@ -495,17 +511,21 @@ func PoolID(endpoint, apiKey string) string {
 }
 
 // RefreshResult 是一次刷新的结果。
+//
+// **计数单位是额度池，不是 provider**：请求本来就按池发（同一把 key 只查一次），
+// 用 provider 计数会让人误以为"发了 6 个请求"（实际 4 个）。
 type RefreshResult struct {
-	// Refreshed 是本次真正发了请求的 provider 数（按额度池计）。
+	// Refreshed 是本次真正发了请求的**额度池**数。
 	Refreshed int
-	// Skipped 是因为没到刷新周期或正在退避而跳过的 provider 数。
+	// Skipped 是因为没到刷新周期或正在退避而跳过的额度池总数
+	// （= SkippedInactive + SkippedNotDue）。
 	Skipped int
-	// SkippedInactive 是因为**最近没有活动**而跳过的 provider 数
+	// SkippedInactive 是因为**没有活跃成员**（且未到保鲜期）而跳过的额度池数
 	// （额度数据的唯一消费者是状态栏，没人用就不查）。
 	SkippedInactive int
-	// SkippedNotDue 是因为还没到刷新周期而跳过的 provider 数。
+	// SkippedNotDue 是因为还没到刷新周期、或正在退避而跳过的额度池数。
 	SkippedNotDue int
-	// Failed 是查询失败（**旧条目保留**）的 provider 数。
+	// Failed 是查询失败（**旧条目保留**）的额度池数。
 	Failed int
 }
 
@@ -533,20 +553,30 @@ type job struct {
 // **两者必须分开**：不刷 ≠ 不存在。用同一个集合会让"这轮没轮到它"被当成
 // "provider 被删了"→ 它的额度条目被 Prune 掉（真机验证时抓到的 bug）。
 //
+// **刷新的粒度是额度池，不是 provider**：同一把 key 的多个 provider 共用同一个
+// 额度池，额度是**一个事实**。池内任一 provider 活跃 → 整池刷 → 结果写给池内
+// **所有** provider（否则同池的两个 provider 会显示不同时刻的数据 —— 真机
+// 实测抓到过：minimax-m3 与 minimax-m3.1-flash 同 key，fetched_at 差 38 分钟）。
+//
+// freshness 是**兜底保鲜**阈值：没有活跃成员的池，若记录已旧于该阈值也刷一次
+// （0 = 不启用保鲜）。它让"用户切到很久没用过的 provider"不会看到几十分钟前
+// 的旧数字。
+//
 // 流程：
 //  1. 读数据文件拿到每个 provider 的 fetched_at（**从文件读，不是内存**——
 //     这样 `ccl quota --refresh` 刚写过的 provider 会自动被跳过）
-//  2. 没到刷新周期、或正在退避的 provider 跳过这一轮
-//  3. 按 (端点, key) 去重：同一额度池只查一次网络
+//  2. 解析所有 provider → 归属的额度池；由「池内任一 provider 活跃」推出
+//     活跃池集合
+//  3. 退避中 / 未到期的池跳过这一轮
 //  4. **相位错开**：同一刷新周期的一批额度池均分周期内的相位，请求不挤在
 //     一起（厂商侧会限流，见 quota-refresh-stagger change）
-//  5. 查到结果 → 写给所有引用该额度池的 provider
+//  5. 查到结果 → 写给所有引用该额度池的 provider（**同一个 fetched_at**）
 //  6. 查失败 → **不写额度数据**（旧条目保留，fetched_at 越来越旧 → stale 自动
 //     生效）；若是 429 → 写退避状态（持久化，跨进程跨重启生效）
 //  7. 清理已不存在的 provider 的残留条目
 //
 // logf 用于记录失败原因（进 serve 的日志，不进数据文件）。
-func RefreshAll(ctx context.Context, refs []ProviderRef, st *Store, logf func(format string, args ...any), active map[string]bool) error {
+func RefreshAll(ctx context.Context, refs []ProviderRef, st *Store, logf func(format string, args ...any), active map[string]bool, freshness time.Duration) error {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
@@ -560,20 +590,28 @@ func RefreshAll(ctx context.Context, refs []ProviderRef, st *Store, logf func(fo
 	now := time.Now()
 	var res RefreshResult
 
-	jobs := make(map[string]job)  // pool → job
-	poolOf := map[string]string{} // provider name → pool
-	live := map[string]bool{}
+	// poolInfo 是一个额度池的固有属性（同池所有 provider 共用）。
+	type poolInfo struct {
+		adapter  Adapter
+		endpoint string
+		// ref 是代表成员：决定 adapter 的入参与轮内请求间隔。
+		ref ProviderRef
+		// interval 是该池的刷新周期（同池成员取第一个遇到的）。
+		interval time.Duration
+	}
+
+	// ---- 第 1 遍：解析每个 provider，算出它属于哪个额度池 ----
+	//
+	// **必须先做完这一遍再谈刷不刷**：活跃判定是**池级**的（池内任一 provider
+	// 活跃 → 整池活跃），所以得先把池的成员关系搞清楚。
+	live := map[string]bool{}           // Prune 的依据：全部 provider
+	providerPool := map[string]string{}  // provider 名 → 额度池
+	poolMembers := map[string][]string{} // 额度池 → 引用它的 provider
+	pools := map[string]poolInfo{}       // 额度池 → 固有属性
 
 	for _, ref := range refs {
 		// live = **全部**枚举到的 provider（Prune 只删"配置真被删了"的）。
 		live[ref.Name] = true
-
-		// 不活跃 → 本轮不刷（但条目保留，下次活跃时继续用）。
-		if active != nil && !active[ref.Name] {
-			res.Skipped++
-			res.SkippedInactive++
-			continue
-		}
 
 		ad, endpoint, err := ref.Resolve()
 		if err != nil {
@@ -583,13 +621,67 @@ func RefreshAll(ctx context.Context, refs []ProviderRef, st *Store, logf func(fo
 			continue
 		}
 		pool := PoolID(endpoint, ref.APIKey)
-		poolOf[ref.Name] = pool
+		providerPool[ref.Name] = pool
+		poolMembers[pool] = append(poolMembers[pool], ref.Name)
+		if _, ok := pools[pool]; !ok {
+			pools[pool] = poolInfo{
+				adapter:  ad,
+				endpoint: endpoint,
+				ref:      ref,
+				interval: ref.Config.Interval(),
+			}
+		}
+	}
 
-		entry, has := file.EntryFor(ref.Name)
-		interval := ref.Config.Interval()
+	// ---- 第 2 遍：推出活跃池集合 ----
+	//
+	// active == nil → 不过滤（所有池都活跃）。
+	// 否则：**池内任一 provider 在名单里 → 整个池活跃**。额度是池级事实，
+	// 不能按 provider 拆开 —— 拆开就会出现同池不同源。
+	activePools := map[string]bool{}
+	if active == nil {
+		for pool := range pools {
+			activePools[pool] = true
+		}
+	} else {
+		for name, pool := range providerPool {
+			if active[name] {
+				activePools[pool] = true
+			}
+		}
+	}
 
-		// **退避中 → 跳过**（429 之后不要每轮硬打）。
-		// 退避按**额度池**记录（限流是厂商针对那把 key 的，provider 换 key =
+	// ---- 第 3 遍：退避 / 到期判定 ----
+	jobs := make(map[string]job) // pool → job
+	for pool, info := range pools {
+		// 池内各成员的记录：**取最旧的 fetched_at**（保守 → 倾向于刷），以及
+		// 最早到期的 next_at。
+		//
+		// 取最旧是**有意**的：同池记录分叉时（老 bug 的遗留），若按最新的判定
+		// 会以为"数据是新的" → 不刷 → 分叉永远修不好。取最旧 → 刷一次即同源。
+		var (
+			oldestFetched int64
+			earliestNext  int64
+			hasRecord     bool
+		)
+		for _, name := range poolMembers[pool] {
+			entry, ok := file.EntryFor(name)
+			if !ok {
+				continue
+			}
+			if entry.FetchedAt > 0 {
+				if !hasRecord || entry.FetchedAt < oldestFetched {
+					oldestFetched = entry.FetchedAt
+				}
+				hasRecord = true
+			}
+			if entry.NextAt > 0 && (earliestNext == 0 || entry.NextAt < earliestNext) {
+				earliestNext = entry.NextAt
+			}
+		}
+
+		// **退避中 → 跳过**（429 之后不要每轮硬打）。限流保护优先于一切，
+		// **包括保鲜**。退避按**额度池**记录（限流针对 key，provider 换 key =
 		// 换池 → 老退避不该拦住它）。
 		if b := file.BackoffFor(pool); b.RetryAfter > now.Unix() {
 			res.Skipped++
@@ -597,41 +689,98 @@ func RefreshAll(ctx context.Context, refs []ProviderRef, st *Store, logf func(fo
 			continue
 		}
 
-		// 到期判定：优先 next_at（相位错开）；没有则退回 fetched_at + interval。
-		if has && entry.FetchedAt > 0 {
-			dueAt := entry.NextAt
-			if dueAt == 0 {
-				dueAt = entry.FetchedAt + int64(interval.Seconds())
-			}
-			if now.Unix() < dueAt {
+		intervalSec := int64(info.interval.Seconds())
+		if intervalSec <= 0 {
+			intervalSec = int64(DefaultRefreshInterval.Seconds())
+		}
+
+		// 从没查过的池（没有记录）：**只有活跃池才查** —— 没人看的、连数据都
+		// 没有的池，不值得为它发一次请求。
+		if !hasRecord {
+			if !activePools[pool] {
 				res.Skipped++
-				res.SkippedNotDue++
+				res.SkippedInactive++
 				continue
 			}
-		}
-		if _, ok := jobs[pool]; !ok {
-			j := job{adapter: ad, endpoint: endpoint, ref: ref, interval: interval}
-			if has {
-				j.oldNext = entry.NextAt
-				j.oldEntry = entry
-				j.hasEntry = true
+			jobs[pool] = job{
+				adapter:  info.adapter,
+				endpoint: info.endpoint,
+				ref:      info.ref,
+				interval: info.interval,
 			}
-			jobs[pool] = j
+			continue
 		}
+
+		// 到期判定（design.md D2 的三档）：
+		//
+		//	活跃池   → min(next_at, fetched_at + interval)
+		//	不活跃池 → fetched_at + freshness（不看 next_at）
+		//
+		// 活跃档用 min 而不是单取 next_at：next_at 是相位递推出来的，可能还在
+		// 未来；取 min 让"记录已经陈旧"的池**当场**被刷（用户切到很久没用的
+		// provider 时不必再等一个相位）。
+		//
+		// 不活跃档**必须**用保鲜阈值而不是 interval：next_at 是按 interval
+		// （默认 60 秒）递推的，若沿用它，不活跃池每 60 秒就会被判到期 → 保鲜
+		// 规则完全失效，退化成"全刷"（429 的根因）。
+		//
+		// 不活跃档也**不能**用 max(next_at, …)：next_at 会把保鲜期拉长到
+		// refreshInterval（配 900 秒的 provider 实际保鲜 15 分钟）→ 违反
+		// "数据最多旧 10 分钟"的承诺。
+		dueAt := earliestNext
+		if dueAt == 0 {
+			dueAt = oldestFetched + intervalSec
+		}
+		if activePools[pool] {
+			if byAge := oldestFetched + intervalSec; byAge < dueAt {
+				dueAt = byAge
+			}
+		} else {
+			if freshness <= 0 {
+				// 没开保鲜：不活跃的池一律不查（纯 active-only 行为）。
+				res.Skipped++
+				res.SkippedInactive++
+				continue
+			}
+			// 不活跃池的到期时刻**只看保鲜阈值**，不看 next_at。
+			//
+			// next_at 是按 interval 递推的：若用户把 refreshInterval 配得比保鲜
+			// 阈值还长（如 900 秒 > 600 秒），用 max(next_at, …) 会让实际保鲜期
+			// 变成 15 分钟 → 违反"数据最多旧 10 分钟"的承诺。
+			//
+			// next_at 对不活跃池本来也没有意义（它服务于活跃时的相位错开）。
+			dueAt = oldestFetched + int64(freshness.Seconds())
+		}
+		if now.Unix() < dueAt {
+			res.Skipped++
+			res.SkippedNotDue++
+			continue
+		}
+
+		j := job{
+			adapter:  info.adapter,
+			endpoint: info.endpoint,
+			ref:      info.ref,
+			interval: info.interval,
+		}
+		if earliestNext > 0 {
+			j.oldNext = earliestNext
+		}
+		jobs[pool] = j
 	}
 
 	// **相位分配**：同一刷新周期的一批额度池均分周期内的相位。
 	assignPhases(jobs)
 
 	// 按 pool 排序遍历 → 请求顺序与相位顺序一致（先刷相位小的）。
-	pools := make([]string, 0, len(jobs))
+	poolIDs := make([]string, 0, len(jobs))
 	for pool := range jobs {
-		pools = append(pools, pool)
+		poolIDs = append(poolIDs, pool)
 	}
-	sort.Strings(pools)
+	sort.Strings(poolIDs)
 
 	// 逐个额度池查询（串行 + 轮内最小间隔）。
-	for i, pool := range pools {
+	for i, pool := range poolIDs {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -679,21 +828,13 @@ func RefreshAll(ctx context.Context, refs []ProviderRef, st *Store, logf func(fo
 		// ——后者会把刷新耗时累积进周期，且相位会漂。
 		nextAt := nextRefreshAt(now, j.interval, j.phase, j.oldNext)
 
-		// 结果写给**所有**引用该额度池的 provider（数据同源）。
-		for _, ref := range refs {
-			if poolOf[ref.Name] != pool {
-				continue
-			}
-			e := Entry{
-				Source:     j.adapter.Name(),
-				Pool:       pool,
-				Dimensions: dims,
-				NextAt:     nextAt,
-				// 成功 → 退避状态复位（RetryAfter / BackoffSeconds 留零值）。
-			}
-			if err := st.UpdateEntry(ref.Name, e); err != nil {
-				logf("写 provider %s 的额度条目失败: %v", ref.Name, err)
-			}
+		// 结果写给**所有**引用该额度池的 provider（数据同源）——包括当前
+		// 不活跃的那些成员：它们与活跃成员共用同一把 key，额度是同一个事实。
+		//
+		// 一次性写、**同一个 fetched_at**：同池的记录必须是同一时刻的数据，
+		// 逐个写会跨秒差 1 秒。
+		if err := st.UpdatePoolEntriesFor(poolMembers[pool], pool, j.adapter.Name(), dims, nextAt); err != nil {
+			logf("写额度池 %s 的额度条目失败: %v", poolLabel(pool), err)
 		}
 	}
 
@@ -704,7 +845,8 @@ func RefreshAll(ctx context.Context, refs []ProviderRef, st *Store, logf func(fo
 
 	// **每轮汇总**（一行）：这一轮查了几个、跳过了几个、失败几个。
 	// 出问题时第一眼看这行就知道"是不是全查了""是不是被限流了"。
-	logf("额度刷新一轮：查了 %d / 不活跃跳过 %d / 未到期或退避跳过 %d / 失败 %d",
+	// **计数单位是额度池**（请求本来就按池发）。
+	logf("额度刷新一轮（池）：查了 %d / 不活跃跳过 %d / 未到期或退避跳过 %d / 失败 %d",
 		res.Refreshed, res.SkippedInactive, res.SkippedNotDue, res.Failed)
 	return nil
 }

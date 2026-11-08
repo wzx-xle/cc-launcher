@@ -2,18 +2,30 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"net"
+	"net/http"
+	neturl "net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"time"
 )
 
+// daemonAddr 是 daemon 的监听地址（loopback）。
+//
+// **固定 4318**：OTel OTLP/HTTP 的标准端口。用户要改只能改
+// OTEL_EXPORTER_OTLP_ENDPOINT（导出目标），daemon 自己监听的端口不变。
+const daemonAddr = "127.0.0.1:4318"
+
+// daemonBaseURL 返回 daemon 的 HTTP 基地址。
+func daemonBaseURL() string { return "http://" + daemonAddr }
+
 // probeDaemonAddr 探 :4318 是否可达（200ms timeout）。
 //
 // 返回 nil = 端口在用（daemon 可能活着）；返回 error = 端口空。
 func probeDaemonAddr() error {
-	conn, err := net.DialTimeout("tcp", "127.0.0.1:4318", 200*time.Millisecond)
+	conn, err := net.DialTimeout("tcp", daemonAddr, 200*time.Millisecond)
 	if err != nil {
 		return err
 	}
@@ -99,6 +111,35 @@ func ensureDaemonRunning() (started bool, err error) {
 		return true, err
 	}
 	return true, nil
+}
+
+// declareProviderToDaemon 告诉 daemon"本次会话用这个 provider"。
+//
+// **为什么需要**：额度数据的唯一消费者是状态栏，而状态栏显示的是**当前会话
+// 那个 provider** 的额度。daemon 判断"谁在用"的唯一信号是 Claude Code 推来的
+// OTel metrics —— 但那要等 Claude Code 起来并推完第一条（实测 daemon 重启后
+// 整整 60 秒盲窗，60 秒 = Claude Code 的 OTel 推送周期）。
+//
+// **ccl 是唯一确知这次要用哪个 provider 的角色**（它在 exec Claude Code 之前
+// 就选定了）→ 声明一次，额度当场可用。
+//
+// **fire-and-forget，绝不阻塞启动**：daemon 没起来 / 连不上 / 返回错误 → 一律
+// **静默忽略**（Claude Code 的 OTel 是兜底路径，功能不会因此坏掉）。
+//
+// baseURL 是 daemon 的地址（测试用 httptest server 注入）。
+func declareProviderToDaemon(baseURL, provider string) {
+	if provider == "" {
+		return
+	}
+	url := fmt.Sprintf("%s/ccl/activate?provider=%s", baseURL, neturl.QueryEscape(provider))
+	client := &http.Client{Timeout: 500 * time.Millisecond}
+	resp, err := client.Post(url, "", nil)
+	if err != nil {
+		return // 静默：daemon 没起来无所谓
+	}
+	defer resp.Body.Close()
+	// 读完 body 才能复用连接（这里直接丢弃）。
+	_, _ = io.Copy(io.Discard, resp.Body)
 }
 
 // cclLauncherBaseDir 返回 ~/.cc-launcher 路径（cmd 公共）。

@@ -136,7 +136,7 @@ func TestRefreshAll_MinGapBetweenRequests(t *testing.T) {
 		})
 	}
 	st := NewStore(t.TempDir())
-	if err := RefreshAll(context.Background(), refs, st, nil, nil); err != nil {
+	if err := RefreshAll(context.Background(), refs, st, nil, nil, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -182,7 +182,7 @@ func TestRefreshAll_RateLimitBacksOff(t *testing.T) {
 	st := NewStore(t.TempDir())
 
 	// 第 1 轮：被限流 → 退避
-	if err := RefreshAll(context.Background(), refs, st, nil, nil); err != nil {
+	if err := RefreshAll(context.Background(), refs, st, nil, nil, 0); err != nil {
 		t.Fatal(err)
 	}
 	mu.Lock()
@@ -211,7 +211,7 @@ func TestRefreshAll_RateLimitBacksOff(t *testing.T) {
 	}
 
 	// 第 2 轮：退避中 → **不发请求**
-	if err := RefreshAll(context.Background(), refs, st, nil, nil); err != nil {
+	if err := RefreshAll(context.Background(), refs, st, nil, nil, 0); err != nil {
 		t.Fatal(err)
 	}
 	mu.Lock()
@@ -226,7 +226,7 @@ func TestRefreshAll_RateLimitBacksOff(t *testing.T) {
 	if err := st.Save(f2); err != nil {
 		t.Fatal(err)
 	}
-	if err := RefreshAll(context.Background(), refs, st, nil, nil); err != nil {
+	if err := RefreshAll(context.Background(), refs, st, nil, nil, 0); err != nil {
 		t.Fatal(err)
 	}
 	mu.Lock()
@@ -248,7 +248,7 @@ func TestRefreshAll_RateLimitBacksOff(t *testing.T) {
 	if err := st.Save(f4); err != nil {
 		t.Fatal(err)
 	}
-	if err := RefreshAll(context.Background(), refs, st, nil, nil); err != nil {
+	if err := RefreshAll(context.Background(), refs, st, nil, nil, 0); err != nil {
 		t.Fatal(err)
 	}
 	f5, _ := st.Load()
@@ -286,7 +286,7 @@ func TestRefreshAll_RateLimitKeepsOldQuota(t *testing.T) {
 	}
 	before := f.Entries["p1"]
 
-	if err := RefreshAll(context.Background(), refs, st, nil, nil); err != nil {
+	if err := RefreshAll(context.Background(), refs, st, nil, nil, 0); err != nil {
 		t.Fatal(err)
 	}
 	after, err := st.Load()
@@ -420,19 +420,24 @@ func TestRefreshAll_SkipsWhenNextAtInFuture(t *testing.T) {
 		APIKey: "sk-1",
 	}}
 	st := NewStore(t.TempDir())
-	// fetched_at 是 10 分钟前（按旧判定会刷新），但 next_at 在未来 → 应跳过
+	// 相位未到（next_at 在未来）且记录也还新鲜 → 应跳过。
+	//
+	// **fetched_at 必须新**：真实系统里 next_at = 上次刷新时刻 + interval，
+	// 所以"next_at 在未来"蕴含"上次刷新很近"。若 fetched_at 反而很旧
+	//（真实系统不可达的状态），该池会被判为陈旧而立即刷新——那是 D2 的
+	// 有意行为，见 TestRefreshAll_RefreshesStaleActivePool。
 	f := &File{Version: 1, Entries: map[string]Entry{
 		"p1": {
 			Source:    "newapi",
 			Pool:      "pool-1",
-			FetchedAt: time.Now().Add(-10 * time.Minute).Unix(),
+			FetchedAt: time.Now().Add(-10 * time.Second).Unix(),
 			NextAt:    time.Now().Add(30 * time.Second).Unix(),
 		},
 	}}
 	if err := st.Save(f); err != nil {
 		t.Fatal(err)
 	}
-	if err := RefreshAll(context.Background(), refs, st, nil, nil); err != nil {
+	if err := RefreshAll(context.Background(), refs, st, nil, nil, 0); err != nil {
 		t.Fatal(err)
 	}
 	mu.Lock()
@@ -476,7 +481,7 @@ func TestRefreshAll_BackoffIsPerPool(t *testing.T) {
 
 	// 用 key-A → 池 A → 被限流 → 池 A 进入退避
 	refA := ProviderRef{Name: "p1", Config: &Config{Source: "newapi", Endpoint: srv.URL}, APIKey: "key-A"}
-	if err := RefreshAll(context.Background(), []ProviderRef{refA}, st, nil, nil); err != nil {
+	if err := RefreshAll(context.Background(), []ProviderRef{refA}, st, nil, nil, 0); err != nil {
 		t.Fatal(err)
 	}
 	mu.Lock()
@@ -490,7 +495,7 @@ func TestRefreshAll_BackoffIsPerPool(t *testing.T) {
 
 	// 同一个 provider 名，但换成 key-B（= 池 B）→ 不该被池 A 的退避拦住
 	refB := ProviderRef{Name: "p1", Config: &Config{Source: "newapi", Endpoint: srv.URL}, APIKey: "key-B"}
-	if err := RefreshAll(context.Background(), []ProviderRef{refB}, st, nil, nil); err != nil {
+	if err := RefreshAll(context.Background(), []ProviderRef{refB}, st, nil, nil, 0); err != nil {
 		t.Fatal(err)
 	}
 	mu.Lock()
@@ -579,7 +584,7 @@ func TestRefreshAll_InactiveProviderKeepsEntry(t *testing.T) {
 
 	// 只有 active 在活跃名单里
 	active := map[string]bool{"active": true}
-	if err := RefreshAll(context.Background(), refs, st, nil, active); err != nil {
+	if err := RefreshAll(context.Background(), refs, st, nil, active, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -626,7 +631,7 @@ func TestRefreshAll_NoneActiveKeepsAllEntries(t *testing.T) {
 		}
 	}
 
-	if err := RefreshAll(context.Background(), refs, st, nil, map[string]bool{}); err != nil {
+	if err := RefreshAll(context.Background(), refs, st, nil, map[string]bool{}, 0); err != nil {
 		t.Fatal(err)
 	}
 	mu.Lock()
@@ -704,7 +709,7 @@ func TestRefreshAll_LogsRoundSummary(t *testing.T) {
 	var logged []string
 	err := RefreshAll(context.Background(), refs, st, func(format string, args ...any) {
 		logged = append(logged, fmt.Sprintf(format, args...))
-	}, map[string]bool{"a": true})
+	}, map[string]bool{"a": true}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

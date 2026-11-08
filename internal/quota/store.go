@@ -286,6 +286,41 @@ func (s *Store) UpdatePoolEntries(name, pool, source string, dims []Dimension, n
 	return s.Save(f)
 }
 
+// UpdatePoolEntriesFor 写给**指定的一批** provider（通常是同一个额度池的全部
+// 成员），并给它们**同一个** fetched_at。
+//
+// **为什么与 UpdatePoolEntries 分开**：UpdatePoolEntries 的成员集合是"数据文件
+// 里**已有条目**的同池 provider"——它只能更新已存在的条目。而 serve 的刷新
+// 路径需要**确保池内每个 provider 都有条目**（没条目的那个也得拿到数据，
+// 否则它会一直缺记录）。
+//
+// **为什么必须统一 fetched_at**：同一把 key 的额度是**一个事实**，同池的
+// provider 必须记录**同一个时刻**的数据。逐个写（每次各自取 time.Now()）会
+// 在跨秒边界时差 1 秒 —— 那就不算同源了。
+//
+// 一次性写还有副作用收益：N 个成员只 Load/Save 一次，而不是 N 次。
+func (s *Store) UpdatePoolEntriesFor(names []string, pool, source string, dims []Dimension, nextAt int64) error {
+	f, err := s.Load()
+	if err != nil {
+		// 文件损坏 → 从空白开始重建（不让一个坏文件永久挡住刷新）。
+		f = &File{Version: quotaFileVersion, Entries: map[string]Entry{}}
+	}
+	if f.Entries == nil {
+		f.Entries = map[string]Entry{}
+	}
+	now := time.Now().Unix()
+	for _, n := range names {
+		f.Entries[n] = Entry{
+			Source:     source,
+			Pool:       pool,
+			Dimensions: dims,
+			NextAt:     nextAt,
+			FetchedAt:  now,
+		}
+	}
+	return s.Save(f)
+}
+
 // ClearBackoff 清除某个额度池的退避状态（读-改-写）。
 //
 // 刷新成功时调用：退避状态不再随条目重建自动清零（它住在 File.Backoffs 里，

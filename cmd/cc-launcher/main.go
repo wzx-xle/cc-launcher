@@ -186,6 +186,16 @@ func runTUI(pm *provider.Manager, sm *state.Manager, cm *config.Manager) error {
 		fmt.Println("✓ OTel daemon 拉起成功（监听 :4318）")
 	}
 
+	// 告诉 daemon 本次会话用哪个 provider → 它立刻刷新该 provider 所在的
+	// 额度池（状态栏当场就能读到新数据）。
+	//
+	// **为什么不等 Claude Code 起来推 OTel**：那条路要等一个 OTel 周期（实测
+	// 60 秒），而且 daemon 重启后活跃度是空的 → 启动那轮必然空转。ccl 自己
+	// 就知道这次用哪个 provider —— 这是最权威、也最早可得的信号。
+	//
+	// **fire-and-forget**：连不上就静默忽略（Claude Code 的 OTel 是兜底）。
+	declareProviderToDaemon(daemonBaseURL(), result.Provider)
+
 	fmt.Printf("正在启动 Claude Code (%s / %s / %s)...\n", result.Provider, result.Mode, sessionLabel)
 	return launcher.Launch(opts)
 }

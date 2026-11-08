@@ -10,11 +10,13 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"cc-launcher/internal/collector"
 	"cc-launcher/internal/quota"
+	"cc-launcher/internal/state"
 	"cc-launcher/internal/web"
 )
 
@@ -145,6 +147,13 @@ func runServe(args []string) error {
 		// 看板不可用不该阻断 daemon（OTel 采集是主路径）。
 		log.Printf("ccl serve: 看板初始化失败（/ui 不可用）: %v", err)
 	}
+	// 激活通道：ccl 启动 Claude Code 前会声明"本次用 provider X" → daemon
+	// 立刻把它标记为活跃并刷新一轮（不必等 Claude Code 起来推 OTel）。
+	//
+	// 缓冲 8 个：一次 ccl 启动只发一条，8 足够；满了就丢弃（下一轮 ticker
+	// 会补上），**绝不能阻塞 HTTP handler**。
+	activateCh := make(chan string, 8)
+
 	srv := collector.NewServer(collector.ServerOptions{
 		Addr:    ":4318",
 		Store:   store,
@@ -153,6 +162,9 @@ func runServe(args []string) error {
 			if webSrv != nil {
 				webSrv.Mount(mux)
 			}
+		},
+		OnActivate: func(provider string) error {
+			return notifyActivate(activateCh, provider, filepath.Join(stateBaseDir, "providers"))
 		},
 	})
 
@@ -195,7 +207,14 @@ func runServe(args []string) error {
 	//
 	// **启动即刷一轮**（不等一个周期）→ 用户跑完一次 ccl（它会拉起 serve）
 	// 就能读到数据。
-	go quotaRefreshLoop(ctx, stateBaseDir, srv.Activity())
+	//
+	// **启动兜底**：daemon 的活跃度是纯内存状态，刚起来时是空的 → 那一轮
+	// 会一个 provider 都不查（实测 serve.log：「查了 0 / 不活跃跳过 6」，且
+	// 整整 60 秒才恢复）。把 state.json 里记录的 active provider 标为活跃，
+	// 启动那轮就有池可刷。
+	markRecordedActiveProvider(srv.Activity(), stateBaseDir)
+
+	go quotaRefreshLoop(ctx, stateBaseDir, srv.Activity(), activateCh)
 
 	if err := srv.Start(ctx); err != nil && err != context.Canceled {
 		// Server 异常退出（端口阻塞等不该走到这里——前面已探）。
@@ -226,10 +245,12 @@ func runServe(args []string) error {
 //   - ticker 周期 = 所有待刷 provider 的 refreshInterval 的**最小值**；
 //     每轮遍历 provider，**距上次刷新不足其自身周期的跳过这一轮**
 //     （时间从数据文件的 fetched_at 读，见 quota.RefreshAll）
+//   - **收到激活声明 → 立刻刷一轮**（不等 ticker）：ccl 启动 Claude Code 前
+//     会声明本次用的 provider → 那次会话的额度当场可用
 //   - **刷新失败只进 serve 日志，不写数据文件** → 旧条目保留，fetched_at
 //     越来越旧 → stale 自动生效（状态栏不会因为一次网络抖动就从数字跳回 --）
 //   - ctx 取消即退出（SIGTERM → graceful shutdown 不被拖慢）
-func quotaRefreshLoop(ctx context.Context, baseDir string, activity *collector.Activity) {
+func quotaRefreshLoop(ctx context.Context, baseDir string, activity *collector.Activity, activateCh chan string) {
 	providersDir := filepath.Join(baseDir, "providers")
 	st := quota.NewStore(baseDir)
 
@@ -255,7 +276,7 @@ func quotaRefreshLoop(ctx context.Context, baseDir string, activity *collector.A
 			// （Windows 上日志里��中文可能显示成乱码，但标记、时间戳、provider
 			// 名、HTTP 状态码都是 ASCII → 照样能解析）。
 			log.Printf("ccl serve: [quota] "+format, args...)
-		}, active); err != nil && ctx.Err() == nil {
+		}, active, quota.DefaultFreshnessThreshold); err != nil && ctx.Err() == nil {
 			log.Printf("ccl serve: 额度刷新失败: %v", err)
 		}
 		// ticker 周期必须**细于相位分辨率**（quota.TickInterval 的注释）——
@@ -267,19 +288,89 @@ func quotaRefreshLoop(ctx context.Context, baseDir string, activity *collector.A
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	// syncTicker 把 ticker 周期对齐到最新的刷新周期（provider 的周期或数量
+	// 被改了 → 重算）。
+	syncTicker := func(iv time.Duration) {
+		if iv != interval {
+			interval = iv
+			ticker.Reset(interval)
+		}
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case provider := <-activateCh:
+			// **激活声明**：立刻刷一轮，不等 ticker。
+			//
+			// collector 侧已经把该 provider 标记为活跃 → 它所在的额度池会被刷
+			// （同池的其他 provider 也一起拿到同一份数据）。
+			log.Printf("ccl serve: [quota] provider %q 激活，立即刷新一轮", provider)
+			syncTicker(refresh())
 		case <-ticker.C:
-			iv := refresh()
-			if iv != interval {
-				// provider 的刷新周期或数量被改了 → 重算 ticker。
-				interval = iv
-				ticker.Reset(interval)
-			}
+			syncTicker(refresh())
 		}
 	}
+}
+
+// notifyActivate 校验 provider 名并把它送进激活通道。
+//
+// **白名单校验是必须的**：名字来自 HTTP 查询串 → 必须确认它是 providers/
+// 目录里真实存在的 provider。否则这个端点就成了"让 daemon 去访问任意 URL"
+// 的放大器（daemon 会带着用户的 API key 发起请求）。
+//
+// 通道满了就**丢弃**（不阻塞 HTTP handler）：丢掉的后果只是这一轮没立即刷，
+// 下一个 ticker 会补上。
+func notifyActivate(ch chan string, provider, providersDir string) error {
+	if !providerExists(providersDir, provider) {
+		return fmt.Errorf("未知的 provider %q", provider)
+	}
+	select {
+	case ch <- provider:
+	default:
+		log.Printf("ccl serve: 激活通道已满，丢弃 %q 的激活声明", provider)
+	}
+	return nil
+}
+
+// providerExists 判断 providers 目录里有没有这个名字的 provider 配置。
+//
+// **名字必须能安全地拼进路径**：provider 名来自配置文件名，正常不含分隔符，
+// 但这是 HTTP 输入 → 显式挡住路径穿越。
+func providerExists(providersDir, name string) bool {
+	if name == "" || name == "." || name == ".." {
+		return false
+	}
+	if strings.ContainsAny(name, `/\`) {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(providersDir, name+".json"))
+	return err == nil
+}
+
+// markRecordedActiveProvider 把 state.json 里记录的 active provider 标记为活跃。
+//
+// **为什么需要**：daemon 的 provider 活跃度是**纯内存**状态，daemon 一起来
+// 就是空的 → 启动那一轮刷新会一个 provider 都不查（实测 serve.log：
+// 「查了 0 / 不活跃跳过 6」，且整整 60 秒才等到第一条 OTel 恢复）。而 ccl 在
+// 拉起 daemon **之前**就把本次选中的 provider 写进了 state.json
+// （SetActiveProvider 在 ensureDaemonRunning 之前）→ 启动那轮就能刷它。
+//
+// **这是兜底，不是主路径**：主路径是 ccl 启动后直接向 daemon 声明
+// （见 collector.ServerOptions.OnActivate）。兜底覆盖的是"daemon 独立启动
+// （不经 ccl）"和"ccl 启动时没写 state.json"（选中的正好是 default provider
+// 时不写）这两种情况。
+func markRecordedActiveProvider(activity *collector.Activity, baseDir string) {
+	if activity == nil {
+		return
+	}
+	name := state.NewManager(baseDir).GetActiveProvider()
+	if name == "" {
+		return
+	}
+	activity.Mark(name, time.Now())
+	log.Printf("ccl serve: 启动兜底：把 state.json 记录的 active provider %q 标记为活跃", name)
 }
 
 // quotaActiveWindow 是"最近有 OTel 活动"的判定窗口。

@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -84,7 +85,13 @@ func TestServer_ScenarioA_PerSignalMetrics_EndToEnd(t *testing.T) {
 	}
 	body, _ := proto.Marshal(req)
 
-	httpResp, err := http.Post("http://127.0.0.1"+addr+"/v1/metrics", "application/x-protobuf", bytes.NewReader(body))
+	// srv.Addr() 在 IPv6 机器上是 "[::]:port" → 不能直接拼到 "127.0.0.1"
+	// 后面（会得到非法 IP-literal）。取端口自己拼 loopback 地址。
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("SplitHostPort(%q): %v", addr, err)
+	}
+	httpResp, err := http.Post("http://127.0.0.1:"+port+"/v1/metrics", "application/x-protobuf", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("POST /v1/metrics: %v", err)
 	}

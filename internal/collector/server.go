@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -41,6 +42,9 @@ type Server struct {
 	// 而状态栏只显示当前会话那个 provider 的额度（见 activity.go 的注释）。
 	activity *Activity
 
+	// onActivate 处理"某 provider 现在被使用"的声明请求（可能为 nil）。
+	onActivate func(provider string) error
+
 	shuttingDown atomic.Bool // SIGTERM 时置 true → metrics handler 返回 503
 }
 
@@ -56,6 +60,21 @@ type ServerOptions struct {
 	// cmd 层注入（cmd/cc-launcher/serve.go 调 web.NewServer(...).Mount）。
 	// 未来若要第二个 UI 入口，也只需要在 cmd 层多挂一次。
 	Mount func(mux *http.ServeMux)
+
+	// OnActivate 处理"某个 provider 现在被使用"的声明请求。
+	//
+	// **为什么需要它**：额度数据的唯一消费者是状态栏，而状态栏显示的是**当前
+	// 会话那个 provider** 的额度。但"当前会话用了哪个 provider"只有 **ccl**
+	// 知道（它在 exec Claude Code 之前就选定了）—— 让它声明一次，额度就能
+	// 立刻刷新，不必等 Claude Code 起来推 OTel（实测那要等一个 OTel 周期，
+	// daemon 重启后更是整整 60 秒的盲窗）。
+	//
+	// **回调负责两件事**：①校验这个名字是不是**已配置的** provider（名字来自
+	// HTTP 查询串，防注入 / 防对任意 URL 发请求）；②通知刷新循环立即刷一轮。
+	// 返回非 nil error → 拒绝该请求（HTTP 400）。
+	//
+	// nil = 不提供该能力 → `/ccl/activate` 路径**不注册**（404）。
+	OnActivate func(provider string) error
 }
 
 // NewServer 构造 HTTP server，但不启动。调 Start() 才真正 listen。
@@ -74,6 +93,12 @@ func NewServer(opts ServerOptions) *Server {
 	mux.HandleFunc("/v1/metrics", s.handleMetrics)
 	mux.HandleFunc("/v1/logs", s.handleAckOnly())
 	mux.HandleFunc("/v1/traces", s.handleAckOnly())
+	// **未配置 OnActivate → 不注册该路径** → 请求得到 404。
+	// 不暴露一个"什么都不做"的端点（免得让人以为激活生效了）。
+	if opts.OnActivate != nil {
+		s.onActivate = opts.OnActivate
+		mux.HandleFunc(activatePath, s.handleActivate)
+	}
 	if opts.Mount != nil {
 		opts.Mount(mux)
 	}
@@ -212,6 +237,46 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 // 供 cmd 层（ccl serve 的额度刷新）判断"哪些 provider 最近有人在用"——
 // 不活跃的 provider 不需要查额度（省请求 + 不触发厂商限流）。
 func (s *Server) Activity() *Activity { return s.activity }
+
+// activatePath 是 provider 激活声明的路径。
+//
+// **为什么在 daemon 的端口上**（而不是另开一个）：daemon 已经在 :4318 监听，
+// 多挂一个路径是几行代码；另开端口要改 fork 逻辑、要处理端口冲突，收益为零。
+//
+// **它暴露了什么**：能访问该端口的人可以让 daemon 去查某个**已配置** provider
+// 的额度（响应是 204 空，不回传额度数据）。这个端口本来就裸露着 OTel 数据，
+// 风险级别没有提升。
+const activatePath = "/ccl/activate"
+
+// handleActivate 处理 provider 激活声明：ccl 在启动 Claude Code 之前告诉
+// daemon"本次会话用这个 provider" → daemon 立刻把它标记为活跃，并（经
+// OnActivate 回调）触发一轮额度刷新。
+//
+// **白名单校验在 OnActivate 回调里做**（cmd 层知道 providers 目录）：名字来自
+// HTTP 查询串，必须确认它是**真实配置的** provider，否则不该为它发请求。
+func (s *Server) handleActivate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.shuttingDown.Load() {
+		http.Error(w, "daemon shutting down", http.StatusServiceUnavailable)
+		return
+	}
+	name := strings.TrimSpace(r.URL.Query().Get("provider"))
+	if name == "" {
+		http.Error(w, "missing provider", http.StatusBadRequest)
+		return
+	}
+	// 回调先校验再通知：校验没过就不该有任何副作用（含标记活跃）。
+	if err := s.onActivate(name); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	// 校验通过 → 标记活跃（额度刷新循环据此决定查谁）。
+	s.activity.Mark(name, time.Now())
+	w.WriteHeader(http.StatusNoContent)
+}
 
 // handleAckOnly 处理 logs/traces：仅回 200，不解析、不持久、不转发。
 //
