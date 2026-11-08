@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.20.6] - 2026-11-08 — quota-freshness-and-pool-consistency
+
+### Fixes
+- **同一额度池的多个 provider 显示不同时刻的数据**：额度按 key 分，同一把 key 的多个 provider 引用**同一个额度池** → 它们的额度是同一个事实，必须同源。但 serve 的周期刷新里，"只刷新活跃 provider"的过滤做在 **provider 级** —— 不活跃的 provider 在登记归属池**之前**就被跳过了 → 刷新结果写回时按池匹配，**匹配不上它** → 同池成员永远拿不到新数据
+  - 真机实测：`minimax-m3` 与 `minimax-m3.1-flash` 共用同一把 key，改前两者 `fetched_at` 相差 38 分钟；改后**完全一致**
+  - 过滤粒度提到**额度池级**：池内任一 provider 活跃 → 整池刷新 → 结果写给池内所有 provider（`fetched_at` 同一个值）
+- **daemon 启动后整整 60 秒不查任何额度**：daemon 的 provider 活跃度是**纯内存**状态，刚起来时是空的 → 启动那一轮刷新一个 provider 都不查。而"活跃"的唯一来源是 Claude Code 推来的 OTel metrics → 要等一个 OTel 周期（实测 60 秒）
+  - 真机实测（`~/.cc-launcher/serve.log`）：改前首轮 `查了 0 / 不活跃跳过 6`，连续 4 轮如此，第 5 轮（60 秒后）才恢复；改后首轮 `查了 4 / 不活跃跳过 0`
+  - daemon 启动时把 `state.json` 里记录的 active provider 标为活跃 → 启动那轮就有池可刷
+- **切到此前不活跃的 provider 时，状态栏显示的是几十分钟前的旧数字**：旧条目会一直留着（直到那个 provider 再次活跃），用户看到的是一个**真数字**而不是 `--` → 比没有数据更有欺骗性
+
+### Features
+- **ccl → daemon 的 provider 激活通道**：ccl 启动 Claude Code 前就知道这次用哪个 provider —— 这是最权威、也最早可得的信号（原来的"活跃"信号要绕一圈等 Claude Code 起来推 OTel）。ccl 发一个 `POST /ccl/activate?provider=X`，daemon 收到后立刻标记该 provider 活跃并**立即触发一轮刷新**（不等 ticker）
+  - **fire-and-forget**：ccl 不等响应、不阻塞启动；daemon 连不上就静默忽略（Claude Code 的 OTel 是兜底路径）
+  - **白名单校验**：daemon 只接受 `providers/` 目录里真实存在的 provider 名（否则这个端点就成了"让 daemon 带用户的 key 去访问任意 URL"的放大器）
+- **兜底保鲜（10 分钟）**：没有活跃成员的额度池，若记录已旧于 10 分钟也会被刷一次 → 用户切到任何 provider，看到的数字最多旧 10 分钟
+  - **限流优先于保鲜**：正在 429 退避的池即使超过 10 分钟也不刷
+  - **它不是刷新周期**：`refreshInterval`（默认 60 秒）管"有人在用时多久刷一次"，保鲜管"没人用时数据最多能旧多久"
+  - **量级**：每池每 10 分钟 1 次 → 4 个池 ≈ 24 请求/小时（8 个池的机器 ≈ 48 请求/小时，仍远低于厂商限流阈值）
+- **刷新轮次的汇总日志改按"额度池"计数**（请求本来就按池发）：`[quota] 额度刷新一轮（池）：查了 1 / 不活跃跳过 3 / 未到期或退避跳过 1 / 失败 0`
+
+### Tests
+- `internal/quota`：同池一活跃一不活跃 → 两者记录**同一时刻**；不活跃池超 10 分钟 → 被刷；**未超 10 分钟 → 不被刷**（防止保鲜规则退化成每轮全刷）；活跃池记录陈旧 → 立即被刷；退避中的池即使超保鲜期也不被刷；`RefreshResult` 的计数单位是池
+- `internal/collector`：激活端点 —— 合法名 204 + 标记活跃；非法名 400 + **不**标记；未配置回调 → 路径不注册（404）；缺参数 400；非 POST 405
+- `cmd/cc-launcher`：白名单拒绝未知 provider、拒绝路径穿越；激活信号触发立即刷新（端到端）；daemon 不可达时声明静默失败且不阻塞；provider 名正确 URL 转义
+- `internal/collector`：修 `TestServer_ScenarioA_PerSignalMetrics_EndToEnd` 在 IPv6 机器上的 URL 拼接（`"http://127.0.0.1" + "[::]:port"` 是非法 IP-literal）
+
+### OpenSpec
+- `quota-freshness-and-pool-consistency`（归档：修改 `openspec/specs/provider-quota` 的「ccl refreshes the quota periodically in the daemon」（刷新的粒度改为额度池 + 兜底保鲜），新增「ccl declares the provider it selected to the daemon」；修改 `openspec/specs/daemon-lifecycle` 的「ccl serve refreshes the quotas of the configured providers」（启动那轮不得空转），新增「ccl serve accepts a provider activation request」）
+
+### Compatibility
+- **daemon 在 :4318 新增一个 HTTP 路径** `POST /ccl/activate?provider=X`（仅接受已配置的 provider 名；响应 204 空，**不回传额度数据**）。该端口本来就裸露着 OTel 数据，风险级别未提升
+- **额度请求量小幅上升**：兜底保鲜（每池每 10 分钟 1 次）+ 每次 `ccl` 启动最多多 1 个池
+- 不改 `quota.json` / `state.json` 的文件格式；`ccl quota` 输出契约不变；`CCL_PROVIDER` 契约不变；无需用户做任何操作
+
 ## [0.20.5] - 2026-11-06 — serve-log-to-file
 
 ### Fixes
