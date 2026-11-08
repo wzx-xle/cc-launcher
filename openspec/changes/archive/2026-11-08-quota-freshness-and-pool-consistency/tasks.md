@@ -42,4 +42,4 @@
 - [x] 6.5 真机：确认不活跃的池**不会**每 15 秒被刷（看 serve.log 的"不活跃跳过"计数稳定，请求量不涨）
 - [x] 6.6 `CHANGELOG.md` 加版本段（patch：修缺陷，用户不需新动作；但"刷新粒度从 provider 改为池"是可见的行为变化，版本号若有异议按用户定）
 - [x] 6.7 `openspec archive quota-freshness-and-pool-consistency`
-- [ ] 6.8 打 tag + 推送（scoop 是否跟发由用户定）
+- [x] 6.8 打 tag + 推送（scoop 是否跟发由用户定）
