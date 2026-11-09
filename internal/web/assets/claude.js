@@ -30,11 +30,12 @@
   function sidebarHost() { return document.getElementById('sidebar'); }
   function mainHost() { return document.getElementById('view-claude'); }
 
-  function setStatus(text, kind) {
+  function setStatus(text, kind, seq) {
+    // 过期轮次的状态不写进当前的标题行
+    if (seq !== undefined && seq !== renderSeq) { return; }
     if (!statusHost) { return; }
-    statusHost.textContent = '';
-    if (!text) { return; }
-    statusHost.appendChild(el('span', kind === 'err' ? 'hint err' : (kind === 'ok' ? 'hint ok' : 'hint'), text));
+    statusHost.className = 'hint' + (kind === 'err' ? ' err' : (kind === 'ok' ? ' ok' : ''));
+    statusHost.textContent = text || '';
   }
 
   function fileLabel(id) {
@@ -67,10 +68,18 @@
     host.appendChild(list);
   }
 
+  /* renderSeq 是渲染轮次序号 —— **修跨渲染竞态**。
+   *
+   * 模块级的 `editor` / `statusHost` 会被下一轮 renderMain 重新赋值 → 迟到的旧
+   * 响应会写进**新文件**的界面（旧内容灌进新编辑器、etag 被覆盖）。
+   */
+  var renderSeq = 0;
+
   function renderMain() {
     var host = mainHost();
     host.textContent = '';
     editor = null;
+    var seq = ++renderSeq;
 
     var file = null;
     for (var i = 0; i < state.files.length; i++) {
@@ -90,23 +99,29 @@
       host.appendChild(el('div', 'hint', '文件还不存在。写点内容保存就会创建它。'));
     }
 
-    var editorHost = el('div');
-    host.appendChild(editorHost);
+    /* 编辑区：标题行（状态 + 按钮）+ 编辑器本体。
+     *
+     * **.editor 直接挂 .editor-zone 下**（中间不隔普通 div）：隔了的话 .editor 的
+     * 父不是 flex 容器 → `.editor { flex: 1 }` 无效 → 编辑器塌成 2px。
+     */
+    var zone = el('div', 'editor-zone');
+    host.appendChild(zone);
 
-    var foot = el('div', 'editor-foot');
-    statusHost = el('span');
-    foot.appendChild(statusHost);
-    foot.appendChild(el('span', 'spacer'));
+    var editorHead = el('div', 'editor-head');
+    editorHead.appendChild(el('h3', null, isJSON(file.id) ? 'JSON' : 'Markdown'));
+    statusHost = el('span', 'hint');
+    editorHead.appendChild(statusHost);
+    editorHead.appendChild(el('span', 'spacer'));
 
-    var saveBtn = el('button', 'btn', '保存');
+    var saveBtn = el('button', 'btn', '保存'); /* 保存排最前 */
     saveBtn.type = 'button';
     saveBtn.addEventListener('click', doSave);
-    foot.appendChild(saveBtn);
+    editorHead.appendChild(saveBtn);
 
     var revertBtn = el('button', 'btn ghost', '放弃修改');
     revertBtn.type = 'button';
     revertBtn.addEventListener('click', function () { selectFile(state.current); });
-    foot.appendChild(revertBtn);
+    editorHead.appendChild(revertBtn);
 
     if (isJSON(file.id)) {
       var fmt = el('button', 'btn ghost', '格式化');
@@ -120,12 +135,12 @@
           setStatus('JSON 解析失败，不能格式化：' + e.message, 'err');
         }
       });
-      foot.appendChild(fmt);
+      editorHead.appendChild(fmt);
     }
 
-    host.appendChild(foot);
+    zone.appendChild(editorHead);
 
-    editor = window.CCL.createEditor(editorHost, {
+    editor = window.CCL.createEditor(zone, {
       value: state.content,
       mode: isJSON(file.id) ? 'json' : 'text',
       onChange: function (value) {
@@ -145,11 +160,12 @@
 
     window.CCL.api.get('/api/claude/file/' + encodeURIComponent(file.id))
       .then(function (data) {
+        if (seq !== renderSeq) { return; } /* 已经切到别的文件了 */
         state.etag = data.etag;
         state.content = data.content;
-        if (editor) { editor.setValue(data.content); }
+        editor.setValue(data.content);
       })
-      .catch(function (e) { setStatus('读取失败：' + e.message, 'err'); });
+      .catch(function (e) { setStatus('读取失败：' + e.message, 'err', seq); });
   }
 
   function selectFile(id) {
@@ -161,6 +177,7 @@
 
   function doSave() {
     if (!editor) { return; }
+    var seq = renderSeq; /* 期间切走了就别写当前的 state / 提示 */
     if (isJSON(state.current)) {
       var err = editor.validate();
       if (err) { setStatus('JSON 解析失败，改动没有保存', 'err'); return; }
@@ -169,11 +186,13 @@
     window.CCL.api.send('PUT', '/api/claude/file/' + encodeURIComponent(state.current),
       { content: editor.getValue() }, state.etag)
       .then(function (data) {
+        if (seq !== renderSeq) { return; }
         state.etag = data.etag;
         setStatus('已保存。已在运行的 Claude Code 不会自动生效（它只在启动时读配置）。', 'ok');
         loadFiles();
       })
       .catch(function (e) {
+        if (seq !== renderSeq) { return; }
         if (e.status === 409) {
           setStatus('文件已被其他程序修改。请重新加载后再保存——改动还在编辑框里，没丢。', 'err');
         } else if (e.status === 400 && e.data && e.data.errors) {

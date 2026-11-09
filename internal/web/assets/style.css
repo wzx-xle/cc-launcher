@@ -484,6 +484,24 @@ tbody tr:last-child td { border-bottom: 0; }
 }
 .view[hidden] { display: none; }
 
+/* 两个编辑视图：竖向 flex + 至少占满剩余视口。
+ *
+ * **必须带 :not([hidden])** —— 隐藏视图的规则是 `.view[hidden] { display: none }`
+ * （特异性 0,2,0），而裸的 `#view-providers`（1,0,0）**特异性更高会盖过它**
+ * → 隐藏的视图照样 display:flex 显示出来，两个视图叠在一起（实测过）。
+ *
+ * 122.5px 的来历：顶栏实测 56.5 + #content padding-top 18 + padding-bottom 48
+ * = 122.5，**取 122.5 而不是整数** —— 取整到 122 会让总高 900.5 → scrollHeight
+ * 向上取整成 901 → 多出 1px 的竖向滚动条；取 123 则总高 899.5（少半像素，
+ * 底部留白略少）。122.5 正好让总高 = 视口高，滚动条不出现。
+ */
+#view-providers:not([hidden]),
+#view-claude:not([hidden]) {
+  display: flex;
+  flex-direction: column;
+  min-height: calc(100vh - 122.5px);
+}
+
 .page-head {
   display: flex;
   align-items: baseline;
@@ -523,14 +541,26 @@ tbody tr:last-child td { border-bottom: 0; }
   padding: 12px 14px;
   margin-bottom: 14px;
 }
-.quota-head {
+/* 标题行：额度卡与编辑区共用一套（flex + spacer 把按钮推到最右）。
+ *
+ * 合并成一条规则而不是各写一份 —— "两处观感统一"要靠**同一条规则**保证，
+ * 不能靠"看起来像"。
+ */
+.quota-head,
+.editor-head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 10px;
   flex-wrap: wrap;
-  margin-bottom: 8px;
 }
-.quota-head h3 { font-size: 13px; margin: 0; font-weight: 600; }
+.quota-head { margin-bottom: 8px; }
+.editor-head { margin: 14px 0 8px; }
+.quota-head h3,
+.editor-head h3 { font-size: 13px; margin: 0; font-weight: 600; }
+.quota-head .spacer,
+.editor-head .spacer { flex: 1; }
+/* .hint 自带 margin: 6px 0 0 —— 放进 flex 行会与标题/按钮错位 6px */
+.editor-head .hint { margin: 0; }
 .quota-dim {
   display: flex;
   align-items: baseline;
@@ -580,7 +610,24 @@ tbody tr:last-child td { border-bottom: 0; }
 
 /* ---------- 原文编辑器（透明 textarea 叠在高亮层上） ---------- */
 
+/* 编辑区：内部竖向 flex，把剩余高度全部分给编辑器。
+ *
+ * 高度下限挂在 **.editor（编辑器本体）** 上，不是 .editor-zone：
+ * zone 里还有一行标题行（≈53px），下限挂在 zone 上会让**编辑器本体**比现状矮
+ * （实测 286.5px < 340px）。挂在 .editor 上时：
+ *   - 空间充足 → editor = 剩余空间（撑满）
+ *   - 空间不足 → editor 保持 340px 并溢出 zone → 页面出现竖向滚动条
+ *     （现状本来就有），但编辑器不会比现在更矮
+ */
+.editor-zone {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
 .editor {
+  flex: 1;
+  min-height: 340px; /* 编辑器可见高度的下限 = 现状值 */
   position: relative;
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -604,13 +651,19 @@ tbody tr:last-child td { border-bottom: 0; }
   color: var(--text-primary);
 }
 .editor textarea {
-  position: relative;
-  display: block;
+  /* 绝对定位铺满 .editor 的 padding box（.editor 已是 relative）。
+   *
+   * 去掉 min-height / max-height：高度改由 flex 链决定。
+   * **resize 必须是 none**：textarea 的 UA 默认样式就是 `resize: both`，只把
+   * `vertical` 删掉等于退回默认（还能拖）——手动拖会破坏布局的高度分配。
+   * **不留 min-height 兜底** —— 绝对定位后 textarea 不占 .editor 的内容高度，
+   * 兜底反而会超出 .editor，而 .editor 是 overflow:hidden → 编辑器被裁成一条缝。
+   */
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
-  min-height: 340px;
-  max-height: 62vh;
-  resize: vertical;
+  resize: none;
   background: transparent;
   color: transparent;
   caret-color: var(--text-primary);

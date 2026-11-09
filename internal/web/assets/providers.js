@@ -205,24 +205,39 @@
   }
 
   function renderQuota(host, quota) {
-    host.textContent = '';
-
-    var head = el('div', 'quota-head');
+    /* 头部与内容**分开**：内容区整体替换，head（含刷新按钮）保留。
+     *
+     * 之前是 `host.textContent = ''` 换掉整张卡 → 刷新失败时**刷新按钮一起消失**
+     * → 用户没法重试，只能切 provider 走一圈。
+     */
+    var head = host.querySelector('.quota-head');
+    if (!head) {
+      head = el('div', 'quota-head');
+      host.appendChild(head);
+    }
+    head.textContent = '';
     head.appendChild(el('h3', null, '额度'));
+    head.appendChild(el('span', 'spacer')); /* 把刷新按钮推到标题行最右 */
     var refreshBtn = el('button', 'btn ghost', '刷新');
     refreshBtn.type = 'button';
     refreshBtn.title = '联网查一次（按需，不受"只刷活跃 provider"的限制）';
     refreshBtn.addEventListener('click', function () { doRefreshQuota(refreshBtn); });
     head.appendChild(refreshBtn);
-    host.appendChild(head);
+
+    var body = host.querySelector('.quota-body');
+    if (!body) {
+      body = el('div', 'quota-body');
+      host.appendChild(body);
+    }
+    body.textContent = '';
 
     if (!quota) {
-      host.appendChild(el('div', 'quota-note', '加载中…'));
+      body.appendChild(el('div', 'quota-note', '加载中…'));
       return;
     }
 
     if (!quota.has_quota) {
-      host.appendChild(el('div', 'quota-note', '这个 provider 没有额度接口。'));
+      body.appendChild(el('div', 'quota-note', '这个 provider 没有额度接口。'));
       return;
     }
 
@@ -232,44 +247,49 @@
       var miss = el('div', 'quota-note');
       miss.appendChild(el('div', null, '近期无活动，未采集额度。'));
       miss.appendChild(el('div', null, '（这不是"无限额"——点「刷新」按需查一次。）'));
-      host.appendChild(miss);
+      body.appendChild(miss);
       return;
     }
 
     var dims = quota.dimensions || [];
     if (dims.length === 0) {
-      host.appendChild(el('div', 'quota-note', '没有额度维度。'));
+      body.appendChild(el('div', 'quota-note', '没有额度维度。'));
     }
-    dims.forEach(function (d) { host.appendChild(dimRow(d)); });
+    dims.forEach(function (d) { body.appendChild(dimRow(d)); });
 
     var note = el('div', 'quota-note');
     note.appendChild(el('span', null, ageText(quota.fetched_at) + '采集'));
     if (quota.stale) {
       note.appendChild(el('span', null, ' · 数据已过期'));
     }
-    host.appendChild(note);
+    body.appendChild(note);
   }
 
   function doRefreshQuota(btn) {
     if (!state.current) { return; }
+    var provider = state.current; /* 快照：期间切走了就不往新卡上画 */
     btn.disabled = true;
     btn.textContent = '刷新中…';
-    window.CCL.api.send('POST', '/api/providers/' + encodeURIComponent(state.current) + '/quota/refresh', {})
+    window.CCL.api.send('POST', '/api/providers/' + encodeURIComponent(provider) + '/quota/refresh', {})
       .then(function (q) {
+        if (provider !== state.current) { return; }
         state.quota = q;
         renderQuota(quotaHost(), q);
       })
       .catch(function (err) {
         var host = quotaHost();
+        if (!host) { return; }
+        /* 只换**内容区** —— head（含刷新按钮）留着，用户能直接再点一次重试 */
+        var body = host.querySelector('.quota-body');
+        if (!body) { return; }
+        body.textContent = '';
         if (err.status === 429) {
           var wait = err.data && err.data.retry_after;
-          host.textContent = '';
-          host.appendChild(el('div', 'quota-note',
+          body.appendChild(el('div', 'quota-note',
             '厂商限流中，' + Math.ceil((wait || 0) / 60) + ' 分钟后可再试。'));
           /* 退避是持久化的：手动刷冲不掉它（打的是同一个接口、同一把 key）。 */
         } else {
-          host.textContent = '';
-          host.appendChild(el('div', 'quota-note', '刷新失败：' + err.message));
+          body.appendChild(el('div', 'quota-note', '刷新失败：' + err.message));
         }
       })
       .then(function () {
@@ -332,17 +352,29 @@
 
   function quotaHost() { return quotaHostEl; }
 
-  function setStatus(text, kind) {
+  /* renderSeq 是渲染轮次序号。
+   *
+   * **修跨渲染竞态**：模块级的 `editor` / `statusHost` / `quotaHostEl` 会被下一轮
+   * renderMain 重新赋值 → **迟到的旧响应会写进新 provider 的界面**（旧配置灌进
+   * 新编辑器、`state.etag` 被覆盖 → 用户看着新 provider 的内容，点保存存成旧的）。
+   *
+   * 每轮 renderMain 自增序号；异步回调里比对，不是本轮的直接丢弃。
+   */
+  var renderSeq = 0;
+
+  function setStatus(text, kind, seq) {
+    // 过期轮次的状态不写进当前的标题行
+    if (seq !== undefined && seq !== renderSeq) { return; }
     if (!statusHost) { return; }
-    statusHost.textContent = '';
-    if (!text) { return; }
-    statusHost.appendChild(el('span', kind === 'err' ? 'hint err' : (kind === 'ok' ? 'hint ok' : 'hint'), text));
+    statusHost.className = 'hint' + (kind === 'err' ? ' err' : (kind === 'ok' ? ' ok' : ''));
+    statusHost.textContent = text || '';
   }
 
   function renderMain() {
     var host = mainHost();
     host.textContent = '';
     editor = null;
+    var seq = ++renderSeq;
 
     if (state.creating) {
       renderCreateForm(host);
@@ -364,32 +396,38 @@
     host.appendChild(quotaHostEl);
     renderQuota(quotaHostEl, state.quota);
 
-    var editorHost = el('div');
-    host.appendChild(editorHost);
+    /* 编辑区：标题行（状态 + 按钮）+ 编辑器本体。
+     *
+     * **.editor 直接挂 .editor-zone 下**（中间不隔普通 div）：隔了的话 .editor 的
+     * 父不是 flex 容器 → `.editor { flex: 1 }` 完全无效 → 编辑器塌成 2px。
+     */
+    var zone = el('div', 'editor-zone');
+    host.appendChild(zone);
 
-    var foot = el('div', 'editor-foot');
-    statusHost = el('span');
-    foot.appendChild(statusHost);
-    foot.appendChild(el('span', 'spacer'));
+    var editorHead = el('div', 'editor-head');
+    editorHead.appendChild(el('h3', null, 'JSON'));
+    statusHost = el('span', 'hint');
+    editorHead.appendChild(statusHost);
+    editorHead.appendChild(el('span', 'spacer'));
+
+    var saveBtn = el('button', 'btn', '保存'); /* 保存排最前 */
+    saveBtn.type = 'button';
+    saveBtn.addEventListener('click', doSave);
+    editorHead.appendChild(saveBtn);
 
     var copyBtn = el('button', 'btn ghost', '复制');
     copyBtn.type = 'button';
     copyBtn.addEventListener('click', doCopy);
-    foot.appendChild(copyBtn);
+    editorHead.appendChild(copyBtn);
 
     var delBtn = el('button', 'btn ghost', '删除');
     delBtn.type = 'button';
     delBtn.addEventListener('click', doDelete);
-    foot.appendChild(delBtn);
+    editorHead.appendChild(delBtn);
 
-    var saveBtn = el('button', 'btn', '保存');
-    saveBtn.type = 'button';
-    saveBtn.addEventListener('click', doSave);
-    foot.appendChild(saveBtn);
+    zone.appendChild(editorHead);
 
-    host.appendChild(foot);
-
-    editor = window.CCL.createEditor(editorHost, {
+    editor = window.CCL.createEditor(zone, {
       value: state.content || '',
       mode: 'json',
       onChange: function (value) {
@@ -408,19 +446,19 @@
     /* 载入内容 */
     window.CCL.api.get('/api/providers/' + encodeURIComponent(state.current))
       .then(function (data) {
+        if (seq !== renderSeq) { return; } /* 已经切到别的 provider 了 */
         state.etag = data.etag;
         state.content = data.content;
-        if (editor) {
-          editor.setValue(data.content);
-          var err = editor.validate();
-          if (err) { setStatus('JSON 解析失败：' + err, 'err'); saveBtn.disabled = true; }
-        }
+        editor.setValue(data.content);
+        var err = editor.validate();
+        if (err) { setStatus('JSON 解析失败：' + err, 'err'); saveBtn.disabled = true; }
       })
-      .catch(function (err) { setStatus('读取失败：' + err.message, 'err'); });
+      .catch(function (err) { setStatus('读取失败：' + err.message, 'err', seq); });
 
     /* 载入额度（零网络：读本地额度数据文件） */
     window.CCL.api.get('/api/providers/' + encodeURIComponent(state.current) + '/quota')
       .then(function (q) {
+        if (seq !== renderSeq) { return; }
         state.quota = q;
         if (quotaHostEl) { renderQuota(quotaHostEl, q); }
       })
@@ -448,18 +486,21 @@
 
   function doSave() {
     if (!editor) { return; }
+    var seq = renderSeq; /* 期间切走了就别写当前的 state / 提示 */
     var err = editor.validate();
     if (err) { setStatus('JSON 解析失败，改动没有保存', 'err'); return; }
 
     window.CCL.api.send('PUT', '/api/providers/' + encodeURIComponent(state.current),
       { content: editor.getValue() }, state.etag)
       .then(function (data) {
+        if (seq !== renderSeq) { return; }
         state.etag = data.etag;
         state.content = data.content;
         setStatus('已保存。下次启动 ccl 生效（已在跑的会话不会热更新）。', 'ok');
         loadList();
       })
       .catch(function (e) {
+        if (seq !== renderSeq) { return; }
         if (e.status === 409) {
           setStatus('文件已被其他程序修改（' + (e.data && e.data.error ? e.data.error : '冲突') + '）。' +
             '请重新加载后再保存——改动还在编辑框里，没丢。', 'err');
@@ -474,25 +515,29 @@
   function doCopy() {
     var name = window.prompt('复制成新 provider（名字）', state.current + '-copy');
     if (!name) { return; }
+    var seq = renderSeq;
     window.CCL.api.send('POST', '/api/providers/' + encodeURIComponent(state.current) + '/copy', { name: name })
       .then(function () {
+        if (seq !== renderSeq) { return; }
         loadList().then(function () { selectProvider(name); });
       })
-      .catch(function (e) { setStatus('复制失败：' + e.message, 'err'); });
+      .catch(function (e) { if (seq === renderSeq) { setStatus('复制失败：' + e.message, 'err'); } });
   }
 
   function doDelete() {
     if (!window.confirm('删除 provider「' + state.current + '」？\n' +
       '配置文件会被删掉（额度数据里的条目也会清掉）。\n' +
       '删错了可以从 ~/.cc-launcher/backups 里找回。')) { return; }
+    var seq = renderSeq;
     window.CCL.api.send('DELETE', '/api/providers/' + encodeURIComponent(state.current), {})
       .then(function () {
+        if (seq !== renderSeq) { return; }
         state.current = '';
         state.content = '';
         state.quota = null;
         loadList();
       })
-      .catch(function (e) { setStatus('删除失败：' + e.message, 'err'); });
+      .catch(function (e) { if (seq === renderSeq) { setStatus('删除失败：' + e.message, 'err'); } });
   }
 
   function renderCreateForm(host) {
