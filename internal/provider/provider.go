@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 
+	"cc-launcher/internal/safefile"
 	"cc-launcher/internal/settingsschema"
 )
 
@@ -58,6 +60,16 @@ type Info struct {
 	// PassthroughKeys 是会被透传给 Claude Code 的顶层键数（env 以外的键）。
 	// 用来告诉用户"这个 provider 还带了别的设置"。
 	PassthroughKeys int
+	// HasQuota 表示配置里声明了额度接口（顶层 `quota` 块）。
+	//
+	// web 控制台用它决定"要不要显示额度卡"——没声明额度接口的 provider
+	// 查不到额度，显示一个空卡片只会让人以为额度是 0。
+	HasQuota bool
+	// HasCredential 表示 env 块里有凭证（ANTHROPIC_AUTH_TOKEN /
+	// ANTHROPIC_API_KEY 之一）。
+	//
+	// 用来在列表里标出"这个 provider 还没填 token"——它是启动失败的头号原因。
+	HasCredential bool
 }
 
 // configFile 是 provider JSON 文件的内部表示（仅用于 Unmarshal；List() 不导出）。
@@ -66,7 +78,14 @@ type configFile struct {
 	Env   map[string]any `json:"env"`
 	Note  string         `json:"note,omitempty"`
 	Order int            `json:"order,omitempty"`
+	Quota map[string]any `json:"quota,omitempty"`
 }
+
+// credentialKeys 是"算有凭证"的 env 键。
+//
+// 与 CreateWithEnv 的要求一致（必须有 ANTHROPIC_AUTH_TOKEN），但多认一个
+// ANTHROPIC_API_KEY——Claude Code 两种都认，provider 文件里两种都见过。
+var credentialKeys = []string{"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"}
 
 // ReservedKeys 是 ccl 自己的 provider 元数据键。
 //
@@ -92,11 +111,55 @@ func IsReservedKey(key string) bool { return ReservedKeys[key] }
 // Manager 管理 ~/.cc-launcher/providers/ 目录。
 type Manager struct {
 	providersDir string
+	// backupDir 是备份目录；空 = 写入不备份。
+	//
+	// 备份是"写坏了能回退"的最后一道保险：web 控制台是 provider 配置的
+	// 第二个写入口（第一个是 CLI），两边都写同一个目录。
+	backupDir string
 }
 
-// NewManager 创建 Manager。
+// NewManager 创建 Manager（写入不备份）。
 func NewManager(providersDir string) *Manager {
 	return &Manager{providersDir: providersDir}
+}
+
+// SetBackupDir 设置备份目录。设了之后，所有写入都会先把旧内容备份进去。
+func (m *Manager) SetBackupDir(dir string) {
+	m.backupDir = dir
+}
+
+// BackupDir 返回备份目录（空 = 不备份）。
+func (m *Manager) BackupDir() string {
+	return m.backupDir
+}
+
+// providerNamePattern 是 provider 配置名的合法形态。
+//
+// 名字会被拼成文件名（`<name>.json`）放进 providers 目录，所以必须排除
+// 路径分隔符与父目录引用。名字同时也是注入给消费方的 `CCL_PROVIDER` 的值，
+// 那条契约也要求名字不带凭证特征（TOKEN / KEY / SECRET / PASSWORD）。
+var providerNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+
+// ValidName 判断 name 能不能作为 provider 的配置文件名。
+//
+// "." 与 ".." 都能通过正则，必须单独排除。
+func ValidName(name string) bool {
+	if !providerNamePattern.MatchString(name) {
+		return false
+	}
+	return name != "." && name != ".."
+}
+
+// ValidationError 表示 provider 配置没通过 schema 校验。
+//
+// 单独一个类型，是为了让调用方把它和"磁盘写不进去"区分开：校验失败是
+// **用户配置的问题**（HTTP 400 + 错误列表），其他错误是环境问题（HTTP 500）。
+type ValidationError struct {
+	Errors []string
+}
+
+func (e *ValidationError) Error() string {
+	return "配置校验失败:\n  - " + strings.Join(e.Errors, "\n  - ")
 }
 
 // ProvidersDir 返回 providers 目录路径（供 CLI 层显示用）。
@@ -137,6 +200,13 @@ func (m *Manager) List() ([]Info, error) {
 			} else {
 				info.Note = cfg.Note
 				info.Order = cfg.Order
+				info.HasQuota = len(cfg.Quota) > 0
+				for _, key := range credentialKeys {
+					if _, ok := cfg.Env[key]; ok {
+						info.HasCredential = true
+						break
+					}
+				}
 			}
 			// 顶层键：算透传键数 + 跑一遍 schema 校验。
 			// 校验失败不阻断 List()——列表要把所有 provider 都列出来，
@@ -168,7 +238,10 @@ func (m *Manager) List() ([]Info, error) {
 
 // Get 读取并解析指定提供商的完整配置。
 func (m *Manager) Get(name string) (map[string]any, error) {
-	path := filepath.Join(m.providersDir, name+".json")
+	path, err := m.pathOf(name)
+	if err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -181,6 +254,44 @@ func (m *Manager) Get(name string) (map[string]any, error) {
 		return nil, fmt.Errorf("提供商 %q 配置解析失败: %w", name, err)
 	}
 	return cfg, nil
+}
+
+// pathOf 解析 provider 的配置文件路径，并挡住名字里的路径穿越。
+func (m *Manager) pathOf(name string) (string, error) {
+	if !ValidName(name) {
+		return "", fmt.Errorf("提供商名 %q 不合法", name)
+	}
+	return filepath.Join(m.providersDir, name+".json"), nil
+}
+
+// SaveRaw 用给定原文覆盖 provider 的配置文件。
+//
+// 顺序是硬要求：**先校验、再备份、最后原子写**。
+//
+//   - 校验在前：写坏配置的后果是 Claude Code 丢弃**整个** settings 文件
+//     （provider 的凭证跟着一起消失）——宁可什么都不写
+//   - 备份在中：写盘失败或内容写错时能回退
+//   - 原子写在最后：不让用户看到半个文件
+//
+// 校验不过返回 *ValidationError（调用方据此回 400）。
+func (m *Manager) SaveRaw(name string, content []byte) error {
+	path, err := m.pathOf(name)
+	if err != nil {
+		return err
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(content, &raw); err != nil {
+		return fmt.Errorf("配置不是合法 JSON: %w", err)
+	}
+	if res := settingsschema.Validate(raw); !res.OK() {
+		return &ValidationError{Errors: res.Errors}
+	}
+
+	if err := os.MkdirAll(m.providersDir, 0755); err != nil {
+		return err
+	}
+	return safefile.Write(path, content, m.backupDir, safefile.DefaultKeepBackups)
 }
 
 // Create 创建新的提供商配置文件，接受任意 env 字段集合。
@@ -209,12 +320,15 @@ func (m *Manager) CreateWithEnv(name string, env map[string]any) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(m.providersDir, name+".json"), data, 0644)
+	return safefile.Write(filepath.Join(m.providersDir, name+".json"), data, m.backupDir, safefile.DefaultKeepBackups)
 }
 
 // Delete 删除指定提供商配置文件。
 func (m *Manager) Delete(name string) error {
-	path := filepath.Join(m.providersDir, name+".json")
+	path, err := m.pathOf(name)
+	if err != nil {
+		return err
+	}
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return fmt.Errorf("提供商 %q 不存在", name)
 	}
@@ -223,7 +337,10 @@ func (m *Manager) Delete(name string) error {
 
 // Exists 检查提供商配置文件是否存在。
 func (m *Manager) Exists(name string) bool {
-	path := filepath.Join(m.providersDir, name+".json")
-	_, err := os.Stat(path)
+	path, err := m.pathOf(name)
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(path)
 	return err == nil
 }

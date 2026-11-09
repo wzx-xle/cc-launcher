@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Features
+- **网页控制台：从"看用量"扩到"改配置"** —— `ccl web` 打开的 `/ui` 从单页看板重构成"顶栏 + 左栏对象列表 + 右栏编辑区"的三视图应用
+  - **用量视图**：原看板整体搬进新外壳，渲染逻辑一字未改（KPI / 趋势 / 占比 / 明细表四件套都在）
+  - **提供商视图**：左栏 provider 列表，右栏**原文 JSON 编辑**（自写语法高亮，零第三方依赖、零构建步骤）；支持新建（选模板起骨架）/ 复制 / 删除
+  - **Claude 视图**：在线编辑用户级的 `~/.claude/settings.json` 与 `~/.claude/CLAUDE.md`（只管用户级 —— `~/.claude.json` 被 Claude Code 高频写、且含 OAuth 账号信息与主机指纹；项目级配置网页不知道"当前项目"是哪个）
+  - **额度卡**：显示当前 provider 的额度维度（阈值、条形图、数值格式**与状态栏完全一致**），三态分开画 —— 新鲜 / 过期 / **没采到**（"没采到"≠"无限额"），外加**手动刷新**（联网查一次，遵守厂商限流退避）
+- **写操作的护栏**（网页能改配置 = 半个远程写文件能力，这几条是底线）：
+  - **乐观锁**：读时返回内容 etag，写时必须带 `If-Match`；对不上 → **409 且不写盘**，并把当前文件内容带回 —— 不会静默覆盖 Claude Code / ccl TUI 的改动
+  - **路径白名单**：provider 名走 `^[A-Za-z0-9._-]{1,64}$` + 目录内复核；Claude 文件只认 `settings` / `claude-md` 两个固定标识 —— **不接受任何客户端传来的路径**
+  - **CSRF 闸**：写接口要求 `Content-Type: application/json` 且 `Origin` 同源
+  - **先备份再原子写**：每次写前把旧内容复制进 `~/.cc-launcher/backups/`（每文件保留最近 30 份），写盘用临时文件 + rename
+  - **保存前 schema 校验**：已知键类型错会让 Claude Code 丢弃**整个** settings 文件（凭证跟着消失）→ 校验不过直接 400，不写盘
+- **provider 写入路径加固**：`internal/provider` 新增 `SaveRaw`（校验 → 备份 → 原子写），并堵上原有的**名字穿越**口子（`Get`/`Delete`/`Exists` 现在都拒绝非法名）
+
+### Tests
+- `internal/web`：路径穿越 404、etag 冲突 409、schema 拒绝 400 且不落盘、备份产生、跨源 403、非 JSON content-type 415、额度三态、退避 429、删除连带清额度条目、Claude 文件读写与乐观锁、未鉴权 401
+- `internal/web`（补齐评审发现的缺口）：空 provider 目录返回 `[]` 而非 `null`、缺 `note` 返回空串、**不带 `If-Match` 的写入被 409 拦下**、`{name, content}` 形态新建（且 content 优先于 template）、删不存在的 provider → 404 且**不误删别人的额度条目**、**刷新失败保留旧条目**
+- `internal/safefile`：原子写、备份内容正确、按文件分别轮转、保留旧文件权限、无临时文件残留
+- `internal/web`（前端面）：`/ui` 是三视图结构 + 用量视图的 DOM 与渲染函数一个不少（回归）、六个静态资源都能取到且类型正确、非资源路径 404
+- **前端高亮器的 node 单测**（新增 `internal/web/jstest/highlight.test.mjs`，18 条）：HTML 转义（`&` `<` `>` `"`）、凭证里的 `<script>` 不成形、输出里只有自己造的 `span` 标签、**字符串里的花括号/方括号/逗号/转义引号不误切**、未闭合字符串不崩。转义是 provider 编辑器唯一的 XSS 防线，Go 侧只能断言"文件被 embed 了"，碰不到 JS 逻辑——所以用 `node --test` 直接测浏览器里跑的那份代码（**不重写第二份 tokenizer**，两份实现必然漂移）。由 `internal/web/jstest_test.go` 包一层，`go test ./...` 自动跑（机器上没有 node 时跳过）
+- 真机验证（playwright 驱动真实浏览器）：三个视图渲染正常；网页改 `CLAUDE.md` 落盘 + 产生备份；**外部同时改文件 → 网页保存被 409 拦下、文件没被覆盖**
+
+### OpenSpec
+- `web-config-console`（新增 `web-config-console` capability；修改 `web-usage-stats` 的「the daemon serves the usage dashboard on its existing listener」与「the dashboard page renders the usage overview」—— 页面结构变三视图，用量视图行为不变）
+
+### Compatibility
+- **token 的语义变了**：从"只能看用量"扩到"能改本机配置"（provider 配置里有**明文凭证**）。缓解手段现成：`ccl web --rotate` 立刻作废旧 token 与全部 session
+- daemon 仍监听 `:4318`（**全网卡**）—— 同一局域网里拿到 token 的人同样能改配置。已知并接受，详见 `docs/web-console.md`
+- 前端仍是**零依赖零构建**：资源 `go:embed` 进二进制，发布链路（byte-level 可重现的 zip → scoop manifest hash）一个字没动
+
 ## [0.20.6] - 2026-11-08 — quota-freshness-and-pool-consistency
 
 ### Fixes

@@ -4,11 +4,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"cc-launcher/internal/provider"
+	"cc-launcher/internal/quota"
 	"cc-launcher/internal/stats"
 )
 
@@ -20,6 +23,20 @@ type Options struct {
 	TokenPath string
 	// Now 是时钟注入点（测试用）；nil = time.Now。
 	Now func() time.Time
+
+	// Providers 是 provider 管理器。
+	//
+	// nil 是合法的：provider 目录不可用时，看板的用量部分照常工作，
+	// 只是 provider / Claude 两个视图的接口返回 503。
+	Providers *provider.Manager
+	// ClaudeSettingsPath 是 ~/.claude/settings.json 路径（空 = 不提供该文件）。
+	ClaudeSettingsPath string
+	// ClaudeMemoryPath 是 ~/.claude/CLAUDE.md 路径（空 = 不提供该文件）。
+	ClaudeMemoryPath string
+	// BackupDir 是配置备份目录（~/.cc-launcher/backups）。
+	BackupDir string
+	// QuotaStore 是额度数据文件（nil = 额度接口返回 503）。
+	QuotaStore *quota.Store
 }
 
 // Server 是看板的 HTTP handler 集合。
@@ -71,10 +88,39 @@ func (s *Server) now() time.Time {
 //	/ui        → 页面
 //	/ui/<asset> → 静态资源
 //	/api/stats → JSON 数据
+//
+// 控制台的其余接口（provider / Claude 配置 / 额度）：
+//
+//	GET    /api/providers                     列出 provider
+//	GET    /api/providers/{name}              读 provider 原文 + etag
+//	PUT    /api/providers/{name}              覆盖 provider（乐观锁）
+//	POST   /api/providers                     新建 provider
+//	POST   /api/providers/{name}/copy         复制 provider
+//	DELETE /api/providers/{name}              删除 provider
+//	GET    /api/providers/{name}/quota        读额度（零网络）
+//	POST   /api/providers/{name}/quota/refresh 手动刷新额度（联网）
+//	GET    /api/claude/files                  列出可编辑的 Claude 配置文件
+//	GET    /api/claude/file/{id}              读文件原文 + etag
+//	PUT    /api/claude/file/{id}              写文件（乐观锁）
+//
+// 写接口额外过 writeGuard（Content-Type + 同源）。
 func (s *Server) Mount(mux *http.ServeMux) {
 	mux.Handle("/ui", s.protect(http.HandlerFunc(s.handleUI), false))
 	mux.Handle("/ui/", s.protect(http.HandlerFunc(s.handleAsset), false))
 	mux.Handle("/api/stats", s.protect(http.HandlerFunc(s.handleAPIStats), true))
+
+	mux.Handle("GET /api/providers", s.protect(http.HandlerFunc(s.handleAPIProviders), true))
+	mux.Handle("GET /api/providers/{name}", s.protect(http.HandlerFunc(s.handleAPIProvider), true))
+	mux.Handle("PUT /api/providers/{name}", s.protect(writeGuard(http.HandlerFunc(s.handleAPIProviderPut)), true))
+	mux.Handle("POST /api/providers", s.protect(writeGuard(http.HandlerFunc(s.handleAPIProviderCreate)), true))
+	mux.Handle("POST /api/providers/{name}/copy", s.protect(writeGuard(http.HandlerFunc(s.handleAPIProviderCopy)), true))
+	mux.Handle("DELETE /api/providers/{name}", s.protect(writeGuard(http.HandlerFunc(s.handleAPIProviderDelete)), true))
+	mux.Handle("GET /api/providers/{name}/quota", s.protect(http.HandlerFunc(s.handleAPIProviderQuota), true))
+	mux.Handle("POST /api/providers/{name}/quota/refresh", s.protect(writeGuard(http.HandlerFunc(s.handleAPIProviderQuotaRefresh)), true))
+
+	mux.Handle("GET /api/claude/files", s.protect(http.HandlerFunc(s.handleAPIClaudeFiles), true))
+	mux.Handle("GET /api/claude/file/{id}", s.protect(http.HandlerFunc(s.handleAPIClaudeFile), true))
+	mux.Handle("PUT /api/claude/file/{id}", s.protect(writeGuard(http.HandlerFunc(s.handleAPIClaudeFilePut)), true))
 }
 
 // protect 是鉴权中间件。
@@ -203,15 +249,15 @@ type apiTotals struct {
 
 // apiSession 是明细表的一行（与终端表列一一对应）。
 type apiSession struct {
-	StartedAt      time.Time `json:"started_at"`
-	Project        string    `json:"project"`
-	Provider       string    `json:"provider"`
-	Model          string    `json:"model"`
-	Input          int64     `json:"input"`
-	Output         int64     `json:"output"`
-	CacheCreation  int64     `json:"cache_creation"`
-	CacheRead      int64     `json:"cache_read"`
-	CostUSD        float64   `json:"cost_usd"`
+	StartedAt     time.Time `json:"started_at"`
+	Project       string    `json:"project"`
+	Provider      string    `json:"provider"`
+	Model         string    `json:"model"`
+	Input         int64     `json:"input"`
+	Output        int64     `json:"output"`
+	CacheCreation int64     `json:"cache_creation"`
+	CacheRead     int64     `json:"cache_read"`
+	CostUSD       float64   `json:"cost_usd"`
 }
 
 // apiBucket 是趋势图的一个时间桶。
@@ -229,9 +275,9 @@ type apiBucket struct {
 
 // apiShare 是占比表的一项。
 type apiShare struct {
-	Name      string  `json:"name"`
-	Tokens    int64   `json:"tokens"`
-	CostUSD   float64 `json:"cost_usd"`
+	Name       string  `json:"name"`
+	Tokens     int64   `json:"tokens"`
+	CostUSD    float64 `json:"cost_usd"`
 	TokenShare float64 `json:"token_share"`
 	CostShare  float64 `json:"cost_share"`
 }
@@ -246,9 +292,9 @@ const unknownLabel = "未知"
 
 // windowSpec 是一个窗口的语义定义。
 type windowSpec struct {
-	label string // "24h" / "7d" / ...
-	days  int    // 对应 --day N 的 N
-	hourly bool  // true = hourly 桶（24h 窗口）
+	label  string // "24h" / "7d" / ...
+	days   int    // 对应 --day N 的 N
+	hourly bool   // true = hourly 桶（24h 窗口）
 }
 
 // parseWindow 解析 window 参数；未知值返回 ok=false（→ 400）。
@@ -410,6 +456,18 @@ func writeJSONError(w http.ResponseWriter, code int, msg string) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
+// writeJSON 返回 JSON 响应。
+//
+// 不转义 HTML（SetEscapeHTML(false)）：provider 的 base_url、note 里可能有
+// `<`、`&`，转义成 < 会让前端显示出来的东西变形。
+func writeJSON(w http.ResponseWriter, code int, v any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(code)
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(v)
+}
+
 // toAPISessions 把 stats.SessionStats 转成 web DTO（字段白名单）。
 func toAPISessions(rows []stats.SessionStats) []apiSession {
 	out := make([]apiSession, 0, len(rows))
@@ -419,15 +477,15 @@ func toAPISessions(rows []stats.SessionStats) []apiSession {
 			started = *r.StartedAt
 		}
 		out = append(out, apiSession{
-			StartedAt:      started,
-			Project:        orUnknown(r.Project),
-			Provider:       orUnknown(r.Provider),
-			Model:          orUnknown(r.Model),
-			Input:          r.InputTokens,
-			Output:         r.OutputTokens,
-			CacheCreation:  r.CacheCreate,
-			CacheRead:      r.CacheRead,
-			CostUSD:        r.CostUSD,
+			StartedAt:     started,
+			Project:       orUnknown(r.Project),
+			Provider:      orUnknown(r.Provider),
+			Model:         orUnknown(r.Model),
+			Input:         r.InputTokens,
+			Output:        r.OutputTokens,
+			CacheCreation: r.CacheCreate,
+			CacheRead:     r.CacheRead,
+			CostUSD:       r.CostUSD,
 		})
 	}
 	return out
@@ -562,35 +620,34 @@ func (s *Server) handleUI(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(data)
 }
 
-// handleAsset 返回静态资源（app.js / style.css）。
+// handleAsset 返回静态资源（app.js / usage.js / … / style.css）。
 func (s *Server) handleAsset(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	name := strings.TrimPrefix(r.URL.Path, "/ui/")
-	switch name {
-	case "app.js":
-		data, err := assetFS.ReadFile("assets/app.js")
-		if err != nil {
-			http.Error(w, "read asset: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
+	// 只允许 assets 目录下的**单层**文件名（不允许子目录、不允许 ..）。
+	if name == "" || strings.ContainsAny(name, "/\\") || name == ".." {
+		http.NotFound(w, r)
+		return
+	}
+	switch filepath.Ext(name) {
+	case ".js":
 		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-cache")
-		_, _ = w.Write(data)
-	case "style.css":
-		data, err := assetFS.ReadFile("assets/style.css")
-		if err != nil {
-			http.Error(w, "read asset: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
+	case ".css":
 		w.Header().Set("Content-Type", "text/css; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-cache")
-		_, _ = w.Write(data)
 	default:
 		http.NotFound(w, r)
+		return
 	}
+	data, err := assetFS.ReadFile("assets/" + name)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = w.Write(data)
 }
 
 // assetVersion 是静态资源的版本号（用于 ?v= query 防缓存）。

@@ -155,3 +155,15 @@ func DefaultBackupDir() (string, error) {
 	}
 	return filepath.Join(home, ".cc-launcher", "backups"), nil
 }
+
+// DefaultMemoryPath 返回 ~/.claude/CLAUDE.md 路径。
+//
+// **只管用户级**：项目级的 CLAUDE.md 跟着 git 工作区走，在工具里改它
+// 容易和 git 打架（而且工具是全局的，不知道"当前项目"是哪个）。
+func DefaultMemoryPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".claude", "CLAUDE.md"), nil
+}

@@ -12,6 +12,8 @@ The dashboard's HTTP surface MUST consist of:
 - `GET /ui/<asset>` — the dashboard's static assets (script, stylesheet)
 - `GET /api/stats` — the dashboard's JSON data endpoint
 
+The dashboard page and its static assets are the console described by `web-config-console`; that capability specifies the additional read and write endpoints the console mounts, and those endpoints MUST be served by the same daemon on the same listener.
+
 The OTLP ingestion routes (`/v1/metrics`, `/v1/logs`, `/v1/traces`) MUST keep their existing behavior and MUST NOT be affected by the dashboard routes.
 
 Because the dashboard is hosted by the daemon, it is available exactly when the daemon is running. The daemon MUST NOT auto-exit when idle, so that a running daemon keeps serving the dashboard until it is explicitly stopped.
@@ -27,6 +29,10 @@ Because the dashboard is hosted by the daemon, it is available exactly when the 
 #### Scenario: the dashboard stops when the daemon stops
 - **WHEN** the user runs `ccl serve --stop` and then requests `GET /ui` on the daemon's port
 - **THEN** the connection is refused, because the dashboard is hosted by the stopped daemon
+
+#### Scenario: the console's endpoints share the daemon's listener
+- **WHEN** the daemon is running and a client requests the provider list from `GET /api/providers` on the daemon's port
+- **THEN** the response is served by the daemon on the same port that serves `/ui`, and no additional port is opened
 
 ### Requirement: dashboard access is protected by a token
 The dashboard MUST NOT be readable without a secret token.
@@ -148,6 +154,8 @@ The endpoint MUST open the database read-only and MUST NOT block the daemon's wr
 - **A trend chart** — token consumption over the window's time buckets, split by token type, plus the cost trend over the same buckets.
 - **Share breakdowns** — the token and cost share per project, per provider and per model.
 - **A session table** — one row per session with its start time, project, provider, model, and the same token and cost columns the terminal table shows.
+
+These elements MUST be rendered in the usage view of the console, which is one of the console's three views; the console's structure is specified by `web-config-console`.
 
 The page's assets MUST be embedded in the binary (no network fetch of scripts or stylesheets from the internet). The charts MUST be drawn as inline SVG, with no charting library. The page MUST remain readable on a narrow viewport, with the data tables scrolling horizontally inside their own container rather than widening the page.
 

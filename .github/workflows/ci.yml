@@ -56,6 +56,20 @@ jobs:
       - name: test (smoke)
         run: go test -tags smoke ./...
 
+      - name: test (frontend JS)
+        # 前端单测（highlight.js 的 HTML 转义 + JSON tokenizer）——见
+        # internal/web/jstest/highlight.test.mjs。
+        #
+        # Go 侧有一层包装（internal/web/jstest_test.go），`go test ./...` 会跑；
+        # 但那层在**没装 node 的机器上是 skip**。这里显式再跑一遍：CI 上 node
+        # 缺失要**红**，不能是静默跳过——静默跳过等于这条测试不存在。
+        #
+        # 不用 setup-node 固定版本：node --test 与 vm 模块在 node 18+ 已稳定，
+        # ubuntu-latest 自带 node 20+；少一个 action 依赖。
+        run: |
+          node --version
+          node --test internal/web/jstest/highlight.test.mjs
+
   release-tooling:
     name: release tooling
     runs-on: ubuntu-latest

@@ -16,18 +16,27 @@ import (
 // webHelp 是 `ccl web --help` 的输出。
 const webHelp = `用法: ccl web [--rotate | --open]
 
-打印用量看板的访问 URL（含 token）。看板由 OTel daemon 在 :4318 上提供，
+打印控制台的访问 URL（含 token）。控制台由 OTel daemon 在 :4318 上提供，
 不新增端口、不新增进程。
+
+控制台有三个视图：
+  用量      token / cost 的统计看板（原看板页，行为不变）
+  提供商    在线编辑 provider 配置、查看与按需刷新额度
+  Claude    在线编辑用户级的 ~/.claude/settings.json 与 ~/.claude/CLAUDE.md
 
 选项:
     --rotate      轮换访问 token（旧的 URL 与已签发的 session 立即失效）
-    --open        用系统默认浏览器打开看板
+    --open        用系统默认浏览器打开控制台
     -h, --help    显示本帮助并退出
 
 说明：
-  - 看板 URL 形如 http://<本机IP>:4318/ui?token=<tok>；首次访问会种一个
+  - URL 形如 http://<本机IP>:4318/ui?token=<tok>；首次访问会种一个
     HttpOnly session cookie 并重定向到不带 token 的 /ui。
   - token 存在 ~/.cc-launcher/web-token（权限 0600）。
+  - **拿到 token 就能改本机配置**：provider 配置里有明文凭证，CLAUDE.md 决定
+    Claude Code 的行为。token 泄漏了就跑 "ccl web --rotate"（旧的 URL 与
+    已签发的 session 立即失效）。
+  - daemon 监听 :4318 是全网卡的，同一局域网里拿到 token 的人同样能改配置。
   - 直接用 claude 启动的会话没有 provider / 项目维度（显示"未知"）；
     通过 ccl 启动的会话才有。
   - 历史 session 的 cwd 回填是 daemon 的数据维护动作，在 ccl serve --backfill。`

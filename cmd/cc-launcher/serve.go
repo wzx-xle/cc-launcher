@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"cc-launcher/internal/collector"
+	"cc-launcher/internal/config"
+	"cc-launcher/internal/provider"
 	"cc-launcher/internal/quota"
 	"cc-launcher/internal/state"
 	"cc-launcher/internal/web"
@@ -139,9 +141,24 @@ func runServe(args []string) error {
 
 	// 组装 HTTP server。看板路由由 cmd 层挂载（collector 不反向依赖 web，
 	// 见 collector.ServerOptions.Mount 与 design.md §D2）。
+	//
+	// 控制台（provider / Claude 配置 / 额度）需要注入三个管理器：
+	// provider.Manager（providers 目录）、Claude 两个文件路径、quota.Store。
+	// 全部来自 daemon 已经在用的那几个目录——不新增路径、不新增进程。
+	providersDir := filepath.Join(stateBaseDir, "providers")
+	backupDir := filepath.Join(stateBaseDir, "backups")
+	providersMgr := provider.NewManager(providersDir)
+	providersMgr.SetBackupDir(backupDir)
+	claudeSettingsPath, _ := config.DefaultSettingsPath()
+	claudeMemoryPath, _ := config.DefaultMemoryPath()
 	webSrv, err := web.NewServer(web.Options{
-		DBPath:    dbPath,
-		TokenPath: filepath.Join(stateBaseDir, web.TokenFileName),
+		DBPath:             dbPath,
+		TokenPath:          filepath.Join(stateBaseDir, web.TokenFileName),
+		Providers:          providersMgr,
+		ClaudeSettingsPath: claudeSettingsPath,
+		ClaudeMemoryPath:   claudeMemoryPath,
+		BackupDir:          backupDir,
+		QuotaStore:         quota.NewStore(stateBaseDir),
 	})
 	if err != nil {
 		// 看板不可用不该阻断 daemon（OTel 采集是主路径）。
