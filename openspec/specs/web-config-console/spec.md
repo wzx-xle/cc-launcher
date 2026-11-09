@@ -144,7 +144,15 @@ The console MUST distinguish three states and MUST NOT present a missing record 
 - a stale record — rendered as stale, with the age of the record,
 - **no record** — rendered as "not collected recently", explicitly noting that this does not mean the provider has no limits.
 
-The rendered values MUST use the same thresholds, the same bar rendering and the same value formats as the terminal status line, so that the console and the status line never disagree about the same provider.
+The rendered values MUST use the same thresholds, the same value formats and the same per-kind rendering rules as the terminal status line, so that the console and the status line never disagree about the same provider.
+
+The bar MAY be drawn differently in the two media — the terminal draws it with block characters, the console draws it as a CSS progress bar — because block characters have different heights in a browser font and render as a ragged edge. What MUST agree is the ratio the bar represents, the thresholds that colour it, and the numeric text beside it.
+
+The console MUST select the rendering rules by dimension kind, the same way the terminal status line does:
+
+- a `window` dimension shows the percentage only — without the used/total pair, and with the percentage rounded to a whole number,
+- a `balance` dimension shows the remaining amount only — without a bar,
+- any other dimension shows the percentage, the bar and the used/total pair.
 
 #### Scenario: a fresh quota record is rendered
 
@@ -160,6 +168,11 @@ The rendered values MUST use the same thresholds, the same bar rendering and the
 
 - **WHEN** a client requests the quota of a provider whose record is older than the freshness threshold
 - **THEN** the response marks the record as stale and carries the fetch timestamp
+
+#### Scenario: each dimension kind is rendered the way the status line renders it
+
+- **WHEN** a provider's record holds a `window` dimension with a used percentage and a limit
+- **THEN** the console shows the percentage alone beside the bar, without the used/total pair, so that its text matches what the terminal status line shows for the same dimension
 
 ### Requirement: the quota can be refreshed on demand
 
