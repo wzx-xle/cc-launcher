@@ -28,12 +28,27 @@ const DefaultKeepBackups = 30
 // tsLayout 是备份文件名里的时间戳格式。
 //
 // 用本地时间（备份是给人看的，"什么时候改的"按本地时间更直观），格式里
-// **不能有冒号**（Windows 的文件名不允许）。毫秒精度是为了同一秒内两次写入
-// 不撞名——撞名会让第二次的备份覆盖第一次的，丢一个中间版本。
+// **不能有冒号**（Windows 的文件名不允许）。
+//
+// **微秒精度**：毫秒挡不住同一毫秒内的两次写入 —— 名字一样就是覆盖，会丢一个
+// 中间版本。网页控制台连点两次"保存"、或者 CLI 与 daemon 同时写，就可能撞。
 //
 // 字典序 == 时间序：格式的每一段都是定宽且高位在前，排序结果与时间顺序一致
-// （"…-05.999" < "…-06.000"），所以轮转时按文件名排序即可。
-const tsLayout = "2006-01-02T15-04-05.000"
+// （"…-05.999999" < "…-06.000000"），所以轮转时按文件名排序即可。
+const tsLayout = "2006-01-02T15-04-05.000000"
+
+// maxBackupSeq 是同一时刻内备份文件名的序号上限。
+//
+// 同一微秒内写 100 次备份不可能（每份都要落盘）；到了就是有 bug，宁可报错
+// 也不覆盖已有备份。
+const maxBackupSeq = 100
+
+// now 取当前时间。
+//
+// 抽成包级变量是为了测试能注入固定时钟："同一时刻写两次"这种撞名场景在真实
+// 机器上撞不撞**看运气**（IO 快慢、调度抖动）—— 撞上了 CI 红、撞不上本地绿，
+// 没法当回归测试守。
+var now = time.Now
 
 // ErrEmptyPath 表示传入的路径为空。
 var ErrEmptyPath = errors.New("路径不能为空")
@@ -121,11 +136,55 @@ func backup(path, backupDir string, keep int) error {
 		return fmt.Errorf("建备份目录失败: %w", err)
 	}
 
-	name := filepath.Base(path) + "-" + time.Now().Format(tsLayout) + ".bak"
-	if err := os.WriteFile(filepath.Join(backupDir, name), data, 0644); err != nil {
-		return fmt.Errorf("写备份失败: %w", err)
+	if _, err := writeBackup(backupDir, filepath.Base(path), data, now()); err != nil {
+		return err
 	}
 	return prune(backupDir, filepath.Base(path), keep)
+}
+
+// writeBackup 把 data 写成一份备份，返回写入的文件名。
+//
+// **绝不覆盖已存在的备份**：用 O_EXCL 原子地"占位"，撞名（同一时刻两次写）
+// 就换名重试。覆盖会丢一个中间版本 —— 而 safefile 的全部意义就是"写坏了能
+// 回退到上一个版本"，丢一份备份等于这个承诺在最需要的时候失效。
+func writeBackup(dir, base string, data []byte, t time.Time) (string, error) {
+	for seq := range maxBackupSeq {
+		name := backupName(base, t, seq)
+		f, err := os.OpenFile(filepath.Join(dir, name),
+			os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+		if err != nil {
+			if os.IsExist(err) {
+				continue // 撞名 → 换下一个序号
+			}
+			return "", fmt.Errorf("写备份失败: %w", err)
+		}
+		if _, err := f.Write(data); err != nil {
+			_ = f.Close()
+			return "", fmt.Errorf("写备份失败: %w", err)
+		}
+		if err := f.Close(); err != nil {
+			return "", fmt.Errorf("写备份失败: %w", err)
+		}
+		return name, nil
+	}
+	return "", fmt.Errorf("备份文件名序号用尽（同一时刻写了 %d 份备份）", maxBackupSeq)
+}
+
+// backupName 生成 base 在时刻 t 的第 seq 个备份文件名。
+//
+// 同一个时刻的第 0 份没有后缀，第 1 份起追加 "_NN" 定宽序号。
+//
+// **分隔符用 "_"（0x5F）而不是 "-"（0x2D）**：它比时间戳与扩展名之间的
+// "."（0x2E）**大** → 字典序上"无后缀的"排在"带后缀的"**前面** → 同一时刻内
+// 序号递增 == 时间递增 → prune 那个"末尾最新"的假设仍然成立。
+// 用 "-" 的话 "_" 比 "." 小，带后缀的会排到前面，prune 会把**最新**的当成
+// 最旧的删掉。
+func backupName(base string, t time.Time, seq int) string {
+	stamp := t.Format(tsLayout)
+	if seq <= 0 {
+		return base + "-" + stamp + ".bak"
+	}
+	return base + "-" + stamp + "_" + fmt.Sprintf("%02d", seq) + ".bak"
 }
 
 // prune 把某个文件的备份裁剪到最近 keep 份。
