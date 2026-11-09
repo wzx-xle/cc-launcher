@@ -9,7 +9,6 @@
 (function () {
   'use strict';
 
-  var BAR_LEN = 10;
   var state = {
     list: [],
     current: '',
@@ -54,6 +53,84 @@
     return 'ok-bar';
   }
 
+  /* ------------------------------------------------------------------ */
+  /* 额度渲染口径                                                        */
+  /* ------------------------------------------------------------------ */
+
+  /* 下面的函数与终端状态栏**逐条对齐**（~/.claude/statusline.js 的
+   * renderDimension / rateLimitStr / balanceStr / quotaKindStr）。
+   *
+   * **按 kind 分派**，不是"一律显示已用/总量"：
+   *
+   *   window  → 只有百分比 + 条形      （rateLimitStr）
+   *   balance → 只有数字，无条形        （balanceStr）
+   *   其余    → 百分比 + 条形 + 已用/总量（quotaKindStr）
+   *
+   * 之前网页不分 kind，window 维度也显示"已用/总量" → **与状态栏不一致**
+   * （minimax 这类就是 window），顺带看着冗余："6% 6/100 %"。spec 要求
+   * "the same value formats as the terminal status line" —— 这条本来就没
+   * 被满足。
+   *
+   * 纯函数（不碰 DOM）→ 能被 node 单测直接断言，见 internal/web/jstest/。
+   */
+
+  /* dimKind 返回某个维度的渲染类别：'balance' | 'window' | 'quota'。 */
+  function dimKind(d) {
+    if (d.kind === 'balance') { return 'balance'; }
+    if (d.kind === 'window') { return 'window'; }
+    return 'quota';
+  }
+
+  /* dimPctText 返回百分比文本。
+   *
+   * window（rateLimitStr）与 quota（quotaKindStr）的百分比口径**不同**：
+   *   - window：一律四舍五入（0.025% → "0%"）
+   *   - quota ：小于 1% 时保留两位小数（0.025% → "0.03%"），免得看着像没用过
+   *
+   * 之前网页不分 kind，一律用 quota 的口径 → window 维度上与状态栏不一致。
+   */
+  function dimPctText(pct, kind) {
+    if (kind === 'window') { return String(Math.round(pct)); }
+    if (pct > 0 && pct < 1) { return pct.toFixed(2); }
+    return String(Math.round(pct));
+  }
+
+  /* dimText 返回维度要显示的数值文本（不含条形、不含重置时间）。 */
+  function dimText(d) {
+    var label = d.label || d.id || '';
+    var kind = dimKind(d);
+    var unit = unitSuffix(label, d.unit);
+
+    if (kind === 'balance') {
+      return fmtAmount(d.remaining) + unit;
+    }
+    var pct = d.used_percentage;
+    if (typeof pct !== 'number') {
+      // 没有百分比（分母未知）→ 只显示能显示的量（quotaKindStr 同规则）
+      return fmtAmount(d.remaining) + unit;
+    }
+    var text = dimPctText(pct, kind) + '%';
+    // 已用/总量：只有 quota 类别有（window 的 rateLimitStr 没有这一段）
+    if (kind === 'quota' && typeof d.used === 'number' && typeof d.limit === 'number') {
+      text += ' ' + fmtAmount(d.used) + '/' + fmtAmount(d.limit) + unit;
+    }
+    return text;
+  }
+
+  /* barRatio 返回条形的填充比例（0..1）。
+   *
+   * 状态栏用 10 格离散（Math.round(pct/100*10)），网页用连续条 → 比例一样，
+   * 只是介质不同（终端字符 vs 网页 CSS）。小百分比（0.03%）在连续条上能看出
+   * 一丝，状态栏的四舍五入会显示成 0 格 —— 各有各的取舍，**数值口径一致**。
+   */
+  function barRatio(pct) {
+    if (typeof pct !== 'number' || !isFinite(pct)) { return 0; }
+    var r = pct / 100;
+    if (r < 0) { return 0; }
+    if (r > 1) { return 1; }
+    return r;
+  }
+
   /* fmtReset：重置时间（与状态栏同规则——跨天带日期）。 */
   function fmtReset(resetsAt, durationSeconds) {
     var d = new Date(resetsAt * 1000);
@@ -82,40 +159,46 @@
   /* 额度卡                                                               */
   /* ------------------------------------------------------------------ */
 
+  /* barEl 造一个 CSS 进度条。
+   *
+   * **为什么不用字符 █░**：那两个字形在浏览器里高度不同（█ 填满字框、░ 只占
+   * 下半部分）→ 拼出来上下参差；很多字体还把 ░ 渲染成斜线纹理。终端里是
+   * 点阵等宽字体才整齐 —— 网页不该沿用。
+   *
+   * **数值口径一个字没动**（阈值 90/75/50、百分比口径、比例分母 10 格），
+   * 只是呈现介质不同：终端字符 vs 网页 CSS。
+   */
+  function barEl(pct) {
+    var bar = el('span', 'bar ' + pctColor(pct));
+    var fill = el('span', 'fill');
+    var ratio = barRatio(pct);
+    fill.style.width = (ratio * 100) + '%';
+    // 有占用就留一点最小宽度（0.03% 也不至于完全看不见）。
+    // **只在真有占用时给** —— 用 CSS 的 min-width 会让 0% 也露出一小条色块，
+    // 看着像"用了一点点"，实际是 0。
+    if (ratio > 0) { fill.style.minWidth = '2px'; }
+    bar.appendChild(fill);
+    return bar;
+  }
+
   function dimRow(d) {
     var label = d.label || d.id || '';
+    var kind = dimKind(d);
     var row = el('div', 'quota-dim');
 
-    var lab = el('span', 'label', label);
-    row.appendChild(lab);
+    row.appendChild(el('span', 'label', label));
 
-    if (d.kind === 'balance') {
-      row.appendChild(el('span', 'val', fmtAmount(d.remaining) + unitSuffix(label, d.unit)));
+    // balance（无分母）与"没有百分比"（分母未知）：只显示数字，无条形
+    if (kind === 'balance' || typeof d.used_percentage !== 'number') {
+      row.appendChild(el('span', 'val', dimText(d)));
       return row;
     }
 
-    var pct = d.used_percentage;
-    if (typeof pct !== 'number') {
-      row.appendChild(el('span', 'val', fmtAmount(d.remaining) + unitSuffix(label, d.unit)));
-      return row;
-    }
+    row.appendChild(barEl(d.used_percentage));
+    row.appendChild(el('span', 'val', dimText(d)));
 
-    var filled = Math.round((pct / 100) * BAR_LEN);
-    if (filled > BAR_LEN) { filled = BAR_LEN; }
-    if (filled < 0) { filled = 0; }
-    var bar = el('span', 'bar ' + pctColor(pct), '█'.repeat(filled) + '░'.repeat(BAR_LEN - filled));
-    row.appendChild(bar);
-
-    /* 令牌额度的已用百分比通常极小（0.025% 这种）——四舍五成 0% 会让人
-     * 以为一点没用；小于 1% 时保留两位小数（与状态栏同规则）。 */
-    var pctText = (pct > 0 && pct < 1) ? pct.toFixed(2) : String(Math.round(pct));
-    var text = pctText + '%';
-    if (typeof d.used === 'number' && typeof d.limit === 'number') {
-      text += ' ' + fmtAmount(d.used) + '/' + fmtAmount(d.limit) + unitSuffix(label, d.unit);
-    }
-    row.appendChild(el('span', 'val', text));
-
-    if (typeof d.resets_at === 'number') {
+    // 重置时间：只有 window 类别有（rateLimitStr 有这一段，quotaKindStr 没有）
+    if (kind === 'window' && typeof d.resets_at === 'number') {
       row.appendChild(el('span', 'reset', fmtReset(d.resets_at, d.duration_seconds)));
     }
     return row;
@@ -495,6 +578,24 @@
 
   window.CCL = window.CCL || {};
   window.CCL.views = window.CCL.views || {};
+
+  /* 额度渲染的**纯逻辑**导出 —— 给 node 单测断言（internal/web/jstest/）。
+   *
+   * 这些函数不碰 DOM，可以在 vm 沙箱里加载本文件后直接调用。
+   *
+   * 为什么要测：口径对齐状态栏是**看不见**的契约 —— 网页显示 "6%"、状态栏
+   * 显示 "6% 6/100 %" 这种漂移，界面上看不出问题，只有断言能守住。
+   */
+  window.CCL.quotaFormat = {
+    dimKind: dimKind,
+    dimPctText: dimPctText,
+    dimText: dimText,
+    barRatio: barRatio,
+    pctColor: pctColor,
+    fmtAmount: fmtAmount,
+    unitSuffix: unitSuffix
+  };
+
   window.CCL.views.providers = {
     sidebar: true,
     activate: function () { loadList(); },

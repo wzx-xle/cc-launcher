@@ -540,7 +540,32 @@ tbody tr:last-child td { border-bottom: 0; }
   font-variant-numeric: tabular-nums;
 }
 .quota-dim .label { min-width: 56px; color: var(--text-secondary); font-size: 12.5px; }
-.quota-dim .bar { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: -0.5px; }
+/* 额度条：CSS 进度条（等高、连续）
+ *
+ * 为什么不用字符 █░：那两个字形在浏览器里**高度不同**（█ 填满字框、░ 只占
+ * 下半部分）→ 拼出来上下参差；很多字体还把 ░ 渲染成斜线纹理。终端里是点阵
+ * 等宽字体才整齐 —— 网页不该沿用。
+ *
+ * 宽度 84px ≈ 状态栏那 10 格字符的宽度，占用比例一眼能比出来。
+ * **数值口径一个字没动**（阈值 90/75/50、百分比口径、比例分母 10 格）——
+ * 只是呈现介质不同：终端字符 vs 网页 CSS。
+ */
+.quota-dim .bar {
+  display: inline-block;
+  width: 84px;
+  height: 8px;
+  border-radius: 4px;
+  background: var(--hover-wash);
+  overflow: hidden;
+  vertical-align: middle;
+  flex: 0 0 auto;
+}
+.quota-dim .bar .fill {
+  display: block;
+  height: 100%;
+  border-radius: 4px;
+  background: currentColor;
+}
 .quota-dim .val { font-size: 12.5px; }
 .quota-dim .reset { color: var(--text-muted); font-size: 12px; }
 .quota-note { color: var(--text-muted); font-size: 12px; margin-top: 8px; }
