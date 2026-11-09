@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.21.2] - 2026-11-09 — console-editor-layout
+
 ### Features
 - **控制台编辑区重排**：编辑框吃掉视口的剩余空间，操作按钮从编辑框下方移到编辑区标题行（**保存排最前**），额度卡的「刷新」按钮推到标题行最右
   - 编辑器高度随窗口自动变化；**窗口不够高时也不会比现在更矮**（下限 = 现状的 340px），此时页面出现竖向滚动条（现状本来就有）
@@ -21,8 +23,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Tests
 - 前端单测 +14 条（额度渲染口径：按 kind 分派、百分比口径、条形比例、阈值配色、绝对量格式）
 - 真机验证（playwright 驱动真实浏览器）：编辑器高度随视口变化、矮窗口不回退、**用量视图的滚动语义一字未变**（内容区不内部滚、页面滚）、隐藏视图不叠显示、标题行结构与按钮顺序、竞态不串台（**含变异验证**：去掉序号守卫后竞态确实复现）、额度刷新失败仍能重试
-
-> 版本号建议 **patch**（v0.21.2）：无新接口、无新能力，是布局改进 + 两个既有 bug 的修复。
 
 ## [0.21.1] - 2026-11-09 — backup-name-collision
 
