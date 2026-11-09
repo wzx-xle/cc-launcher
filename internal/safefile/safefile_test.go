@@ -192,6 +192,10 @@ func TestWrite_NoBackupWhenNoOldFile(t *testing.T) {
 }
 
 func TestWrite_PrunesOldBackups(t *testing.T) {
+	// 固定时钟：连写多次时"撞在同一毫秒"是真实存在的场景（v0.21.0 的 CI 上
+	// 真撞过 —— 备份名撞名会互相覆盖，丢一个中间版本）。固定时钟让这个边界
+	// **每次**都被覆盖，而不是靠机器速度碰运气。
+	defer swapNow(time.Date(2026, 11, 9, 1, 2, 3, 0, time.Local))()
 	dir := t.TempDir()
 	backups := filepath.Join(dir, "backups")
 	path := filepath.Join(dir, "a.json")
@@ -210,6 +214,10 @@ func TestWrite_PrunesOldBackups(t *testing.T) {
 }
 
 func TestWrite_PruningIsPerFile(t *testing.T) {
+	// 固定时钟：连写多次时"撞在同一毫秒"是真实存在的场景（v0.21.0 的 CI 上
+	// 真撞过 —— 备份名撞名会互相覆盖，丢一个中间版本）。固定时钟让这个边界
+	// **每次**都被覆盖，而不是靠机器速度碰运气。
+	defer swapNow(time.Date(2026, 11, 9, 1, 2, 3, 0, time.Local))()
 	dir := t.TempDir()
 	backups := filepath.Join(dir, "backups")
 

@@ -83,20 +83,41 @@ func TestBackup(t *testing.T) {
 }
 
 func TestBackup_Rotation(t *testing.T) {
+	// 固定时钟：同一秒内连续备份是真实存在的场景（秒级时间戳 + 覆盖语义会
+	// 让两次备份互相覆盖）。固定时钟让这个边界**每次**都被覆盖。
+	defer swapNow(time.Date(2026, 11, 9, 1, 2, 3, 0, time.Local))()
 	dir := t.TempDir()
 	settingsPath := filepath.Join(dir, "settings.json")
 	backupDir := filepath.Join(dir, "backups")
 	m := NewManager(settingsPath, backupDir, 2)
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		settings := map[string]any{"seq": i}
 		m.SaveSettings(settings)
 		m.Backup()
 	}
 
 	backups, _ := filepath.Glob(filepath.Join(backupDir, "settings-*.json"))
-	if len(backups) > 2 {
-		t.Errorf("backups count = %d, want <= 2 (rotation not working)", len(backups))
+	// 断言"恰好 2 份"而不是"<= 2"：撞名（同一秒内两次备份算出同一个文件名）
+	// 会让备份只剩 1 份 —— 那是 bug，但 "<= 2" 放它过关了。
+	if len(backups) != 2 {
+		t.Errorf("backups count = %d, want 2 (rotation not working)", len(backups))
+	}
+	// 留下的必须是**最新**的两份（seq 1、2），最早的 seq 0 被裁掉
+	kept := map[float64]bool{}
+	for _, b := range backups {
+		data, _ := os.ReadFile(b)
+		var v map[string]any
+		if err := json.Unmarshal(data, &v); err != nil {
+			t.Fatal(err)
+		}
+		kept[v["seq"].(float64)] = true
+	}
+	if !kept[1] || !kept[2] {
+		t.Errorf("留下的不是最新的两份: %v", kept)
+	}
+	if kept[0] {
+		t.Errorf("最旧的那份没被裁掉: %v", kept)
 	}
 }
 
@@ -134,49 +155,11 @@ func TestBackup_SameSecondDoesNotLoseBackup(t *testing.T) {
 	}
 }
 
-// TestBackup_RotationKeepsNewestInSameSecond 断言轮转留下的是**最新的**那几份。
+// swapNow 把包级时钟换成固定的，返回恢复函数。
 //
-// 同一秒内的多份备份靠 "_NN" 序号区分新旧；rotateBackups 靠字典序判断新旧
-// （末尾最新）。序号分隔符选错（用 "-" 而不是 "_"）这里就会红。
-func TestBackup_RotationKeepsNewestInSameSecond(t *testing.T) {
+// 用于把"同一秒内备份两次"这种**撞不撞看运气**的场景变成确定性的。
+func swapNow(fixed time.Time) func() {
 	old := now
-	now = func() time.Time { return time.Date(2026, 11, 9, 1, 2, 3, 0, time.Local) }
-	defer func() { now = old }()
-
-	dir := t.TempDir()
-	settingsPath := filepath.Join(dir, "settings.json")
-	backupDir := filepath.Join(dir, "backups")
-	m := NewManager(settingsPath, backupDir, 2) // 只留 2 份
-
-	// 每次备份前改内容 → 各份备份内容不同 → 能验证留下的是哪几份
-	for i := range 3 {
-		content := `{"model":"m` + string(rune('0'+i)) + `"}`
-		if err := os.WriteFile(settingsPath, []byte(content), 0644); err != nil {
-			t.Fatal(err)
-		}
-		if err := m.Backup(); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	backups, _ := filepath.Glob(filepath.Join(backupDir, "settings-*.json"))
-	if len(backups) != 2 {
-		t.Fatalf("备份数 = %d，期望 2（保留上限）", len(backups))
-	}
-	// 留下的应该是后两次（m1、m2），最早的那份（m0）被裁掉
-	kept := map[string]bool{}
-	for _, b := range backups {
-		data, _ := os.ReadFile(b)
-		var v map[string]any
-		if err := json.Unmarshal(data, &v); err != nil {
-			t.Fatal(err)
-		}
-		kept[v["model"].(string)] = true
-	}
-	if !kept["m1"] || !kept["m2"] {
-		t.Fatalf("留下的不是最新的两份: %v", kept)
-	}
-	if kept["m0"] {
-		t.Fatalf("最旧的那份没被裁掉: %v", kept)
-	}
+	now = func() time.Time { return fixed }
+	return func() { now = old }
 }
