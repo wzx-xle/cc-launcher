@@ -47,7 +47,14 @@ Claude Code Launcher — 一个终端启动器，在启动 Claude Code 时提供
 1. 完成 OpenSpec change（实施 + `openspec archive` 归档）
 2. 在 `CHANGELOG.md` 的 `[Unreleased]` 段下加新版本段（按既有版本格式：Refactor / Features / Fix / Tests / OpenSpec / Compatibility 等分类）
 3. `git commit -m "docs: CHANGELOG 加 v0.X.Y <change-name> 段"`（CHANGELOG commit）
-4. `git tag -a v0.X.Y HEAD -m "<release message>"`（tag 指向 CHANGELOG commit）
-5. 一次推送：`git push origin main --follow-tags`（commit + tag 一起推）
+4. 打 tag（两种都行，**区别在第 5 步**）：
+   - `bin/bump-version.sh bump <major|minor|patch>` —— 仓库脚本，打 **lightweight tag**
+   - `git tag -a v0.X.Y HEAD -m "<release message>"` —— **annotated tag**，带发布说明
+   （两种都指向 CHANGELOG commit）
+5. 一次推送：`git push origin main v0.X.Y`（commit + tag 一起推）
+   —— **不要用 `--follow-tags`**：它只推 annotated tag，lightweight tag 会被**静默
+   跳过**（命令返回成功，但 tag 没上去 → 远端 `git ls-remote --tags` 查不到
+   v0.X.Y）。脚本自己也会打印这条正确命令，别照着它打印的第二条（`--follow-tags`
+   那条）走
 
 如果历史 tag 指向了不带 changelog 的 commit，修正方法是 `git tag -d v0.X.Y` + `git push origin :refs/tags/v0.X.Y` + 在正确的 commit 上重打 tag + `git push origin v0.X.Y`，**不动 commit history**。
