@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-11-09 — web-config-console
+
 ### Features
 - **网页控制台：从"看用量"扩到"改配置"** —— `ccl web` 打开的 `/ui` 从单页看板重构成"顶栏 + 左栏对象列表 + 右栏编辑区"的三视图应用
   - **用量视图**：原看板整体搬进新外壳，渲染逻辑一字未改（KPI / 趋势 / 占比 / 明细表四件套都在）
