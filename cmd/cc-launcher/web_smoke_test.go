@@ -2,7 +2,7 @@
 
 // web-usage-stats-ui 的 CLI 面 smoke test：
 //   - `ccl --help` 的子命令段列出 web
-//   - `ccl web --help` 打印三个 flag 的一行说明
+//   - `ccl web --help` 的选项段列出两个 flag（--rotate / --open）
 //   - `ccl __complete ""` 顶层候选含 web
 //   - `ccl __complete web ""` 输出 web 的 flag
 //   - `ccl __complete stats --` 含 --provider
@@ -38,7 +38,7 @@ func TestSmoke_HelpListsWeb(t *testing.T) {
 	}
 }
 
-// TestSmoke_WebHelp 断言 `ccl web --help` 打印用法 + 三个 flag 的一行说明。
+// TestSmoke_WebHelp 断言 `ccl web --help` 打印用法 + 选项段列出两个 flag。
 func TestSmoke_WebHelp(t *testing.T) {
 	out := captureStdout(t, func() {
 		if err := run([]string{"web", "--help"}); err != nil {
@@ -48,14 +48,51 @@ func TestSmoke_WebHelp(t *testing.T) {
 	if !strings.Contains(out, "ccl web") {
 		t.Errorf("web --help 应含用法行, got:\n%s", out)
 	}
-	for _, flag := range []string{"--rotate", "--backfill", "--open"} {
-		if !strings.Contains(out, flag) {
-			t.Errorf("web --help 应列出 %q, got:\n%s", flag, out)
+	flags := webHelpFlags(t, out)
+	for _, want := range []string{"--rotate", "--open"} {
+		if !flags[want] {
+			t.Errorf("web --help 的选项段应列出 %q, got:%v\n%s", want, flags, out)
 		}
+	}
+	// --backfill 已挪到 ccl serve（web-backfill-to-serve §D1），web 的选项段里
+	// 不该有它。help 说明文字里那句 "ccl serve --backfill" 是**交叉引用**，
+	// 不是 web 的 flag——所以这条断言只认选项段的 flag 行（见 webHelpFlags）。
+	if flags["--backfill"] {
+		t.Errorf("web 的选项段不应含 --backfill（已挪到 ccl serve）, got:%v\n%s", flags, out)
 	}
 	if !strings.Contains(out, "URL") {
 		t.Errorf("web --help 应说明会打印访问 URL, got:\n%s", out)
 	}
+}
+
+// webHelpFlags 提取 `ccl web --help` 的"选项:"段里的 flag 名集合。
+//
+// 为什么只认 flag 行，而不是对整个输出做 strings.Contains：
+// help 的说明文字里有"在 ccl serve --backfill"这句交叉引用，它会让
+// strings.Contains(out, "--backfill") 为真——但 web 根本没有 --backfill 这个
+// flag（web-backfill-to-serve §D1 已挪到 ccl serve）。子串断言过的只是巧合：
+// 哪天改掉那句说明文案，它就毫无预兆地红；反过来，改文案让它继续含
+// "--backfill"，它就一直"绿"却什么都没断言到。限定到选项段再取 flag 名，
+// 断言的才是"web 到底有哪些 flag"这个真问题。
+//
+// 只收 "--xxx" 形式：单独一行 "--" 不是 flag，"-h, --help" 的首 token 是
+// "-h"（短 flag），都不该进集合。
+func webHelpFlags(t *testing.T, out string) map[string]bool {
+	t.Helper()
+	// 段落标记取自 web.go 的 webHelp 常量："选项:" 是半角冒号，"说明：" 是全角。
+	section := extractHelpSection(out, "选项:", "说明：")
+	if section == "" {
+		t.Fatalf("web --help 缺少 '选项:' 段, got:\n%s", out)
+	}
+	flags := map[string]bool{}
+	for _, line := range strings.Split(section, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || len(fields[0]) <= 2 || !strings.HasPrefix(fields[0], "--") {
+			continue
+		}
+		flags[fields[0]] = true
+	}
+	return flags
 }
 
 // TestSmoke_CompletionTopLevelIncludesWeb 断言顶层补全候选含 web。
