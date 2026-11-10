@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	"cc-launcher/internal/pathutil"
 	"cc-launcher/internal/safefile"
 	"cc-launcher/internal/settingsschema"
 )
@@ -60,7 +61,10 @@ func (s *Server) handleAPIClaudeFiles(w http.ResponseWriter, r *http.Request) {
 	specs := s.claudeFileSpecs()
 	items := make([]claudeFileItem, 0, len(specs))
 	for _, spec := range specs {
-		item := claudeFileItem{ID: spec.id, Path: spec.path}
+		// 展示用的 path 脱敏成 ~/... 形式：绝对路径几乎全是主目录前缀，既占地方
+		// 又把用户名暴露给局域网里拿到 token 的人（该接口是全网卡可达的）。
+		// **只脱敏这一份**——读写真实文件仍用 spec.path 那个绝对路径。
+		item := claudeFileItem{ID: spec.id, Path: pathutil.Shorten(spec.path)}
 		if fi, err := os.Stat(spec.path); err == nil {
 			item.Exists = true
 			item.Size = fi.Size()

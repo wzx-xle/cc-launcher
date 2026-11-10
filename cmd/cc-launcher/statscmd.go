@@ -8,10 +8,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"cc-launcher/internal/config"
+	"cc-launcher/internal/pathutil"
 	"cc-launcher/internal/quota"
 	"cc-launcher/internal/stats"
 	"cc-launcher/internal/web"
@@ -405,7 +405,7 @@ func runStatusInner() error {
 		}
 		return fmt.Errorf("stat db 失败: %w", err)
 	}
-	fmt.Printf("       db: %s\n", shortenHomePath(dbPath))
+	fmt.Printf("       db: %s\n", pathutil.Shorten(dbPath))
 	total, today, err := stats.CountSessionsByWindow(dbPath, stats.TodayStartMillis())
 	if err != nil {
 		// COUNT 失败不回 error——db 文件本身存在,只是 sqlite 读失败,仍报 size
@@ -416,21 +416,6 @@ func runStatusInner() error {
 	fmt.Printf("           %s\n", humanBytes(fi.Size()))
 	fmt.Printf("           %d sessions (%d today)\n", total, today)
 	return nil
-}
-
-// shortenHomePath 把绝对路径缩成 ~/... 形式（仅当 prefix 命中 UserHomeDir 时）。
-//
-// ccl 把所有数据放 $HOME/.cc-launcher/ 下；显示完整 /home/zxwang/... 太长。
-// 仅用于 `ccl serve --status` 输出，不导出。
-func shortenHomePath(p string) string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return p
-	}
-	if rel, ok := strings.CutPrefix(p, home); ok {
-		return "~" + rel
-	}
-	return p
 }
 
 // humanBytes 把字节数转成 SI 单位字符串（KB/MB/GB, 1 位小数）。

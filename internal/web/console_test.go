@@ -33,6 +33,11 @@ type consoleEnv struct {
 func newConsoleServer(t *testing.T) *consoleEnv {
 	t.Helper()
 	dir := t.TempDir()
+	// 把主目录指到临时目录：claude 文件的 path 落在 home 下，脱敏成 ~/... 才有
+	// 东西可断言；同时也让这批测试不受运行机器真实 HOME 的影响。
+	// os.UserHomeDir() 在 Unix 读 $HOME、在 Windows 读 %USERPROFILE%，两个都设。
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
 	providersDir := filepath.Join(dir, "providers")
 	backupsDir := filepath.Join(dir, "backups")
 	settingsPath := filepath.Join(dir, "settings.json")
@@ -802,6 +807,50 @@ func TestAPIClaudeFiles_List(t *testing.T) {
 	}
 	if items[0].ID != ClaudeFileSettings || items[1].ID != ClaudeFileMemory {
 		t.Fatalf("文件标识不对: %+v", items)
+	}
+}
+
+// TestAPIClaudeFiles_PathIsTildeForm 断言文件列表返回的 path 是 ~ 形式，
+// 且响应体里不含主目录的绝对路径。
+//
+// 为什么这条要单独断言：/api/claude/files 是**局域网可访问**的接口（daemon 监听
+// :4318 全网卡），绝对路径会把用户名暴露给同网段拿到 token 的人。
+func TestAPIClaudeFiles_PathIsTildeForm(t *testing.T) {
+	e := newConsoleServer(t)
+	resp, body := e.do(t, http.MethodGet, "/api/claude/files", nil, nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("状态 = %d", resp.StatusCode)
+	}
+	var items []claudeFileItem
+	if err := json.Unmarshal(body, &items); err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("文件数 = %d，期望 2", len(items))
+	}
+	for _, it := range items {
+		if !strings.HasPrefix(it.Path, "~/") {
+			t.Errorf("%s 的 path 应以 ~/ 开头, got %q", it.ID, it.Path)
+		}
+		if strings.Contains(it.Path, e.dir) {
+			t.Errorf("%s 的 path 不该含主目录绝对路径 %q, got %q", it.ID, e.dir, it.Path)
+		}
+	}
+	// 整个响应体里都不能出现主目录
+	if strings.Contains(string(body), e.dir) {
+		t.Errorf("响应体不该含主目录绝对路径 %q, got:\n%s", e.dir, body)
+	}
+	// 顺带确认脱敏的是**展示值**：列表里显示 ~/...，但读写仍走真实绝对路径
+	if err := os.WriteFile(e.settingsPath, []byte(`{"a":1}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, fbody := e.do(t, http.MethodGet, "/api/claude/file/"+ClaudeFileSettings, nil, nil)
+	var env fileEnvelope
+	if err := json.Unmarshal(fbody, &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Content != `{"a":1}` {
+		t.Errorf("按真实路径读回的内容 = %q，期望 %q", env.Content, `{"a":1}`)
 	}
 }
 
