@@ -21,8 +21,18 @@ Bump the wzx-xle/scoop-bucket manifest for a new cc-launcher release.
 
 **Prerequisites**:
 - `v*` tag pushed to `wzx-xle/cc-launcher`
-- GitHub Actions release workflow finished (5 build jobs: 1 windows zip + 2 linux tar.gz + 2 darwin tar.gz). The windows-amd64 job's "append windows zip SHA256 to release body" step MUST have completed — it writes a `<!-- sha256:auto-hash:HEX -->` marker into the release body. **Without this marker the new flow cannot fetch the hash.**
-- `wzx-xle/scoop-bucket` repo cloned to `/tmp/scoop-bucket` (first time only)
+- GitHub Actions release workflow finished (5 build jobs: 1 windows zip + 2 linux tar.gz + 2 darwin tar.gz). The windows-amd64 job's "append windows zip SHA256 to release body" step MUST have completed — it writes a `<!-- sha256:cc-launcher-windows-amd64.zip:HEX -->` marker into the release body.
+  **Without this marker the new flow cannot fetch the hash.**
+  (旧格式 `<!-- sha256:auto-hash:HEX -->` 是 v0.12.0~v0.13.2 的；两个脚本都兼容新旧格式)
+- `wzx-xle/scoop-bucket` repo cloned to `/tmp/scoop-bucket` — `/tmp` 会被清空，每次都要确认
+  在（`ls -d /tmp/scoop-bucket`）；没有就 clone：
+
+  ```bash
+  git clone https://github.com/wzx-xle/scoop-bucket /tmp/scoop-bucket
+  ```
+
+  **remote 用 https URL**（不是 `git@github.com:`）—— 本机的全局 insteadOf 规则会把
+  https 改写成 SSH，正好走通；写成 `git@` 反而会被改写成 https 而直连超时
 
 **Why hash comes from GitHub API (not local build)**
 
@@ -35,8 +45,11 @@ Therefore the new flow fetches the release zip SHA256 from **GitHub release body
 1. **Compute local zip + fetch release hash from GitHub API**:
 
    ```bash
-   rm -rf dist && ./build.sh bump-scoop v0.X.Y
+   rm -rf dist && ./build.sh bump-scoop v0.X.Y > /tmp/cc-launcher-manifest.json
    ```
+
+   stdout 是**纯 manifest JSON**（日志走 stderr）→ 必须重定向到文件，直接跑会把 JSON
+   刷在终端日志里。
 
    **On Windows** (no Git Bash / python3 / gh needed):
 
@@ -47,7 +60,7 @@ Therefore the new flow fetches the release zip SHA256 from **GitHub release body
    The script:
    - cross-compiles `cc-launcher-windows-amd64.zip` locally (kept for human verification)
    - fetches the release body via `curl https://api.github.com/repos/wzx-xle/cc-launcher/releases/tags/v0.X.Y`
-   - parses `<!-- sha256:auto-hash:HEX -->` from the body (3 retries × 5s backoff for race with release workflow's `gh release edit` step)
+   - parses `<!-- sha256:cc-launcher-windows-amd64.zip:HEX -->` from the body (3 retries × 5s backoff for race with release workflow's `gh release edit` step; 旧格式 `auto-hash` 也认)
    - emits the JSON with the **release asset's** hash (NOT the local one)
 
    Output: full manifest JSON.
@@ -61,7 +74,14 @@ Therefore the new flow fetches the release zip SHA256 from **GitHub release body
        -o /tmp/x.zip && sha256sum /tmp/x.zip
      ```
 
-2. **Edit `/tmp/scoop-bucket/bucket/cc-launcher.json`** — current expected format (v0.11.2+, no windows/arm64):
+2. **写 `/tmp/scoop-bucket/bucket/cc-launcher.json`** —— **直接用步骤 1 的输出覆盖**（脚本输出
+   就是完整 manifest，`pre_uninstall` 钩子已经在里面）：
+
+   ```bash
+   cp /tmp/cc-launcher-manifest.json /tmp/scoop-bucket/bucket/cc-launcher.json
+   ```
+
+   **只在需要手改时才照下面的格式写**（脚本输出已含 `pre_uninstall`，**手写时必须保留它**）：
 
    ```json
    {
@@ -75,7 +95,14 @@ Therefore the new flow fetches the release zip SHA256 from **GitHub release body
                "hash": "<sha256 from step 1>",
                "bin": ["ccl.cmd"]
            }
-       }
+       },
+       "pre_uninstall": [
+           "Write-Host '[cc-launcher] scoop uninstall hook: stopping processes that hold the app directory'",
+           "try { ccl serve --stop } catch { }",
+           "$d = $null; try { $d = (appdir 'cc-launcher') } catch { }",
+           "if ($d) { Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -like \"$d*\" } | Stop-Process -Force -ErrorAction SilentlyContinue }",
+           "Start-Sleep -Milliseconds 500"
+       ]
    }
    ```
 
@@ -83,23 +110,42 @@ Therefore the new flow fetches the release zip SHA256 from **GitHub release body
 
    **Do NOT use the local zip's SHA256** — local build hash ≠ GitHub release asset hash (see top of doc). The `hash` field MUST come from step 1's fetched value.
 
+   **Do NOT drop `pre_uninstall`** — 它是 scoop 卸载时停掉 daemon 的钩子（漏了 → 卸载后
+   daemon 还占着 app 目录，Windows 上文件被锁、卸载不干净）。2026-11-06 补上的，见
+   memory `scoop-bucket-manifest-pre-uninstall`。
+
 3. **Commit and push to wzx-xle/scoop-bucket**:
 
    ```bash
    cd /tmp/scoop-bucket
-   git config --global --unset-all url.https://github.com/.insteadof
    git add bucket/cc-launcher.json
-   git -c user.name=wxyz -c user.email=wxyz@users.noreply.github.com commit \
-       -m "chore(scoop): bump cc-launcher to v0.X.Y
+   git -c user.name=wxyz -c user.email=wxyz@users.noreply.github.com commit -F - <<'MSG'
+   chore(scoop): bump cc-launcher to v0.X.Y
 
    v0.X.Y release asset hash: <hash> (windows-amd64 zip, fetched from GitHub
-   release body via bump-scoop-hash-trace flow)"
+   release body via bump-scoop-hash-trace flow)
+   MSG
    git push origin main
-   git config --global --add url.https://github.com/.insteadof "git@github.com:"
-   git config --global --add url.https://github.com/.insteadof "ssh://git@github.com/"
    ```
 
-   The `insteadOf` unset/add cycle is required because the global `url.https://github.com/.insteadof` rule otherwise rewrites `git@github.com:` to `https://github.com:`, which fails without a GitHub PAT. Always re-add both rules with `--add` (not set), to avoid dropping a rule.
+   **Do NOT touch the global `url.https://github.com/.insteadof` rules.** They read:
+
+   ```
+   url.https://github.com/.insteadof = git@github.com:
+   url.https://github.com/.insteadof = ssh://git@github.com:
+   ```
+
+   `insteadOf` rewrites **https://github.com/ → SSH**（方向是"URL 写的是 https，实际走
+   SSH 通道"）。本机到 GitHub 的 https **直连不通**（60s 超时），这两条规则正是让它
+   走通的原因 —— clone / push 用 `https://github.com/...` 这个 URL 即可。**unset 掉它们
+   反而会让 push 走直连 https 而超时失败**（2026-11-09 实测：保持原样，clone + push
+   都成功；全局配置零改动）。
+
+   只有在**手动**用 `git@github.com:` 形式的 remote 时才会被改写成 https 而失败 ——
+   那时把 remote 换成 https URL 即可，**不要动全局配置**。
+
+   **Commit message 用 `-F -` + heredoc**，不要用 `-m "...\n\n..."`：bash 的双引号里
+   `\n` 是**字面两个字符**，不会换行 → commit message 里会出现字面的 `\n`。
 
    **Commit message is English** (NOT Chinese): the `wzx-xle/scoop-bucket` repo is cloned by Windows users via `scoop update`; git GUI / GitHub web on Windows mis-renders CJK characters without proper LANG/LC_ALL. cc-launcher's own commit message convention (Chinese) does NOT apply to the bucket repo — bucket commits stay ASCII to avoid encoding hazards for downstream consumers.
 
@@ -107,14 +153,25 @@ Therefore the new flow fetches the release zip SHA256 from **GitHub release body
 
    ```bash
    git ls-remote https://github.com/wzx-xle/scoop-bucket main
+
+   # 再看一眼远端 manifest 的实际内容（确认 version/url/hash 都换对了）
+   gh api repos/wzx-xle/scoop-bucket/contents/bucket/cc-launcher.json --jq '.content' \
+     | base64 -d | grep -E '"version"|"hash"|"url"'
    ```
 
-   Confirm the remote main has the new commit hash. Users can then `scoop update cc-launcher` to receive v0.X.Y.
+   Confirm the remote main has the new commit hash **and** the manifest's version / url / hash
+   are the new ones. Users can then `scoop update cc-launcher` to receive v0.X.Y.
 
 **Common mistakes**
 
 - **Including an `arm64` block** in the manifest — breaks `scoop install` because the release no longer ships a windows/arm64 zip. Removed in commit `299a2a4`.
-- **Forgetting to restore `url.https://github.com/.insteadof`** after the push — leaves the local environment inconsistent. Always re-add both rules with `--add`.
+- **Unsetting the global `url.https://github.com/.insteadof` rules before pushing** — those rules rewrite
+  https://github.com/ → SSH, which is exactly how this machine reaches GitHub (its https直连不通).
+  Unsetting them makes `git push` go over a direct https connection and time out (2026-11-09 实测).
+  **Leave the global config alone**; use an `https://github.com/...` remote URL.
+- **Hand-writing the manifest and dropping `pre_uninstall`** — that hook stops the daemon during
+  `scoop uninstall`; without it the app directory stays locked on Windows. Copy the script's output
+  wholesale instead of retyping the JSON.
 - **Pushing bucket to a non-GitHub remote** — bucket repo lives on GitHub only (`wzx-xle/scoop-bucket`); `git.wxyz.ren` mirror is for the cc-launcher source only and does not host the bucket. Verify the bucket repo's remote URL before `git push`.
 - **Using `gh` on Windows** — the `gh` CLI has no official Windows build (Windows users install it via scoop/chocolatey). `bin/bump-scoop.ps1` deliberately uses only PowerShell built-ins (`Invoke-RestMethod`); set `GITHUB_TOKEN` for the higher API rate limit.
 - **Redirecting the script's stdout into the bucket file without checking it starts with `{`** — both scripts now emit pure JSON on stdout, but older `build.sh` versions printed build logs there too.
@@ -129,6 +186,8 @@ Therefore the new flow fetches the release zip SHA256 from **GitHub release body
 - `.github/workflows/release.yml` — produces the release assets + writes the marker into release body
 - memory `scoop-bucket-zip-hash-stability` — historical context (the "four conventions" no longer suffice for byte-level match)
 - memory `github-push-via-ssh-with-insteadof` — the SSH push workflow
+  （注：该 memory 说"全局规则已删"，但 2026-11-09 实测**规则仍在**（两条 insteadOf），
+  且正是它们让 github 的 https 走 SSH 通道 —— 见步骤 3）
 - memory `github-vs-gitea-usernames` — `wzx-xle` vs `wxyz` distinction
 - `.claude/commands/bump-version.md` — companion slash command
 - `openspec/changes/archive/2026-10-14-bump-scoop-hash-trace/` — full change rationale
