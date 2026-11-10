@@ -35,6 +35,24 @@ jobs:
       - name: build
         run: go build ./...
 
+      - name: gofmt
+        # 仓库此前**从不**跑 gofmt 检查，格式差异只能靠人眼发现：40 个文件
+        # 的差异攒了半年才被一次性清掉（ca90613），而
+        # internal/config/ordered.go 末尾多一个空行躺得更久。CI 一旦有了
+        # 这道闸，新代码的格式问题在 PR 阶段就红，不必再攒。
+        #
+        # 用 CI 已固定的 Go 1.25.4：实测 1.25.4 与 1.26.10 对本仓库的 gofmt
+        # 输出逐字节相同，CI 与本地不会因为 gofmt 版本分歧打架。
+        run: |
+          UNFORMATTED=$(gofmt -l .)
+          if [ -n "$UNFORMATTED" ]; then
+            echo "::error::以下文件未按 gofmt 格式化："
+            echo "$UNFORMATTED"
+            echo "--- gofmt -d 详情 ---"
+            gofmt -d .
+            exit 1
+          fi
+
       - name: vet
         run: go vet ./...
 
