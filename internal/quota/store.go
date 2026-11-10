@@ -103,7 +103,18 @@ func (s *Store) Path() string { return s.path }
 // JSON 损坏 → 返回 error（让调用方决定怎么处理；读取侧应当把它当成"没有
 // 记录"而不是崩掉）。
 func (s *Store) Load() (*File, error) {
-	data, err := os.ReadFile(s.path)
+	data, err := readFile(s.path)
+	if err != nil && os.IsNotExist(err) {
+		// **Windows 上文件可能正被替换**：daemon 写 quota.json 用 tmp+rename，
+		// 而 rename 在目标被占用（另一个进程正在读它）时会失败 → 走"删掉目标
+		// 再改名"的兜底 → 目标**短暂不存在**。这一刻读到 ErrNotExist 的消费方
+		// 会误判成"没有额度记录" → 退出码非 0 → 状态栏回落到 Claude Code 自己
+		// 的 rate_limits（用户看到"原始限额内容"）。
+		//
+		// 那个窗口是微秒级的（remove + rename 两步）→ 短暂等一下再读就能跨过。
+		time.Sleep(fileReplaceRetryDelay)
+		data, err = readFile(s.path)
+	}
 	if err != nil {
 		if os.IsNotExist(err) {
 			return &File{Version: quotaFileVersion, Entries: map[string]Entry{}}, nil
@@ -194,11 +205,27 @@ func (s *Store) Save(f *File) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("关闭额度数据文件失败: %w", err)
 	}
-	if err := os.Rename(tmpName, s.path); err != nil {
-		// Windows：目标已存在时 rename 失败 → 删掉目标再试一次。
-		_ = os.Remove(s.path)
-		if err2 := os.Rename(tmpName, s.path); err2 != nil {
-			return fmt.Errorf("写额度数据文件失败: %w", err2)
+	if err := renameFile(tmpName, s.path); err != nil {
+		// Windows：目标**正被占用**（另一个进程在读它）时 rename 会失败。
+		// 占用是**瞬时**的 → 先重试，别急着删目标：删了会造成"文件短暂不存在"
+		// 的窗口，读它的消费方（状态栏每 300ms 调一次 ccl quota --json）会
+		// 误判成"没有额度记录" → 退出码非 0 → 回落到 Claude Code 自己的
+		// rate_limits。详见 Load 里的注释。
+		ok := false
+		for i := 0; i < renameRetries; i++ {
+			time.Sleep(fileReplaceRetryDelay)
+			if err := renameFile(tmpName, s.path); err == nil {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			// 重试仍失败 → 目标可能被**长期**占用 → 只能删掉再改名（此时那个
+			// 窗口不可避免，但 Load 侧的重试会兜住它）。
+			_ = os.Remove(s.path)
+			if err2 := renameFile(tmpName, s.path); err2 != nil {
+				return fmt.Errorf("写额度数据文件失败: %w", err2)
+			}
 		}
 	}
 	return nil
@@ -367,6 +394,22 @@ func (s *Store) ReduceBackoff(key string) error {
 	f.Backoffs[key] = b
 	return s.Save(f)
 }
+
+// fileReplaceRetryDelay 是"文件正被替换"时重试的等待时长。
+//
+// Windows 上 daemon 写 quota.json 用 tmp+rename；rename 在目标被占用（另一个
+// 进程正在读）时失败 → 兜底路径会"删掉目标再改名" → 目标**短暂不存在**。
+// 那个窗口是微秒级的（remove + rename 两步）→ 等 5ms 重试就能跨过。
+const fileReplaceRetryDelay = 5 * time.Millisecond
+
+// renameRetries 是 rename 失败后的重试次数（占用是瞬时的）。
+const renameRetries = 3
+
+// renameFile 是 os.Rename 的注入点（测试用：模拟 Windows 上"目标被占用"）。
+var renameFile = os.Rename
+
+// readFile 是 os.ReadFile 的注入点（测试用：模拟"文件正被替换、短暂不存在"）。
+var readFile = os.ReadFile
 
 // BackoffFor 取某个额度池的退避状态；没有则返回零值。
 func (f *File) BackoffFor(pool string) Backoff {
