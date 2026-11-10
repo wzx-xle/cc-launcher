@@ -29,7 +29,7 @@ type Resolver struct {
 }
 
 // NewResolver 构造 Resolver，projectsDir 是 Claude Code 的会话目录
-//（通常是 ~/.claude/projects）。
+// （通常是 ~/.claude/projects）。
 func NewResolver(projectsDir string) *Resolver {
 	return &Resolver{projectsDir: projectsDir}
 }

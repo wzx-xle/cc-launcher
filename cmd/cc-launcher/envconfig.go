@@ -155,7 +155,7 @@ func hasCclArtifact(env map[string]any) bool {
 //
 //  1. 有备份键 `CC_ORIG_<KEY>` / `FORWORD_<KEY>`：
 //     - 备份值 == ccl 自己的默认值 → 这是**自我备份**（旧版 ccl 给自己注入的
-//       值做的备份），用户本来就没有这个键 → live 键也删掉
+//     值做的备份），用户本来就没有这个键 → live 键也删掉
 //     - 否则 → 备份值写回 live 键（还原用户原值）
 //     - 备份键一律删除
 //  2. 没有备份键、且 live 值 == ccl 自己的默认值 → 是旧版 ccl 注入的默认值

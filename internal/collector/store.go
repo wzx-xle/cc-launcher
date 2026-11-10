@@ -52,11 +52,11 @@ type CwdResolver interface {
 // Metric 是 OTel 数据点的领域对象。
 // 一个 NumberDataPoint 对应一行 metrics 表。
 type Metric struct {
-	SessionID   string
-	Name        string
-	Value       float64
-	Labels      map[string]string
-	CapturedAt  time.Time
+	SessionID  string
+	Name       string
+	Value      float64
+	Labels     map[string]string
+	CapturedAt time.Time
 }
 
 // Store 是 SQLite 写入端。daemon 持有，ccl stats 不会复用（ccl stats 直接打开 db）。
@@ -71,15 +71,15 @@ type Store struct {
 	queue   chan metricWrite
 	dropped atomic.Uint64 // 累计因背压丢弃的条目数
 
-	closed   chan struct{}
+	closed    chan struct{}
 	closeOnce sync.Once
-	wg       sync.WaitGroup
+	wg        sync.WaitGroup
 }
 
 // metricWrite 是写入队列里的载荷。
 type metricWrite struct {
-	kind string // "session" / "metric" / "flush"
-	data []byte // JSON-encoded Session or Metric
+	kind string        // "session" / "metric" / "flush"
+	data []byte        // JSON-encoded Session or Metric
 	done chan struct{} // 仅 kind == "flush"：worker 消费到该条目后 close
 }
 
@@ -523,7 +523,7 @@ func BackfillCwdInFile(dbPath string, resolver CwdResolver, limit int) (resolved
 	return backfillCwdDB(db, resolver, limit)
 }
 
-// backfillCwdDB 是回填的核心：只处理 cwd = '' 的行。
+// backfillCwdDB 是回填的核心：只处理 cwd = ” 的行。
 //
 // 幂等由**数据驱动**：不动非空行，也不消耗任何一次性标记（PRAGMA
 // user_version 之类）——跑第二次结果与第一次一致，且之后新建的空 cwd 行

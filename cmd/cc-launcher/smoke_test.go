@@ -135,7 +135,7 @@ func TestSmoke_ThirdPartyOverwriteTriggersBackup(t *testing.T) {
 	// 模拟旧版 ccl 留下的痕迹：live 被改写 + 备份键里是真原值
 	writeSettings(t, settingsPath, map[string]any{
 		"env": map[string]any{
-			"OTEL_EXPORTER_OTLP_ENDPOINT":        "http://other-tool:4318",
+			"OTEL_EXPORTER_OTLP_ENDPOINT":         "http://other-tool:4318",
 			"CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT": "https://company-otel:4317",
 		},
 	})
@@ -177,7 +177,7 @@ func TestSmoke_RestoreUnaffected(t *testing.T) {
 	// 模拟旧版 ccl 的注入：endpoint 是 ccl 默认值 + CC_ORIG_* 有原值
 	writeSettings(t, settingsPath, map[string]any{
 		"env": map[string]any{
-			"OTEL_EXPORTER_OTLP_ENDPOINT":        "http://localhost:4318",
+			"OTEL_EXPORTER_OTLP_ENDPOINT":         "http://localhost:4318",
 			"CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT": "https://company-otel:4317",
 		},
 	})
@@ -660,15 +660,16 @@ func TestSmoke_CompletionTopLevel(t *testing.T) {
 //   - statsExitFn 覆盖为 no-op（避免真 os.Exit 把 test 进程杀掉）
 //
 // 覆盖 spec scenarios:
-//   (a) --day 7 文本含 7 daily label + TOTAL_TOKENS + TOTAL
-//   (b) --day 1 文本含 24 hourly + partial note + 当前小时 *
-//   (c) --day 缺省 文本不含 TOTAL_TOKENS / BUCKET
-//   (d) --json --day 7 JSON 含 bucket_rows(7 个)+ bucket_totals + bucket_iso
-//   (e) --json 缺省 JSON 无 bucket_rows / bucket_totals
-//   (f) --since 报 "flag provided but not defined: -since"
-//   (g) --day 0 / 91 exit 非 0 + stderr 含 "--day 必须在 1 到 90 之间, got:"
-//   (h) --json --day 1 当前小时桶含 is_current: true
-//   (i) 80-col 终端宽度下柱状图右边界对齐
+//
+//	(a) --day 7 文本含 7 daily label + TOTAL_TOKENS + TOTAL
+//	(b) --day 1 文本含 24 hourly + partial note + 当前小时 *
+//	(c) --day 缺省 文本不含 TOTAL_TOKENS / BUCKET
+//	(d) --json --day 7 JSON 含 bucket_rows(7 个)+ bucket_totals + bucket_iso
+//	(e) --json 缺省 JSON 无 bucket_rows / bucket_totals
+//	(f) --since 报 "flag provided but not defined: -since"
+//	(g) --day 0 / 91 exit 非 0 + stderr 含 "--day 必须在 1 到 90 之间, got:"
+//	(h) --json --day 1 当前小时桶含 is_current: true
+//	(i) 80-col 终端宽度下柱状图右边界对齐
 func TestStatsTimeBuckets(t *testing.T) {
 	home := sandboxHome(t)
 	baseDir := cclLauncherBaseDir()
@@ -1040,10 +1041,10 @@ func TestStatsTimeBuckets(t *testing.T) {
 
 		// parse text:提取每桶 sessions / input_tokens / output_tokens / cache_create / cache_read / cost_usd
 		type textBucket struct {
-			label    string
-			sessions int64
+			label              string
+			sessions           int64
 			in, out, cre, read int64
-			cost     float64
+			cost               float64
 		}
 		var textBuckets []textBucket
 		for _, line := range strings.Split(textOut, "\n") {

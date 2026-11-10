@@ -31,9 +31,9 @@ type TemplateField struct {
 // 模板用此声明"在走 Fields 之前先问什么"。PreAsk 结果不写盘到 provider 配置
 // （与 TemplateField 区分），仅作为流程元数据驱动 cli 交互。
 type PreAsk struct {
-	Key      string                // 收集结果的 key，写入 env map
-	Prompt   string                // 提示用户文本
-	Default  string                // 空输入时的默认值（可选）
+	Key      string               // 收集结果的 key，写入 env map
+	Prompt   string               // 提示用户文本
+	Default  string               // 空输入时的默认值（可选）
 	Validate func(s string) error // 验证；nil 表示接受，error 表示重试
 }
 
@@ -41,18 +41,18 @@ type PreAsk struct {
 // 模板用此声明"在 Fields 收集完后，按已收集的所有字段重新决定某些字段值"。
 // Apply 接收 env map（含 PreAsk 结果 + Field 收集结果），返回新值覆盖 Field。
 type FieldOverride struct {
-	Field string                    // 目标字段 Key（必须在 Template.Fields 里存在）
+	Field string                       // 目标字段 Key（必须在 Template.Fields 里存在）
 	Apply func(env map[string]any) any // 返回新值（覆盖 env[Field]）
 }
 
 // Template 一个 provider 类型。
 type Template struct {
-	Name         string
-	Description  string
-	Body         string           // 完整 JSON 模板（不含 // 注释）
-	Hints        []Hint           // 每步的提示解释
-	Fields       []TemplateField // 每步要问什么
-	PreAsks      []PreAsk        // 字段收集前的额外问答（cli 走主流程前先跑这些）
+	Name          string
+	Description   string
+	Body          string          // 完整 JSON 模板（不含 // 注释）
+	Hints         []Hint          // 每步的提示解释
+	Fields        []TemplateField // 每步要问什么
+	PreAsks       []PreAsk        // 字段收集前的额外问答（cli 走主流程前先跑这些）
 	PostOverrides []FieldOverride // 字段收集后覆盖字段值
 }
 

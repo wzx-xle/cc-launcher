@@ -258,7 +258,7 @@ type respRecorder struct {
 func newRespWriter() *respRecorder {
 	return &respRecorder{h: http.Header{}}
 }
-func (r *respRecorder) Header() http.Header        { return r.h }
+func (r *respRecorder) Header() http.Header         { return r.h }
 func (r *respRecorder) Write(b []byte) (int, error) { return r.body.Write(b) }
 func (r *respRecorder) WriteHeader(code int)        { r.code = code }
 

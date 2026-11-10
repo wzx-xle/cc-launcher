@@ -67,9 +67,9 @@ type minimaxResp struct {
 
 // minimaxRemain 是 model_remains 数组里的一项。
 type minimaxRemain struct {
-	StartTime   int64 `json:"start_time"`
-	EndTime     int64 `json:"end_time"`
-	RemainsTime int64 `json:"remains_time"`
+	StartTime   int64  `json:"start_time"`
+	EndTime     int64  `json:"end_time"`
+	RemainsTime int64  `json:"remains_time"`
 	ModelName   string `json:"model_name"`
 
 	WeeklyStartTime   int64 `json:"weekly_start_time"`
@@ -136,13 +136,13 @@ func (minimaxAdapter) Fetch(ctx context.Context, p ProviderInfo) ([]Dimension, e
 	if d, ok := minimaxWindow("interval", entry.StartTime, entry.EndTime,
 		entry.CurrentIntervalRemainingPercent, entry.RemainsTime, now); ok {
 		d.Raw = map[string]any{
-			"current_interval_status":       entry.CurrentIntervalStatus,
-			"current_interval_total_count":  entry.CurrentIntervalTotalCount,
-			"current_interval_usage_count":  entry.CurrentIntervalUsageCount,
-			"current_weekly_status":         entry.CurrentWeeklyStatus,
-			"current_weekly_total_count":    entry.CurrentWeeklyTotalCount,
-			"current_weekly_usage_count":    entry.CurrentWeeklyUsageCount,
-			"model_name":                    entry.ModelName,
+			"current_interval_status":      entry.CurrentIntervalStatus,
+			"current_interval_total_count": entry.CurrentIntervalTotalCount,
+			"current_interval_usage_count": entry.CurrentIntervalUsageCount,
+			"current_weekly_status":        entry.CurrentWeeklyStatus,
+			"current_weekly_total_count":   entry.CurrentWeeklyTotalCount,
+			"current_weekly_usage_count":   entry.CurrentWeeklyUsageCount,
+			"model_name":                   entry.ModelName,
 		}
 		d.Finalize()
 		dims = append(dims, d)

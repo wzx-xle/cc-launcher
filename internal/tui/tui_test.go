@@ -76,10 +76,10 @@ func TestRun_RememberStage_TriggeredWhenProviderDiffersFromBinding(t *testing.T)
 	providers := []provider.Info{{Name: "anthropic"}, {Name: "deepseek"}}
 	// preSelected = "anthropic"，existingBinding = "anthropic"；用户下移选 deepseek
 	m := newModel(providers, "anthropic", "manual", "anthropic", "/wd")
-	m = sendKey(m, tea.KeyMsg{Type: tea.KeyDown})   // cursor 0→1 (deepseek)
-	m = sendKey(m, tea.KeyMsg{Type: tea.KeyEnter})  // 选 deepseek → stageMode
-	m = sendKey(m, tea.KeyMsg{Type: tea.KeyEnter})  // stageMode → stageSession
-	m = enterSession(m)                             // stageSession → stageRemember
+	m = sendKey(m, tea.KeyMsg{Type: tea.KeyDown})  // cursor 0→1 (deepseek)
+	m = sendKey(m, tea.KeyMsg{Type: tea.KeyEnter}) // 选 deepseek → stageMode
+	m = sendKey(m, tea.KeyMsg{Type: tea.KeyEnter}) // stageMode → stageSession
+	m = enterSession(m)                            // stageSession → stageRemember
 	if m.stage != stageRemember {
 		t.Errorf("expected stageRemember after session select (provider != binding), got stage=%d", m.stage)
 	}

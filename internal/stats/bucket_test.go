@@ -189,8 +189,8 @@ func TestBucket_Daily_7Rows(t *testing.T) {
 func TestBucket_BoundariesInclusive(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "telemetry.db")
-	now := fixedNow()                       // 2026-09-30 17:30
-	todayStart := startOfDayMillis(now)     // 2026-09-30 00:00
+	now := fixedNow()                   // 2026-09-30 17:30
+	todayStart := startOfDayMillis(now) // 2026-09-30 00:00
 	store, err := collector.OpenStore(dbPath, collector.WithClock(func() time.Time { return now }))
 	if err != nil {
 		t.Fatal(err)

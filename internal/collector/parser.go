@@ -106,12 +106,12 @@ func ParseMetricsRequest(body []byte) (*ParseResult, error) {
 			continue
 		}
 		result.Sessions = append(result.Sessions, Session{
-			ID:              sid,
-			StartedAt:       time.UnixMilli(startMs),
-			Provider:        meta.provider,
-			Cwd:             meta.cwd,
+			ID:               sid,
+			StartedAt:        time.UnixMilli(startMs),
+			Provider:         meta.provider,
+			Cwd:              meta.cwd,
 			ProviderEndpoint: meta.endpoint,
-			Model:           meta.model,
+			Model:            meta.model,
 		})
 	}
 

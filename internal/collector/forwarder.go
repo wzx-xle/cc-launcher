@@ -48,9 +48,9 @@ const envAuthHeader = "CC_FORWARD_AUTH_HEADER"
 // NewForwarderFromEnv 按优先级检查 env 决定是否启用 forwarder（metrics-only）。
 //
 // 优先级（telemetry-config-compat 决策 3）：
-//   1. FORWORD_OTEL_EXPORTER_OTLP_METRICS_ENDPOINT 非空且非 localhost → 用它
-//   2. CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT 非空且非 localhost → 用它
-//   3. 都未设或都是 loopback → 禁用
+//  1. FORWORD_OTEL_EXPORTER_OTLP_METRICS_ENDPOINT 非空且非 localhost → 用它
+//  2. CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT 非空且非 localhost → 用它
+//  3. 都未设或都是 loopback → 禁用
 //
 // 返回的 *Forwarder 在 disabled 时所有 Forward 调用都是 no-op（不报错）。
 func NewForwarderFromEnv() *Forwarder {

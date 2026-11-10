@@ -6,8 +6,8 @@ package main
 //   - 内容写到 `~/.cc-launcher/cache/settings-<sha256[:16]>.json`（内容哈希命名 →
 //     复用 + 并发不串 + 写入幂等）
 //   - 参数是**文件路径**，不是内联 JSON：
-//     - Unix 上内联 JSON 会明文进 argv（/proc/<pid>/cmdline 是 0444，同机可读）
-//     - Windows 上 cmd.exe 会剥掉 JSON 的双引号
+//   - Unix 上内联 JSON 会明文进 argv（/proc/<pid>/cmdline 是 0444，同机可读）
+//   - Windows 上 cmd.exe 会剥掉 JSON 的双引号
 //   - **不删除**（cache 文件常驻，启动时按 mtime 清 1 年前的）
 //
 // 返回：

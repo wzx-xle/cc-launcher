@@ -120,8 +120,8 @@ func TestPrepareOtelEnv_RespectsUserChoice(t *testing.T) {
 	cm := config.NewManager(filepath.Join(dir, "s.json"), filepath.Join(dir, "b"), 3)
 	if err := cm.SaveSettings(map[string]any{
 		"env": map[string]any{
-			"OTEL_METRICS_EXPORTER":       "prometheus",
-			"OTEL_LOGS_EXPORTER":          "otlp",
+			"OTEL_METRICS_EXPORTER":        "prometheus",
+			"OTEL_LOGS_EXPORTER":           "otlp",
 			"CLAUDE_CODE_ENABLE_TELEMETRY": "0",
 		},
 	}); err != nil {
@@ -186,7 +186,7 @@ func TestPrepareOtelEnv_ForwardTarget(t *testing.T) {
 		cm := config.NewManager(filepath.Join(dir, "s.json"), filepath.Join(dir, "b"), 3)
 		if err := cm.SaveSettings(map[string]any{
 			"env": map[string]any{
-				"OTEL_EXPORTER_OTLP_ENDPOINT":        "http://localhost:4318",
+				"OTEL_EXPORTER_OTLP_ENDPOINT":         "http://localhost:4318",
 				"CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT": "https://company-otel:4317",
 			},
 		}); err != nil {
@@ -211,9 +211,9 @@ func TestPrepareOtelEnv_CleansLegacyArtifactsOnce(t *testing.T) {
 	cm := config.NewManager(settingsPath, filepath.Join(dir, "b"), 3)
 	if err := cm.SaveSettings(map[string]any{
 		"env": map[string]any{
-			"OTEL_EXPORTER_OTLP_ENDPOINT":        "http://localhost:4318",
+			"OTEL_EXPORTER_OTLP_ENDPOINT":         "http://localhost:4318",
 			"CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT": "https://company-otel:4317",
-			"ANTHROPIC_BASE_URL":                 "https://api.example.com",
+			"ANTHROPIC_BASE_URL":                  "https://api.example.com",
 		},
 	}); err != nil {
 		t.Fatal(err)
@@ -725,7 +725,7 @@ func migrateTestRig(t *testing.T, snapshot map[string]any, settingsEnv map[strin
 // is nil or empty" Scenario "migration returns early"——无 snapshot 跳过。
 func TestMigrate_SnapshotNil_NoOp(t *testing.T) {
 	cm, sm := migrateTestRig(t, nil, map[string]any{
-		"ANTHROPIC_AUTH_TOKEN": "sk-user",
+		"ANTHROPIC_AUTH_TOKEN":        "sk-user",
 		"OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4318",
 	})
 
@@ -761,9 +761,9 @@ func TestMigrate_MatchesValue_RemovesAndBacksUp(t *testing.T) {
 	}
 	settingsPath := filepath.Join(baseDir, "settings.json")
 	data, _ := json.Marshal(map[string]any{"env": map[string]any{
-		"ANTHROPIC_AUTH_TOKEN":          "sk-ccl-wrote", // 匹配 snapshot → 删
-		"OTEL_EXPORTER_OTLP_ENDPOINT":   "http://localhost:4318", // 不在 snapshot → 保留
-		"CLAUDE_CODE_ENABLE_TELEMETRY":  "1",            // 不在 snapshot → 保留
+		"ANTHROPIC_AUTH_TOKEN":         "sk-ccl-wrote",          // 匹配 snapshot → 删
+		"OTEL_EXPORTER_OTLP_ENDPOINT":  "http://localhost:4318", // 不在 snapshot → 保留
+		"CLAUDE_CODE_ENABLE_TELEMETRY": "1",                     // 不在 snapshot → 保留
 	}})
 	if err := os.WriteFile(settingsPath, data, 0644); err != nil {
 		t.Fatal(err)
@@ -855,14 +855,14 @@ func TestMigrate_OtelKeysNotInSnapshot_Preserved(t *testing.T) {
 	cm, sm := migrateTestRig(t, map[string]any{
 		"env": map[string]any{"ANTHROPIC_AUTH_TOKEN": "sk-ccl-wrote"},
 	}, map[string]any{
-		"OTEL_EXPORTER_OTLP_ENDPOINT":            "http://localhost:4318",
-		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT":    "http://localhost:4318/v1/metrics",
-		"OTEL_METRICS_EXPORTER":                  "otlp",
-		"OTEL_EXPORTER_OTLP_PROTOCOL":            "http/protobuf",
-		"CLAUDE_CODE_ENABLE_TELEMETRY":           "1",
-		"CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT":    "http://remote:4318",
+		"OTEL_EXPORTER_OTLP_ENDPOINT":                 "http://localhost:4318",
+		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT":         "http://localhost:4318/v1/metrics",
+		"OTEL_METRICS_EXPORTER":                       "otlp",
+		"OTEL_EXPORTER_OTLP_PROTOCOL":                 "http/protobuf",
+		"CLAUDE_CODE_ENABLE_TELEMETRY":                "1",
+		"CC_ORIG_OTEL_EXPORTER_OTLP_ENDPOINT":         "http://remote:4318",
 		"FORWORD_OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://remote:4318/v1/metrics",
-		"ANTHROPIC_AUTH_TOKEN":                   "sk-ccl-wrote", // 匹配 → 删
+		"ANTHROPIC_AUTH_TOKEN":                        "sk-ccl-wrote", // 匹配 → 删
 	})
 
 	if err := migrateSettingsJSON(cm, sm); err != nil {

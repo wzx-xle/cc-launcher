@@ -55,7 +55,7 @@ func TestEncodeDecode_RoundTrip(t *testing.T) {
 	cases := []string{
 		"/home/u/my project",                  // 空格
 		"/home/u/a,b;c\\d",                    // 逗号 / 分号 / 反斜杠
-		"/home/u/测试项目",                      // 中文（多字节）
+		"/home/u/测试项目",                        // 中文（多字节）
 		"/home/u/" + strings.Repeat("x", 300), // 超长
 	}
 	for _, in := range cases {
@@ -138,7 +138,7 @@ func TestEndpointHost(t *testing.T) {
 	cases := map[string]string{
 		"https://api.minimax.cn/anthropic": "api.minimax.cn",
 		"https://api.deepseek.com":         "api.deepseek.com",
-		"http://127.0.0.1:8080":             "127.0.0.1:8080",
+		"http://127.0.0.1:8080":            "127.0.0.1:8080",
 		"":                                 "",
 		"://bad":                           "",
 	}

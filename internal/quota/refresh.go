@@ -604,7 +604,7 @@ func RefreshAll(ctx context.Context, refs []ProviderRef, st *Store, logf func(fo
 	//
 	// **必须先做完这一遍再谈刷不刷**：活跃判定是**池级**的（池内任一 provider
 	// 活跃 → 整池活跃），所以得先把池的成员关系搞清楚。
-	live := map[string]bool{}           // Prune 的依据：全部 provider
+	live := map[string]bool{}            // Prune 的依据：全部 provider
 	providerPool := map[string]string{}  // provider 名 → 额度池
 	poolMembers := map[string][]string{} // 额度池 → 引用它的 provider
 	pools := map[string]poolInfo{}       // 额度池 → 固有属性

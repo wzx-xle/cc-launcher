@@ -538,12 +538,12 @@ func TestGuidedFlow_AliyunPay_SubstitutesWorkspaceId(t *testing.T) {
 	c := New(pm, sm)
 
 	restore := mockStdin([]string{"pay-test", "ws-xyz789",
-		"sk-test",         // ANTHROPIC_AUTH_TOKEN
-		"",                // ANTHROPIC_MODEL 用默认
-		"",                // ANTHROPIC_DEFAULT_HAIKU_MODEL 用默认
-		"",                // ANTHROPIC_DEFAULT_SONNET_MODEL 用默认
-		"",                // ANTHROPIC_DEFAULT_OPUS_MODEL 用默认
-		"",                // CLAUDE_CODE_SUBAGENT_MODEL 用默认
+		"sk-test", // ANTHROPIC_AUTH_TOKEN
+		"",        // ANTHROPIC_MODEL 用默认
+		"",        // ANTHROPIC_DEFAULT_HAIKU_MODEL 用默认
+		"",        // ANTHROPIC_DEFAULT_SONNET_MODEL 用默认
+		"",        // ANTHROPIC_DEFAULT_OPUS_MODEL 用默认
+		"",        // CLAUDE_CODE_SUBAGENT_MODEL 用默认
 	})
 	defer restore()
 

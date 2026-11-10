@@ -128,9 +128,9 @@ func TestResolveForwardTarget(t *testing.T) {
 
 	t.Run("遗留备份键优先于被改写的 live 键", func(t *testing.T) {
 		env := map[string]any{
-			keyEndpoint:                            defaultEndpoint,
-			backupPrefixOrig + keyEndpoint:         "https://company-otel:4317",
-			keyMetricsEndpoint:                     defaultMetricsEndpoint,
+			keyEndpoint:                              defaultEndpoint,
+			backupPrefixOrig + keyEndpoint:           "https://company-otel:4317",
+			keyMetricsEndpoint:                       defaultMetricsEndpoint,
 			backupPrefixForword + keyMetricsEndpoint: "https://metrics:4318/v1/metrics",
 		}
 		fb, ps := resolveForwardTarget(env)

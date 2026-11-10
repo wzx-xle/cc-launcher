@@ -50,7 +50,7 @@ func deepseekHost(baseURL string) (string, bool) {
 
 // deepseekResp 是 DeepSeek 余额接口的响应。
 type deepseekResp struct {
-	IsAvailable bool `json:"is_available"`
+	IsAvailable  bool `json:"is_available"`
 	BalanceInfos []struct {
 		Currency        string `json:"currency"`
 		TotalBalance    string `json:"total_balance"`
@@ -111,13 +111,12 @@ func (deepseekAdapter) Fetch(ctx context.Context, p ProviderInfo) ([]Dimension, 
 	d.Remaining = f64(amount)
 	d.Unit = info.Currency
 	d.Raw = map[string]any{
-		"is_available":         resp.IsAvailable,
-		"granted_balance":      info.GrantedBalance,
-		"topped_up_balance":    info.ToppedUpBalance,
+		"is_available":      resp.IsAvailable,
+		"granted_balance":   info.GrantedBalance,
+		"topped_up_balance": info.ToppedUpBalance,
 	}
 	d.Finalize()
 
 	// **没有总额度 → Limit 留 nil → 派生不出百分比 → kind = balance**。
 	return []Dimension{d}, nil
 }
-

@@ -36,13 +36,13 @@ var ErrNoDatabase = errors.New("telemetry db 不存在")
 //     Totals / BucketRows / BucketTotals 等具体字段,无 Query 反序列化需求）,
 //     所以不加 json tag。
 type Query struct {
-	Buckets    *int    // nil = 不启用桶聚合;非 nil = 启用,N ∈ [1,90]
-	ByProvider bool    // 按 provider 聚合
-	ByProject  bool    // 按 project 聚合
-	ByModel    bool    // 按 model 聚合（web-usage-stats-ui §D8）
-	Project    string  // 模糊匹配 session.cwd 子串
-	Model      string  // 模糊匹配 session.model 子串（SQL 层过滤）
-	Provider   string  // 模糊匹配 session.provider 子串（SQL 层过滤）
+	Buckets    *int             // nil = 不启用桶聚合;非 nil = 启用,N ∈ [1,90]
+	ByProvider bool             // 按 provider 聚合
+	ByProject  bool             // 按 project 聚合
+	ByModel    bool             // 按 model 聚合（web-usage-stats-ui §D8）
+	Project    string           // 模糊匹配 session.cwd 子串
+	Model      string           // 模糊匹配 session.model 子串（SQL 层过滤）
+	Provider   string           // 模糊匹配 session.provider 子串（SQL 层过滤）
 	Clock      func() time.Time // nil = time.Now;非 nil = 注入 clock(测试 / 跨包 deterministic)
 }
 
@@ -241,8 +241,10 @@ func QueryStats(dbPath string, q Query) (*Result, error) {
 // buildSessionStatsSQL 按 group 维度动态拼 SQL，返回 (sql, args)。
 //
 // 关键 metric name（Claude Code v2.1.x 实测）：
-//   claude_code.token.usage       labels.type ∈ {input, output, cacheRead, cacheCreation}
-//   claude_code.cost.usage
+//
+//	claude_code.token.usage       labels.type ∈ {input, output, cacheRead, cacheCreation}
+//	claude_code.cost.usage
+//
 // 其它 name 在聚合里被忽略（不算 tokens/cost）。
 //
 // SQLite 用 CAST(... AS INTEGER) 把 token SUM 转 int64；cost 保留 REAL。

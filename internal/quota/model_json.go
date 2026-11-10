@@ -16,19 +16,19 @@ import (
 //   - used_percentage 是**派生**的（UsedPct()），不来自厂商响应
 //   - **没有的字段不写**（不写 null）——消费方不必区分"null"和"缺失"
 type dimensionJSON struct {
-	ID       string         `json:"id"`
-	Label    string         `json:"label"`
-	Kind     Kind           `json:"kind"`
-	Duration int64          `json:"duration_seconds,omitempty"`
-	UsedPct  *float64       `json:"used_percentage,omitempty"`
-	Used     *float64       `json:"used,omitempty"`
-	Limit    *float64       `json:"limit,omitempty"`
-	Remaining *float64      `json:"remaining,omitempty"`
-	Unit     string         `json:"unit,omitempty"`
-	ResetsAt *int64         `json:"resets_at,omitempty"`
-	ExpiresAt *int64        `json:"expires_at,omitempty"`
-	Unlimited bool          `json:"unlimited,omitempty"`
-	Raw      map[string]any `json:"raw,omitempty"`
+	ID        string         `json:"id"`
+	Label     string         `json:"label"`
+	Kind      Kind           `json:"kind"`
+	Duration  int64          `json:"duration_seconds,omitempty"`
+	UsedPct   *float64       `json:"used_percentage,omitempty"`
+	Used      *float64       `json:"used,omitempty"`
+	Limit     *float64       `json:"limit,omitempty"`
+	Remaining *float64       `json:"remaining,omitempty"`
+	Unit      string         `json:"unit,omitempty"`
+	ResetsAt  *int64         `json:"resets_at,omitempty"`
+	ExpiresAt *int64         `json:"expires_at,omitempty"`
+	Unlimited bool           `json:"unlimited,omitempty"`
+	Raw       map[string]any `json:"raw,omitempty"`
 }
 
 // MarshalJSON 把 Dimension 序列化成对外形状。

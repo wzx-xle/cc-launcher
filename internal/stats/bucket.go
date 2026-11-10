@@ -36,16 +36,16 @@ import (
 //   - IsCurrent：JSON `is_current,omitempty`；当前小时桶置 true，daily 全 false
 //   - Sessions/InputTokens/.../CostUSD：桶聚合值；空 db / 缺失桶 = 0
 type BucketRow struct {
-	Label         string  `json:"bucket,omitempty"`
-	BucketISO     string  `json:"bucket_iso"`
-	BucketUnixMs  int64   `json:"bucket_unix_ms"`
-	IsCurrent     bool    `json:"is_current,omitempty"`
-	Sessions      int64   `json:"sessions"`
-	InputTokens   int64   `json:"input_tokens"`
-	OutputTokens  int64   `json:"output_tokens"`
-	CacheCreate   int64   `json:"cache_creation_tokens"`
-	CacheRead     int64   `json:"cache_read_tokens"`
-	CostUSD       float64 `json:"cost_usd"`
+	Label        string  `json:"bucket,omitempty"`
+	BucketISO    string  `json:"bucket_iso"`
+	BucketUnixMs int64   `json:"bucket_unix_ms"`
+	IsCurrent    bool    `json:"is_current,omitempty"`
+	Sessions     int64   `json:"sessions"`
+	InputTokens  int64   `json:"input_tokens"`
+	OutputTokens int64   `json:"output_tokens"`
+	CacheCreate  int64   `json:"cache_creation_tokens"`
+	CacheRead    int64   `json:"cache_read_tokens"`
+	CostUSD      float64 `json:"cost_usd"`
 }
 
 // QueryBucketSummary 返回时间桶聚合结果（per hour / per local calendar day）。
@@ -57,7 +57,7 @@ type BucketRow struct {
 //     s.started_at >= sinceMs 过滤；tokens+cost 按 m.captured_at >= sinceMs 过滤
 //   - nowFn func() time.Time：nil = fallback time.Now；非 nil = 注入 clock
 //     （测试 / 跨包 deterministic,与 collector.Store.WithClock / stats.Query.Clock
-//      模式对齐,见 spec/stats-query "stats query accepts an optional clock"）
+//     模式对齐,见 spec/stats-query "stats query accepts an optional clock"）
 //
 // 返回：
 //   - hourly：currentHour+1 行（0..currentHour,partial 当前小时标记）

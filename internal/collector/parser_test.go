@@ -12,7 +12,7 @@ import (
 
 func kv(k, v string) *commonpb.KeyValue {
 	return &commonpb.KeyValue{
-		Key: k,
+		Key:   k,
 		Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: v}},
 	}
 }

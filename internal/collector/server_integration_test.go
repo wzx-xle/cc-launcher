@@ -13,12 +13,12 @@ import (
 	"testing"
 	"time"
 
-	_ "modernc.org/sqlite"
 	collectormetrics "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
 	"google.golang.org/protobuf/proto"
+	_ "modernc.org/sqlite"
 )
 
 // telemetry-config-compat §5.1 场景 A 端到端：典型公司远程 collector 配置

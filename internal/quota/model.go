@@ -107,7 +107,7 @@ func (d Dimension) UsedPct() *float64 {
 // Finalize 归一化一个维度：清洗 unit、按 kind 派生 label。
 //
 // adapter 解析完响应后必须调它——**label 永远不取自厂商响应的原始字符串**
-//（厂商的字段可能是中文、可能含控制字符，而状态栏要把它渲染到终端一行里）。
+// （厂商的字段可能是中文、可能含控制字符，而状态栏要把它渲染到终端一行里）。
 func (d *Dimension) Finalize() {
 	d.Unit = SanitizeASCII(d.Unit)
 	if d.Unit == "" {
