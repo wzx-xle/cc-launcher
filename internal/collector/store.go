@@ -15,9 +15,12 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"cc-launcher/internal/telemetry/labelkeys"
 
 	_ "modernc.org/sqlite"
 )
@@ -152,6 +155,15 @@ func OpenStore(path string, opts ...OpenStoreOption) (*Store, error) {
 		return nil, err
 	}
 
+	// labels 白名单迁移（telemetry-db-compaction §D4）：**失败不致命**——db 保持
+	// 旧格式时功能照常（只是没瘦身），绝不能因为一次迁移失败就让 ccl 起不来。
+	//
+	// 它跑在 worker 启动之前（下面才 go s.worker()），所以此刻没有任何并发
+	// 写入者 → 迁移期间不会被 metric 写入挤占唯一那条写连接。
+	if err := migrateLabelsToWhitelist(db, path); err != nil {
+		log.Printf("collector: labels 白名单迁移失败（db 保持旧格式，功能不受影响，下次启动重试）: %v", err)
+	}
+
 	s := &Store{
 		db:       db,
 		path:     path,
@@ -210,6 +222,98 @@ func createSchema(db *sql.DB) error {
 //	1 = 回填历史 sessions.started_at（design Decision 3）
 //	2 = sessions 表新增 provider_endpoint 列（web-usage-stats-ui §D15 / Migration Plan）
 const schemaVersion = 2
+
+// labelsWhitelistVersion 是"labels 已收敛到白名单"的 user_version 标记。
+//
+// 与 schemaVersion 分开是刻意的：schemaVersion 管的是**结构**迁移（v1 回填
+// started_at、v2 加 provider_endpoint 列），失败必须致命（schema 坏了，得让
+// 人知道）；labels 迁移失败**不该**让 ccl 完全不能用（db 保持旧格式时功能照常，
+// 只是没瘦身）——所以它有自己的版本标记与自己的错误通道。
+//
+// user_version 是单一字段，但两段迁移不冲突：migrateStore 只在 v<2 时写
+// user_version=2（v>=2 直接返回、不写）→ labels 迁移永远能读到 2 或更小的值
+// → 执行迁移 → 自己升到 3。
+const labelsWhitelistVersion = 3
+
+// migrateLabelsToWhitelist 把存量 metrics 行的 labels 收敛到白名单。
+//
+// **与 migrateStore 分开是刻意的**（telemetry-db-compaction §D4）：migrateStore
+// 的错误契约是"失败 = OpenStore 返回 error = daemon 起不来"。labels 迁移失败
+// 不该连累 ccl 完全不能用——db 保持旧格式时功能照常（只是没瘦身）。所以这里
+// 失败只返回 error，由调用方（OpenStore）记日志后继续启动。
+//
+// 幂等：user_version >= 3 直接跳过；失败时不升版本 → 下次启动自动重试。
+func migrateLabelsToWhitelist(db *sql.DB, dbPath string) error {
+	var v int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
+		return fmt.Errorf("读 user_version 失败: %w", err)
+	}
+	if v >= labelsWhitelistVersion {
+		return nil
+	}
+
+	// 1. 备份：WAL 模式下直接复制主文件会静默丢数据（见 backupBeforeMigration）。
+	if err := backupBeforeMigration(db, dbPath); err != nil {
+		return fmt.Errorf("备份迁移前 db 失败: %w", err)
+	}
+
+	// 2. 单条 UPDATE 收敛 labels。
+	//
+	// 逐行 UPDATE 在 10 万行上是秒级（实测 5 万行：读 122ms + 更新 813ms），
+	// 且发生在监听端口之前 → 遥测推送全丢、还会撞 probe.go 的 3s 就绪预算。
+	// 单条 UPDATE + json_each 是亚秒级。
+	//
+	// json_group_object 无行时返回 '{}' → 全被过滤掉的老行会变成空对象。
+	// json_valid 兜住畸形 JSON（json_each 遇到非法 JSON 会直接报错）——那种行
+	// 的 labels 会变成 '{}'（丢掉全部 label，但它是本来就读不出来的坏数据）。
+	q := fmt.Sprintf(`
+		UPDATE metrics SET labels = (
+			SELECT json_group_object(key, value)
+			FROM json_each(CASE WHEN json_valid(labels) THEN labels ELSE '{}' END)
+			WHERE key IN (%s)
+		)`, labelkeys.SQLList())
+	if _, err := db.Exec(q); err != nil {
+		return fmt.Errorf("重写 metrics.labels 失败: %w", err)
+	}
+
+	// 3. 升版本（PRAGMA 不支持参数占位符；版本号是包内常量 int，非外部输入）。
+	if _, err := db.Exec(fmt.Sprintf("PRAGMA user_version = %d", labelsWhitelistVersion)); err != nil {
+		return fmt.Errorf("写 user_version 失败: %w", err)
+	}
+	return nil
+}
+
+// backupBeforeMigration 用 VACUUM INTO 造一份迁移前的一致快照。
+//
+// 为什么不用文件复制：db 是 WAL 模式（OpenStore 里每次连接都开 WAL），最近提交
+// 的事务还在 -wal 里 → 只复制主文件会**静默丢数据**（实测 5001 行只剩 5000 行，
+// 且没有任何报错）。VACUUM INTO 给出事务一致快照，还自带压缩。
+//
+// 为什么"已备份过就不再来一份"：迁移失败时不升 user_version → 下次启动会重试
+// → 每次都写一份几十 MB 的备份会把磁盘撑爆。
+func backupBeforeMigration(db *sql.DB, dbPath string) error {
+	backupDir := filepath.Join(filepath.Dir(dbPath), "backups")
+	if err := os.MkdirAll(backupDir, 0700); err != nil {
+		return fmt.Errorf("建备份目录失败: %w", err)
+	}
+	entries, err := os.ReadDir(backupDir)
+	if err != nil {
+		return fmt.Errorf("读备份目录失败: %w", err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "telemetry.db.pre-compact") {
+			return nil // 已有快照 → 不重复备份
+		}
+	}
+	target := filepath.Join(backupDir, "telemetry.db.pre-compact-"+time.Now().Format("20060102-150405"))
+	// VACUUM INTO 的目标是 SQL 表达式——用字面量（部分驱动对 VACUUM INTO 的
+	// 参数绑定支持不稳）。路径来自本机状态，单引号按 SQL 规则翻倍。
+	q := fmt.Sprintf("VACUUM INTO '%s'", strings.ReplaceAll(target, "'", "''"))
+	if _, err := db.Exec(q); err != nil {
+		return fmt.Errorf("VACUUM INTO 备份失败: %w", err)
+	}
+	return nil
+}
 
 // migrateStore 按 PRAGMA user_version 驱动一次性数据迁移。
 //
@@ -338,10 +442,30 @@ func (s *Store) WriteMetric(m Metric) error {
 	if m.CapturedAt.IsZero() {
 		m.CapturedAt = time.Now()
 	}
-	if m.Labels == nil {
-		m.Labels = map[string]string{}
-	}
+	// **落库前按白名单裁剪 labels**（telemetry-db-compaction §D1/D2）。
+	//
+	// 为什么裁在**入队前**而不是 insertMetric 里：入队前裁，队列里存的就是
+	// 精简后的 JSON → 队列内存占用也跟着降。裁在 store 层（而不是 parser 层）
+	// 是因为 parser.go:160 的 meta.model = mp.Labels["model"] 依赖**合并后**
+	// 的 labels——parser 层裁会把 model 提取到 sessions 表这一条链打断。
+	//
+	// ccl.cwd / ccl.provider 取自 resAttrs（parser.go:165-172），不受影响。
+	m.Labels = filterLabels(m.Labels)
 	return s.enqueue(metricWrite{kind: "metric", data: mustJSON(m)})
+}
+
+// filterLabels 只保留白名单里的 key，其余（主机级/会话级常量）一律丢弃。
+//
+// 返回**空 map 而不是 nil**：nil 会被 json.Marshal 序列化成 "null"，而 labels
+// 字段的契约是 JSON 对象（schema 里是 TEXT NOT NULL DEFAULT '{}'）。
+func filterLabels(in map[string]string) map[string]string {
+	out := make(map[string]string, len(labelkeys.Stored))
+	for k, v := range in {
+		if labelkeys.Contains(k) {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // Dropped 返回累计因背压丢弃的条目数。
@@ -487,9 +611,51 @@ func (s *Store) insertMetric(m Metric) error {
 	return err
 }
 
+// PruneOlderThan 删除 cutoff 之前**产生**的数据。
+//
+// 剪枝按 metrics.captured_at 判年龄，**不**按 sessions.started_at（telemetry-db-
+// compaction §D3）：一个 91 天前开始、但今天仍在产生 metric 的 session，它的
+// "今天"的 metrics 必须保留——否则它今天的 token 会从 ccl stats 与看板消失，
+// 而 stats-query spec 要求"a session started before the window still appears"
+// （窗口按消费时刻算）。看板最大窗口正好是 90 天，与保留期完全重合。
+//
+// 删除顺序：
+//  1. metrics WHERE captured_at < cutoff —— **含孤儿行**（没有对应 session 的
+//     metric：schema 没有外键，WriteMetric 允许 session_id 为空 → 任何"按
+//     session 选 metrics"的谓词都碰不到它们 → 永远清不掉）
+//  2. sessions WHERE started_at < cutoff AND 该 session 已无 metric 残留
+//
+// 第 2 条必须用 NOT EXISTS 而不是 NOT IN：schema 没有外键，metrics.session_id
+// 可以是空串 → NOT IN (subquery) 遇到 NULL/空值会返回 UNKNOWN → 整个谓词恒
+// false → 什么都删不掉。
+//
+// **剪枝不做 VACUUM**：删除产生的空闲页会被后续写入复用 → 文件不再涨（但不
+// 缩）。把空闲页还给文件系统是 ccl serve --compact 的职责（VACUUM 需要独占
+// 访问，且在 WAL 模式下还必须配 checkpoint 才真正生效）。
+func (s *Store) PruneOlderThan(cutoff time.Time) (sessionsRemoved, metricsRemoved int64, err error) {
+	cutoffMs := cutoff.UnixMilli()
+
+	res, err := s.db.Exec(`DELETE FROM metrics WHERE captured_at < ?`, cutoffMs)
+	if err != nil {
+		return 0, 0, fmt.Errorf("删除过期 metrics 失败: %w", err)
+	}
+	metricsRemoved, _ = res.RowsAffected()
+
+	res, err = s.db.Exec(`
+		DELETE FROM sessions
+		WHERE started_at < ?
+		  AND NOT EXISTS (SELECT 1 FROM metrics m WHERE m.session_id = sessions.id)`,
+		cutoffMs)
+	if err != nil {
+		return 0, metricsRemoved, fmt.Errorf("删除过期 sessions 失败: %w", err)
+	}
+	sessionsRemoved, _ = res.RowsAffected()
+	return sessionsRemoved, metricsRemoved, nil
+}
+
 // BackfillCwd 回填 sessions.cwd 为空的行（session-cwd-enrichment）。
 //
-// limit <= 0 表示不限量（`ccl web --backfill` 的显式回填）；limit > 0 表示
+// limit <= 0 表示不限量（`ccl serve --backfill` 的显式回填）；limit > 0 表示
 // 本次最多处理多少行（daemon 启动时的有界回填，默认 500）。
 //
 // 返回 (resolved, failed)：resolved = 成功补上的行数，failed = 查不到的行数。
@@ -500,7 +666,7 @@ func (s *Store) BackfillCwd(limit int) (resolved int, failed int, err error) {
 
 // BackfillCwdInFile 对 db 文件做一次 cwd 回填。
 //
-// 供**独立进程**（`ccl web --backfill`）使用：直接打开 db 文件读写，
+// 供**独立进程**（`ccl serve --backfill`）使用：直接打开 db 文件读写，
 // 不需要 daemon 参与。WAL 模式下与 daemon 的写入并发安全。
 func BackfillCwdInFile(dbPath string, resolver CwdResolver, limit int) (resolved int, failed int, err error) {
 	if resolver == nil {

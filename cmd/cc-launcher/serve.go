@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"flag"
 	"fmt"
 	"log"
@@ -20,6 +21,8 @@ import (
 	"cc-launcher/internal/quota"
 	"cc-launcher/internal/state"
 	"cc-launcher/internal/web"
+
+	_ "modernc.org/sqlite"
 )
 
 // runServe 是 `ccl serve` 的入口。
@@ -51,17 +54,18 @@ func runServe(args []string) error {
 	}
 
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
-	stopFlag, restoreFlag, statusFlag, restartFlag, backfillFlag := registerServeFlags(fs)
+	stopFlag, restoreFlag, statusFlag, restartFlag, backfillFlag, compactFlag := registerServeFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		// flag.ErrHelp 已被上面的 wantsHelpOnly 截走；到这里的 error 是真解析错误。
 		return err
 	}
-	// 互斥检查：--stop / --restore / --status / --restart / --backfill 任意两个
-	// 同时为 true 即报错并打用法提示。
+	// 互斥检查：--stop / --restore / --status / --restart / --backfill / --compact
+	// 任意两个同时为 true 即报错并打用法提示。
 	//
-	// --backfill 也在互斥组里（web-backfill-to-serve §D1）：它与另外四个一样是
-	// "对 daemon 数据 / 状态的维护动作"，都是一次性动作后立即返回。
-	flags := []*bool{stopFlag, restoreFlag, statusFlag, restartFlag, backfillFlag}
+	// --backfill 与 --compact 也在互斥组里（web-backfill-to-serve §D1 /
+	// telemetry-db-compaction §D7）：它们与另外四个一样是"对 daemon 数据 / 状态
+	// 的维护动作"，都是一次性动作后立即返回。
+	flags := []*bool{stopFlag, restoreFlag, statusFlag, restartFlag, backfillFlag, compactFlag}
 	set := 0
 	for _, f := range flags {
 		if *f {
@@ -69,9 +73,9 @@ func runServe(args []string) error {
 		}
 	}
 	if set > 1 {
-		fmt.Fprintln(os.Stderr, "用法: ccl serve [--stop | --restore | --status | --restart | --backfill]（互斥）")
+		fmt.Fprintln(os.Stderr, "用法: ccl serve [--stop | --restore | --status | --restart | --backfill | --compact]（互斥）")
 		fmt.Fprintln(os.Stderr, "详见 `ccl serve --help`")
-		return fmt.Errorf("--stop / --restore / --status / --restart / --backfill 互斥；不可同时给")
+		return fmt.Errorf("--stop / --restore / --status / --restart / --backfill / --compact 互斥；不可同时给")
 	}
 
 	if *stopFlag {
@@ -93,6 +97,10 @@ func runServe(args []string) error {
 	if *backfillFlag {
 		// backfill flag: 不限量的历史 cwd 回填（见 runBackfillInner 注释）。
 		return runBackfillInner()
+	}
+	if *compactFlag {
+		// compact flag: 收缩 telemetry.db（见 runCompactInner 注释）。
+		return runCompactInner()
 	}
 
 	// §2.5：未命中 --stop / --restore / --status / --restart → 走原 daemon 启动流程。
@@ -233,6 +241,9 @@ func runServe(args []string) error {
 
 	go quotaRefreshLoop(ctx, stateBaseDir, srv.Activity(), activateCh)
 
+	// 保留期清理（telemetry-db-compaction §D6）：启动即清一次，之后每 24h 一次。
+	go retentionPruneLoop(ctx, store)
+
 	if err := srv.Start(ctx); err != nil && err != context.Canceled {
 		// Server 异常退出（端口阻塞等不该走到这里——前面已探）。
 		return fmt.Errorf("server 异常: %w", err)
@@ -248,6 +259,47 @@ func runServe(args []string) error {
 
 	log.Printf("ccl serve: 关闭完成")
 	return nil
+}
+
+// retentionDays 是遥测数据的保留期（天）。
+//
+// 90 天覆盖"回头看上个月用量"这类常见需求；配合 labels 白名单瘦身，稳态体积
+// 约为当前的 1/5。
+const retentionDays = 90
+
+// retentionPruneLoop 定期清理超过保留期的遥测数据。
+//
+// 行为：
+//   - **启动即清一次**（不等一个周期）——daemon 长期不重启时靠 ticker 兜底
+//   - 之后每 24h 清一次
+//   - **清理失败只进 serve 日志，不阻断 daemon**——db 出问题不能让 ccl 完全不能用
+//
+// 清理只删数据，**不做 VACUUM**：删除产生的空闲页被后续写入复用 → 文件不再涨
+// （但不缩）。把空闲页还给文件系统是 `ccl serve --compact` 的职责。
+func retentionPruneLoop(ctx context.Context, store *collector.Store) {
+	prune := func() {
+		cutoff := time.Now().Add(-retentionDays * 24 * time.Hour)
+		sessions, metrics, err := store.PruneOlderThan(cutoff)
+		if err != nil {
+			log.Printf("ccl serve: 清理过期遥测数据失败: %v", err)
+			return
+		}
+		if sessions > 0 || metrics > 0 {
+			log.Printf("ccl serve: 已清理超过 %d 天的遥测数据（sessions=%d metrics=%d）",
+				retentionDays, sessions, metrics)
+		}
+	}
+	prune() // 启动即清一次
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			prune()
+		}
+	}
 }
 
 // quotaRefreshLoop 是 `ccl serve` 的额度刷新循环（provider-quota §7）。
@@ -433,13 +485,110 @@ func activeProviders(refs []quota.ProviderRef, activity *collector.Activity) map
 // 为什么必须抽 helper：cli-shell-completion §D2 要求"flag 改动自动同步"——
 // 加新 flag 时（仅改 registerServeFlags）completion 自动跟随；若不抽，
 // `runServe` 加 flag 而 `completeAtServe` 漏改 → runtime 接受 / completion 提示脱节。
-func registerServeFlags(fs *flag.FlagSet) (stop, restore, status, restart, backfill *bool) {
+func registerServeFlags(fs *flag.FlagSet) (stop, restore, status, restart, backfill, compact *bool) {
 	stop = fs.Bool("stop", false, "停 OTel daemon（等价于原 ccl stop）")
 	restore = fs.Bool("restore", false, "清理旧版 ccl 留在 ~/.claude/settings.json 里的 OTel 注入痕迹")
 	status = fs.Bool("status", false, "打印 daemon 状态摘要（pid / 端口可达 / db 文件大小 / session 数）")
 	restart = fs.Bool("restart", false, "热重启 daemon（SIGTERM 旧 daemon + fork 新 binary daemon）")
 	backfill = fs.Bool("backfill", false, "回填历史 session 的 cwd（不限量；查不到的保持未知项目）")
+	compact = fs.Bool("compact", false, "收缩 telemetry.db（VACUUM 回收空闲空间；daemon 在跑则先停后拉起）")
 	return
+}
+
+// runCompactInner 收缩 telemetry.db（VACUUM 回收空闲空间）。
+//
+// 为什么必须先停 daemon（telemetry-db-compaction §D7）：VACUUM 要排除并发**写**
+// ——只读连接与活跃读事务在 WAL 模式下**不**阻塞它（实测），而 daemon 是唯一的
+// 写者 → 停掉它。
+//
+// 为什么 VACUUM 之后还要 wal_checkpoint(TRUNCATE)（§D6）：WAL 模式下 VACUUM 把
+// 新内容写进 -wal，**主文件要等下一次 checkpoint 才被覆盖**。实测 db 2.4MB →
+// VACUUM 后主文件仍是 2437120 字节（-wal 反而涨到 4.9MB）→ 用户 ls -l 看到
+// "没变小"，整个命令等于空跑；再 checkpoint 后主文件才降到 1224704。
+//
+// 为什么执行完按"原状态"拉起 daemon：daemon 停了用户的 Claude Code 就推不上遥测
+// 了。原本没在跑则不拉起（保持原状态）。
+func runCompactInner() error {
+	stateBaseDir, err := stateDirOrError()
+	if err != nil {
+		return err
+	}
+	dbPath := filepath.Join(stateBaseDir, "telemetry.db")
+	pidPath := filepath.Join(stateBaseDir, "daemon.pid")
+
+	before := fileSize(dbPath)
+
+	// daemon 是否在跑（决定要不要停、要不要事后拉起）。
+	pid := readPidfile(pidPath)
+	wasRunning := pid > 0
+	if wasRunning {
+		fmt.Printf("stopping daemon pid=%d...\n", pid)
+		// 死线放宽到 15s：daemon 自己的关闭预算是 10s（server.go 的 5s +
+		// serve.go 的 5s），stopDaemon 的 5s 死线会触发 SIGKILL 兜底 → 打断
+		// Close 里的 wal_checkpoint(TRUNCATE) → 留下残缺 WAL。
+		if err := stopDaemonWithin(pid, 15*time.Second); err != nil {
+			return fmt.Errorf("停 daemon 失败: %w", err)
+		}
+		_ = os.Remove(pidPath)
+		fmt.Println("old daemon stopped")
+	}
+
+	// 磁盘空间检查：VACUUM 需要约 2× db 的临时空间。29MB 的库峰值约 90MB
+	// （db + wal + 备份）→ 空间不够就别让它中途失败留下半成品。
+	if avail, err := availableDiskSpace(stateBaseDir); err == nil && before > 0 {
+		if avail < uint64(before)*2 {
+			return fmt.Errorf("磁盘空间不足：压缩需要约 %d MB 可用空间，只有 %d MB",
+				before*2/1000000, avail/1000000)
+		}
+	}
+
+	if err := vacuumDB(dbPath); err != nil {
+		return err
+	}
+
+	after := fileSize(dbPath)
+	fmt.Printf("db: %s -> %s\n", humanBytes(before), humanBytes(after))
+
+	if wasRunning {
+		if err := forkDaemon(); err != nil {
+			return err
+		}
+		if err := waitForDaemonReady(); err != nil {
+			return fmt.Errorf("新 daemon fork 成功但 3s 内未就绪: %w", err)
+		}
+		fmt.Println("daemon ready (port :4318 reachable)")
+	}
+	return nil
+}
+
+// vacuumDB 重写 db 文件回收空闲空间，并做一次 WAL checkpoint 让主文件真的变小。
+func vacuumDB(dbPath string) error {
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		return fmt.Errorf("open db 失败: %w", err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		return fmt.Errorf("设置 busy_timeout 失败: %w", err)
+	}
+	if _, err := db.Exec("VACUUM"); err != nil {
+		return fmt.Errorf("VACUUM 失败: %w", err)
+	}
+	// 没有这一步，VACUUM 的结果还留在 -wal 里，主文件不会变小（§D6）。
+	if _, err := db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		return fmt.Errorf("WAL checkpoint 失败: %w", err)
+	}
+	return nil
+}
+
+// fileSize 返回文件大小；文件不存在返回 0。
+func fileSize(path string) int64 {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return fi.Size()
 }
 
 // writePidfile 原子写 pidfile：写 .tmp 再 rename。
@@ -560,7 +709,7 @@ func runBackfillInner() error {
 	return nil
 }
 
-const serveHelp = `用法: ccl serve [--stop | --restore | --status | --restart | --backfill]
+const serveHelp = `用法: ccl serve [--stop | --restore | --status | --restart | --backfill | --compact]
 
 ccl 的 OTel daemon lifecycle and ccl settings restore 入口。
 
@@ -608,6 +757,16 @@ ccl 的 OTel daemon lifecycle and ccl settings restore 入口。
   幂等：只处理 cwd 为空的行，跑两次结果一致；查不到的行（Claude Code 已清理
   的旧会话）保持「未知项目」，不是错误。
   与 --stop / --restore / --status / --restart 互斥。
+
+--compact
+  收缩 telemetry.db：VACUUM 重写文件，把空闲页还给文件系统。
+  与 daemon 启动时的自动清理不同，自动清理只删过期数据（空闲页被后续写入复用，
+  文件不再涨但不会变小）；--compact 才是让文件**真的变小**的那一步。
+
+  daemon 在跑时会先停它、压缩完再拉起来（原本没在跑就不拉起）。
+  停止时用 15s 死线（daemon 自己的关闭预算是 10s），避免 SIGKILL 打断它的
+  WAL checkpoint。
+  与 --stop / --restore / --status / --restart / --backfill 互斥。
 
 -h, --help
   显示本帮助并退出。`

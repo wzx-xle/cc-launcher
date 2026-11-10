@@ -41,8 +41,10 @@ var cclAttributeKeys = []string{
 //   - unmarshal 失败 → 返回原 body + error（调用方应**照常转发原 body**，
 //     不能因为剥不掉就把转发丢了）
 //
-// 注意：本地存的 labels **保留** ccl.*——stats 查询层的 providerName() 兜底
-// 读的就是 labels 里的 ccl.provider。剥掉的只有转发出去的那一份。
+// 注意：本地存的 labels **保留** ccl.provider——stats 查询层的 providerName()
+// 兜底读的就是 labels 里的 ccl.provider。（落库时 labels 会被裁成白名单，
+// 见 telemetry/labelkeys；ccl.cwd 不在白名单里，但它的值进了 sessions.cwd。）
+// 剥掉的只有转发出去的那一份。
 func stripCclAttributes(body []byte) ([]byte, error) {
 	if len(body) == 0 {
 		return body, nil

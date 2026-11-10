@@ -220,6 +220,7 @@ func completeAtServe(args []string) {
 		"--status":   true,
 		"--restart":  true,
 		"--backfill": true,
+		"--compact":  true,
 	}
 	if serveMutex[lastToken(effective)] {
 		return

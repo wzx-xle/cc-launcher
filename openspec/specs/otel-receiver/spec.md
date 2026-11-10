@@ -2,9 +2,7 @@
 
 ## Purpose
 TBD - created by archiving change usage-monitoring-via-otel. Update Purpose after archive.
-
 ## Requirements
-
 ### Requirement: ccl-launcher accepts OTLP HTTP on :4318; metrics persist, logs/traces only forward
 A `ccl serve` mode MUST start an HTTP server on `localhost:4318` (standard OTLP HTTP port) that accepts three OTel endpoints:
 - `POST /v1/metrics` — MUST parse protobuf and persist to local SQLite; MUST also forward to remote collector (if enabled)
@@ -50,6 +48,8 @@ The server MUST NOT block on individual slow writes or forward calls.
 ### Requirement: parser maps OTLP protobuf metrics to domain objects
 The OTLP parser MUST extract for each metric: name, value, labels (resource + scope + data-point attributes), timestamp. Log and trace payloads are not parsed.
 
+Before a metric is written to the database, the store MUST trim its labels to a fixed whitelist of keys, so that the attributes which repeat identically across every row of a session — the host-level and session-level constants — are not stored once per row.
+
 #### Scenario: claude_code.session.count metric is extracted
 - **WHEN** an OTLP export includes `claude_code.session.count` with label `provider=deepseek`
 - **THEN** the parser produces one `metrics` row with `name="claude_code.session.count"`, `value=1`, labels `{"provider":"deepseek"}`, captured_at=timestamp
@@ -75,3 +75,4 @@ The daemon MUST NOT pass `OTEL_*` env vars to its child processes (e.g., for bac
 #### Scenario: child processes do not inherit OTEL env
 - **WHEN** daemon forks a child (e.g., for SQLite VACUUM, log rotation)
 - **THEN** `os.Environ()` of the child does NOT contain `OTEL_EXPORTER_OTLP_ENDPOINT` or other `OTEL_*` variables
+

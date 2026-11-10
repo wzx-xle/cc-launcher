@@ -8,11 +8,11 @@ TBD - created by archiving change cli-shell-completion. Update Purpose after arc
 
 #### Scenario: completing the top-level subcommand
 - **WHEN** user invokes `ccl __complete ""` (empty trailing argument = position under completion)
-- **THEN** stdout shows the top-level subcommands (`serve / stats / web / provider / mode`) plus the help flags (`-h / --help / help`), one per line
+- **THEN** stdout shows the top-level subcommands (`serve / stats / web / quota / provider / mode`) plus the help flags (`-h / --help / help`), one per line
 
 #### Scenario: completing ccl serve flags
 - **WHEN** user invokes `ccl __complete serve ""` (completing inside `ccl serve`)
-- **THEN** stdout shows `ccl serve`'s flags (`--stop / --restore / --status / --restart / --backfill / -h / --help`), one per line
+- **THEN** stdout shows `ccl serve`'s flags (`--stop / --restore / --status / --restart / --backfill / --compact / -h / --help`), one per line
 
 #### Scenario: completing ccl provider template name after --template
 - **WHEN** user invokes `ccl __complete provider --template ""`
@@ -72,10 +72,14 @@ When `ccl serve` / `ccl stats` / `ccl provider` adds, removes, or renames a flag
 - **THEN** `ccl __complete ccl serve ""` automatically includes `--rotate-logs` in its output on the next invocation; no separate completion config file to update
 
 ### Requirement: completion respects the mutex of serve flags
-`ccl serve` has 5 mutually exclusive flags (`--stop / --restore / --status / --restart / --backfill`). When the user has already typed one of them, `ccl __complete ccl serve <existing-flag> ""` MUST NOT suggest any of the others (defensive — same mutex as runtime enforces).
+`ccl serve` has 6 mutually exclusive flags (`--stop / --restore / --status / --restart / --backfill / --compact`). When the user has already typed one of them, `ccl __complete ccl serve <existing-flag> ""` MUST NOT suggest any of the others (defensive — same mutex as runtime enforces).
 
 #### Scenario: completing serve flags after --stop is already given
 - **WHEN** user invokes `ccl __complete serve --stop ""`
+- **THEN** stdout is empty
+
+#### Scenario: completing serve flags after --compact is already given
+- **WHEN** user invokes `ccl __complete serve --compact ""`
 - **THEN** stdout is empty
 
 ### Requirement: tab completion is opt-in, not first-time

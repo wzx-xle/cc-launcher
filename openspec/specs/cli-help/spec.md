@@ -69,6 +69,10 @@ The web subcommand's flags MUST all be about the dashboard itself: printing the 
 
 `ccl serve --help` MUST list `--backfill` with a one-line description, alongside the daemon maintenance actions it already documents.
 
+`ccl serve --help` MUST list `--compact` with a one-line description of the database compaction, alongside the other daemon maintenance actions.
+
+`ccl serve` MUST treat `--compact` as one of its mutually exclusive maintenance actions, together with `--stop`, `--restore`, `--status`, `--restart` and `--backfill`. Giving two of them MUST fail with a usage message naming the mutually exclusive flags.
+
 #### Scenario: ccl web --help prints web-subcommand usage
 - **WHEN** user runs `ccl web --help`
 - **THEN** stdout explains the subcommand, lists `--rotate / --open` with one-line descriptions each, and exits 0
@@ -85,7 +89,15 @@ The web subcommand's flags MUST all be about the dashboard itself: printing the 
 - **WHEN** user runs `ccl serve --help`
 - **THEN** stdout lists `--backfill` with a one-line description of the historical `cwd` backfill
 
+#### Scenario: ccl serve --help lists the compaction action
+- **WHEN** user runs `ccl serve --help`
+- **THEN** stdout lists `--compact` with a one-line description of the database compaction
+
 #### Scenario: the web help does not mention the backfill
 - **WHEN** user runs `ccl web --help`
 - **THEN** stdout does not list `--backfill`; the flag belongs to `ccl serve`
+
+#### Scenario: two mutually exclusive serve actions are rejected
+- **WHEN** user runs `ccl serve --compact --backfill`
+- **THEN** the exit code is non-zero and stderr names the mutually exclusive flags
 

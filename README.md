@@ -568,6 +568,7 @@ ccl web --rotate     # 轮换访问 token（旧 URL 与旧 session 立即失效�
 ccl web --open       # 用系统默认浏览器打开看板
 
 ccl serve --backfill # 触发历史 session 的 cwd 回填（不限量）
+ccl serve --compact  # 收缩 telemetry.db（VACUUM 回收空闲空间；daemon 在跑则先停后拉起）
 ```
 
 > 回填是 **daemon 的数据维护动作**（修 `sessions.cwd`），跟看板页面无关，所以放在

@@ -15,6 +15,15 @@ import (
 //   - 用 kill(-PID, SIGTERM) 杀整个 PGID，避免漏杀（daemon 不会 fork 子进程，但稳一点）
 //   - 不用 SIGKILL 是因为 daemon 自己有 graceful shutdown
 func stopDaemon(pid int) error {
+	return stopDaemonWithin(pid, 5*time.Second)
+}
+
+// stopDaemonWithin 与 stopDaemon 相同，但等待死线可调。
+//
+// 死线为什么要能调：daemon 自己的关闭预算是 10s（HTTP server 的 5s + serve.go
+// 的 5s），而 SIGKILL 兜底会**打断 Close 里的 wal_checkpoint(TRUNCATE)** → 留下
+// 残缺 WAL。`ccl serve --compact` 走这条路径时用 15s。
+func stopDaemonWithin(pid int, timeout time.Duration) error {
 	if pid <= 0 {
 		return fmt.Errorf("无效 pid: %d", pid)
 	}
@@ -28,8 +37,8 @@ func stopDaemon(pid int) error {
 		return fmt.Errorf("kill -%d SIGTERM: %w", pid, err)
 	}
 
-	// 等 ≤ 5s，期间每隔 100ms 探一次。
-	deadline := time.Now().Add(5 * time.Second)
+	// 等到死线，期间每隔 100ms 探一次。
+	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		time.Sleep(100 * time.Millisecond)
 		// 发 0 信号探测；ESRCH = 进程已退。
