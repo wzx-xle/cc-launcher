@@ -323,6 +323,12 @@ func quotaRefreshLoop(ctx context.Context, baseDir string, activity *collector.A
 	providersDir := filepath.Join(baseDir, "providers")
 	st := quota.NewStore(baseDir)
 
+	// **接口级节流器跨轮复用**（quota-per-vendor-rate-limit §D1）：节流状态记
+	// 在内存里，必须由常驻的 daemon 持有同一个实例 —— 否则"上一轮末尾的请求"与
+	// "下一轮开头的请求"之间不受约束，而实测两个同厂商 provider 的 429 时刻
+	// 只隔 8-20 秒，正是跨轮形态。
+	throttle := quota.NewEndpointThrottle()
+
 	// 刷一轮并返回下一次的 ticker 周期（provider 配置可能变了 → 周期跟着变）。
 	refresh := func() time.Duration {
 		refs, err := quota.Enumerate(providersDir)
@@ -345,7 +351,7 @@ func quotaRefreshLoop(ctx context.Context, baseDir string, activity *collector.A
 			// （Windows 上日志里��中文可能显示成乱码，但标记、时间戳、provider
 			// 名、HTTP 状态码都是 ASCII → 照样能解析）。
 			log.Printf("ccl serve: [quota] "+format, args...)
-		}, active, quota.DefaultFreshnessThreshold); err != nil && ctx.Err() == nil {
+		}, active, quota.DefaultFreshnessThreshold, throttle); err != nil && ctx.Err() == nil {
 			log.Printf("ccl serve: 额度刷新失败: %v", err)
 		}
 		// ticker 周期必须**细于相位分辨率**（quota.TickInterval 的注释）——

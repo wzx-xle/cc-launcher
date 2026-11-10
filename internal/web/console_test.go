@@ -708,8 +708,8 @@ func TestAPIProviderQuotaRefresh_Backoff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pool := quota.PoolID(endpoint, ref.APIKey)
-	if err := e.store.SetBackoff(pool, time.Now().Add(120*time.Second).Unix(), 120); err != nil {
+	// 退避按**厂商**记录（quota-per-vendor-rate-limit §D2）
+	if err := e.store.SetBackoff(quota.VendorBackoffKey(endpoint), time.Now().Add(120*time.Second).Unix(), 120); err != nil {
 		t.Fatal(err)
 	}
 	_ = ad

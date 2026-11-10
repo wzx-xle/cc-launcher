@@ -251,9 +251,15 @@ Providers that share a refresh interval MUST NOT be queried at the same moment, 
 
 Within a single refresh cycle, the daemon MUST leave a minimum gap between two consecutive requests, and the gap MUST be configurable per provider.
 
+The daemon MUST also leave a minimum gap between two requests to the same quota interface, even when the two requests belong to different quota pools and fall in different refresh cycles. That gap MUST default to 10 seconds and MUST be configurable per provider. The daemon MUST remember, across refresh cycles, when it last queried each interface, so that the gap also applies to requests separated by a cycle boundary.
+
 When an interface reports that it is rate limiting the caller, ccl MUST stop querying that provider for a while instead of retrying on every cycle. The wait MUST grow with each consecutive rejection and MUST be capped, and it MUST be recorded in the local data file so that it also applies to an on-demand refresh and survives a restart of the daemon. A provider that is not being queried MUST keep its previously recorded quota.
 
-The wait MUST be recorded against the quota pool rather than against the provider, because the interface limits the API key and not the provider's name. A provider whose API key is replaced MUST therefore not be held back by a wait that was recorded for the previous key.
+The wait MUST be recorded against the quota interface rather than against a single provider, because an interface may limit the whole account or the caller's address rather than the API key alone. The quota pools that resolve to the same interface MUST therefore be held back together: when one of them is recorded as waiting, the others of that interface are not queried either.
+
+A quota pool whose API key has been replaced MUST still be held back by the wait recorded for its interface, because the interface may be limiting the account rather than the key.
+
+A wait MUST NOT be discarded entirely because a single refresh of that interface succeeded. A successful refresh MUST reduce the recorded wait by one step instead, so that a wait which grew under repeated rejections is not reset by one lucky success.
 
 #### Scenario: the quota is refreshed on the default interval
 - **WHEN** a provider declares a quota interface and no refresh interval
@@ -335,9 +341,21 @@ The wait MUST be recorded against the quota pool rather than against the provide
 - **WHEN** a provider is waiting after a rate limit rejection
 - **THEN** ccl keeps the previously recorded quota of that provider
 
-#### Scenario: a replaced key is not held back
+#### Scenario: a replaced key is held back by the interface wait
 - **WHEN** a quota pool was recorded as waiting after a rate limit rejection and the provider's API key is replaced
-- **THEN** ccl queries the provider with the new key instead of holding it back for the recorded wait
+- **THEN** ccl holds the provider back for the wait recorded for that interface, because the interface may be limiting the account rather than the key
+
+#### Scenario: the quota pools of one interface are held back together
+- **WHEN** one quota pool of an interface is recorded as waiting after a rate limit rejection
+- **THEN** ccl does not query the other quota pools of that interface until the recorded wait has elapsed
+
+#### Scenario: the requests to one interface are separated
+- **WHEN** two quota pools of the same interface are queried
+- **THEN** the second request is issued no earlier than the configured interface gap after the first one
+
+#### Scenario: a successful refresh reduces the wait instead of clearing it
+- **WHEN** a refresh of an interface succeeds while that interface is recorded as waiting
+- **THEN** the recorded wait is reduced by one step rather than removed
 
 ### Requirement: ccl stores the quota in a local data file
 

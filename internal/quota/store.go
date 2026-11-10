@@ -337,6 +337,37 @@ func (s *Store) ClearBackoff(pool string) error {
 	return s.Save(f)
 }
 
+// ReduceBackoff 把某个键的退避**降一级**（时长减半，下限为初始退避时长；
+// 已在下限则删除该条）。
+//
+// 为什么不是"成功就清零"（quota-per-vendor-rate-limit §D4）：厂商的限流常是
+// **速率型**的（短时间内请求太密），一次成功不代表可以立刻恢复高频。清零让
+// 退避永远爬不起来——实测 13:59 已退避 4m，14:24 又从 1m 重新开始，中间那次
+// 成功把退避清零了 → 反复撞 429。降一级则让退避在持续成功时缓慢恢复
+// （4m → 2m → 1m → 无），在持续失败时快速爬升。
+func (s *Store) ReduceBackoff(key string) error {
+	f, err := s.Load()
+	if err != nil {
+		return err
+	}
+	if f == nil || f.Backoffs == nil {
+		return nil
+	}
+	b, ok := f.Backoffs[key]
+	if !ok {
+		return nil
+	}
+	next := b.Seconds / 2
+	if next < int64(initialBackoff.Seconds()) {
+		delete(f.Backoffs, key)
+		return s.Save(f)
+	}
+	b.Seconds = next
+	b.RetryAfter = time.Now().Unix() + next
+	f.Backoffs[key] = b
+	return s.Save(f)
+}
+
 // BackoffFor 取某个额度池的退避状态；没有则返回零值。
 func (f *File) BackoffFor(pool string) Backoff {
 	if f == nil || f.Backoffs == nil {

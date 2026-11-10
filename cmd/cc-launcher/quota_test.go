@@ -450,7 +450,7 @@ func TestRunQuota_RefreshRespectsBackoff(t *testing.T) {
 		"quota": map[string]any{"source": "newapi", "endpoint": srv.URL},
 	})
 
-	// 造一条"正在退避中"的记录（退避按**额度池**记录）
+	// 造一条"正在退避中"的记录（退避按**厂商**记录 —— quota-per-vendor-rate-limit §D2）
 	st := quota.NewStore(baseDir)
 	pool := quota.PoolID(srv.URL, "sk-x")
 	f := &quota.File{
@@ -463,7 +463,7 @@ func TestRunQuota_RefreshRespectsBackoff(t *testing.T) {
 			},
 		},
 		Backoffs: map[string]quota.Backoff{
-			pool: {RetryAfter: time.Now().Add(30 * time.Second).Unix(), Seconds: 60},
+			quota.VendorBackoffKey(srv.URL): {RetryAfter: time.Now().Add(30 * time.Second).Unix(), Seconds: 60},
 		},
 	}
 	if err := st.Save(f); err != nil {

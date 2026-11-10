@@ -208,6 +208,9 @@ type Config struct {
 	// **为什么要有**：厂商侧对"查询额度"这类接口常有速率限制，而"一轮里刷新
 	// 多个 provider"天然是一串密集请求（相位错开只解决跨轮次，首轮仍密集）。
 	MinRequestGap time.Duration
+	// VendorGap 是**同一 quota 接口**两次请求之间的最小间隔（跨轮也成立）；
+	// 0 表示用 DefaultVendorGap。
+	VendorGap time.Duration
 }
 
 // Interval 返回实际生效的刷新周期。
@@ -216,6 +219,17 @@ func (c *Config) Interval() time.Duration {
 		return DefaultRefreshInterval
 	}
 	return c.RefreshInterval
+}
+
+// VendorGapOrDefault 返回实际生效的**接口级**最小请求间隔。
+//
+// 与 Gap() 的区别：Gap 管的是"一轮里任意两个请求"（跨厂商），VendorGap 管的是
+// "同一厂商的两个请求"（跨轮也成立）—— 后者才是厂商限流的真正约束。
+func (c *Config) VendorGapOrDefault() time.Duration {
+	if c == nil || c.VendorGap <= 0 {
+		return DefaultVendorGap
+	}
+	return c.VendorGap
 }
 
 // Gap 返回实际生效的轮内请求间隔。
@@ -302,6 +316,15 @@ func ParseConfig(raw any) (*Config, error) {
 		}
 		if f > 0 {
 			cfg.MinRequestGap = time.Duration(f) * time.Millisecond
+		}
+	}
+	if v, ok := obj["vendorGapMs"]; ok && v != nil {
+		f, ok := toFloat(v)
+		if !ok {
+			return nil, fmt.Errorf("quota.vendorGapMs 必须是数字（毫秒）")
+		}
+		if f > 0 {
+			cfg.VendorGap = time.Duration(f) * time.Millisecond
 		}
 	}
 	return cfg, nil
@@ -505,6 +528,19 @@ func (r ProviderRef) providerInfo(endpoint string) ProviderInfo {
 // **含 API key**：额度是**按 key 分**的，不是按 provider 名分的——同 key 的
 // 不同 provider 共用一个额度池（如 minimax-m3 与 minimax-m3.1-flash）。
 // **只存哈希，不存明文**：数据文件里不该躺凭证。
+// VendorBackoffKey 是**厂商级**退避记录的键（sha256(endpoint)）。
+//
+// 为什么退避按厂商而不只是按池（quota-per-vendor-rate-limit §D2）：实测同一
+// 厂商的**两个不同 key** 的 provider 被同时限流 → 厂商限的是账号/出口 IP，
+// 不是那把 key。按池记退避会让"一个池退避、同厂商另一个池照打照限"。
+//
+// 前缀 "v:" 用来和旧的按池退避记录（纯 64 位十六进制）区分 —— 旧记录读不出
+// → 视为无退避（升级后第一次可能多撞一次 429；退避本就是临时状态，可接受）。
+func VendorBackoffKey(endpoint string) string {
+	sum := sha256.Sum256([]byte(endpoint))
+	return "v:" + hex.EncodeToString(sum[:])
+}
+
 func PoolID(endpoint, apiKey string) string {
 	sum := sha256.Sum256([]byte(endpoint + "\x00" + apiKey))
 	return hex.EncodeToString(sum[:])
@@ -576,7 +612,10 @@ type job struct {
 //  7. 清理已不存在的 provider 的残留条目
 //
 // logf 用于记录失败原因（进 serve 的日志，不进数据文件）。
-func RefreshAll(ctx context.Context, refs []ProviderRef, st *Store, logf func(format string, args ...any), active map[string]bool, freshness time.Duration) error {
+//
+// throttle 是**接口级**请求节流器（跨轮生效，daemon 持有同一个实例）；nil 表示
+// 不做接口级节流。
+func RefreshAll(ctx context.Context, refs []ProviderRef, st *Store, logf func(format string, args ...any), active map[string]bool, freshness time.Duration, throttle *EndpointThrottle) error {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
@@ -681,9 +720,13 @@ func RefreshAll(ctx context.Context, refs []ProviderRef, st *Store, logf func(fo
 		}
 
 		// **退避中 → 跳过**（429 之后不要每轮硬打）。限流保护优先于一切，
-		// **包括保鲜**。退避按**额度池**记录（限流针对 key，provider 换 key =
-		// 换池 → 老退避不该拦住它）。
-		if b := file.BackoffFor(pool); b.RetryAfter > now.Unix() {
+		// **包括保鲜**。
+		//
+		// 退避按**厂商（endpoint）**记录（quota-per-vendor-rate-limit §D2）：
+		// 实测同一厂商的**两个不同 key** 的 provider 被同时限流 → 厂商限的是
+		// 账号/出口 IP，不是那把 key。按池记会让"一个池退避、同厂商另一个池
+		// 照打照限"。
+		if b := file.BackoffFor(VendorBackoffKey(info.endpoint)); b.RetryAfter > now.Unix() {
 			res.Skipped++
 			res.SkippedNotDue++
 			continue
@@ -798,17 +841,27 @@ func RefreshAll(ctx context.Context, refs []ProviderRef, st *Store, logf func(fo
 			}
 		}
 
+		// **接口级最小间隔**（quota-per-vendor-rate-limit §D1）：同一 endpoint
+		// 的两个池，无论在不在同一轮，相邻请求至少隔 vendor_gap。
+		// 节流状态在 throttle 里跨轮保持（daemon 持有同一实例）—— 实测两个
+		// 讯飞池的 429 时刻只隔 8-20 秒，正是跨轮形态，轮内 500ms 管不到。
+		if err := throttle.Wait(ctx, j.endpoint, j.ref.Config.VendorGapOrDefault()); err != nil {
+			return err
+		}
+		throttle.Mark(j.endpoint)
+
 		dims, err := j.adapter.Fetch(ctx, j.ref.providerInfo(j.endpoint))
 		if err != nil {
 			res.Failed++
-			// **429 → 退避**（持久化，按额度池）：不在这一轮硬打，也不让下一轮
-			// 接着打。
+			// **429 → 退避**（持久化，按**厂商**）：不在这一轮硬打，也不让下一轮
+			// 接着打；同厂商的其它池一起暂停（厂商限的是账号/出口 IP）。
 			var rl *RateLimitError
 			if errors.As(err, &rl) {
-				backoff := nextBackoff(file.BackoffFor(pool).Seconds, rl.RetryAfter)
+				vKey := VendorBackoffKey(j.endpoint)
+				backoff := nextBackoff(file.BackoffFor(vKey).Seconds, rl.RetryAfter)
 				retryAfter := now.Unix() + int64(backoff.Seconds())
-				if err := st.SetBackoff(pool, retryAfter, int64(backoff.Seconds())); err != nil {
-					logf("写额度池 %s 的退避状态失败: %v", poolLabel(pool), err)
+				if err := st.SetBackoff(vKey, retryAfter, int64(backoff.Seconds())); err != nil {
+					logf("写厂商 %s 的退避状态失败: %v", poolLabel(j.endpoint), err)
 				}
 				logf("provider %s 被厂商限流（HTTP %d），退避 %s 后再试", j.ref.Name, rl.Status, backoff)
 				continue
@@ -818,10 +871,11 @@ func RefreshAll(ctx context.Context, refs []ProviderRef, st *Store, logf func(fo
 		}
 		res.Refreshed++
 
-		// 成功 → **退避状态复位**（退避住在 File.Backoffs 里，不随条目重建
-		// 自动清零 → 必须显式清）。
-		if err := st.ClearBackoff(pool); err != nil {
-			logf("清除额度池 %s 的退避状态失败: %v", poolLabel(pool), err)
+		// 成功 → 退避**降一级**（而不是清零）：厂商的限流常是**速率型**的，
+		// 一次成功不代表可以立刻恢复高频。清零会让退避永远爬不起来（实测
+		// 13:59 已退避 4m，14:24 又从 1m 重新开始）→ 反复撞 429。
+		if err := st.ReduceBackoff(VendorBackoffKey(j.endpoint)); err != nil {
+			logf("降低厂商 %s 的退避状态失败: %v", poolLabel(j.endpoint), err)
 		}
 
 		// 相位保持：next_at **递推**（oldNext + interval），不是 now + interval
@@ -865,9 +919,10 @@ func RefreshOne(ctx context.Context, ref ProviderRef, st *Store) ([]Dimension, e
 	pool := PoolID(endpoint, ref.APIKey)
 
 	// **退避中 → 不发请求**（手动刷不能冲掉退避：它打的是同一个接口）。
-	// 退避按**额度池**记录 → 换 key（换池）后不受老退避影响。
+	// 退避按**厂商**记录（quota-per-vendor-rate-limit §D2）→ 同厂商的池一起
+	// 暂停；换 key 也不豁免（厂商限的是账号/出口 IP，换 key 躲不掉）。
 	if f, err := st.Load(); err == nil {
-		if b := f.BackoffFor(pool); b.RetryAfter > time.Now().Unix() {
+		if b := f.BackoffFor(VendorBackoffKey(endpoint)); b.RetryAfter > time.Now().Unix() {
 			return nil, &BackoffError{RetryAfter: b.RetryAfter}
 		}
 	}
@@ -876,10 +931,11 @@ func RefreshOne(ctx context.Context, ref ProviderRef, st *Store) ([]Dimension, e
 	if err != nil {
 		var rl *RateLimitError
 		if errors.As(err, &rl) {
-			backoff := nextBackoff(currentBackoff(st, pool), rl.RetryAfter)
+			vKey := VendorBackoffKey(endpoint)
+			backoff := nextBackoff(currentBackoff(st, vKey), rl.RetryAfter)
 			retryAfter := time.Now().Unix() + int64(backoff.Seconds())
-			if werr := st.SetBackoff(pool, retryAfter, int64(backoff.Seconds())); werr != nil {
-				log.Printf("quota: 写额度池 %s 的退避状态失败: %v", poolLabel(pool), werr)
+			if werr := st.SetBackoff(vKey, retryAfter, int64(backoff.Seconds())); werr != nil {
+				log.Printf("quota: 写厂商 %s 的退避状态失败: %v", poolLabel(endpoint), werr)
 			}
 		}
 		return nil, err
@@ -900,9 +956,10 @@ func RefreshOne(ctx context.Context, ref ProviderRef, st *Store) ([]Dimension, e
 	if err := st.UpdatePoolEntries(ref.Name, pool, ad.Name(), dims, nextAt); err != nil {
 		return nil, err
 	}
-	// 成功 → 退避状态复位。
-	if err := st.ClearBackoff(pool); err != nil {
-		log.Printf("quota: 清除额度池 %s 的退避状态失败: %v", poolLabel(pool), err)
+	// 成功 → 退避降一级（不清零：厂商限流常是速率型的，一次成功不代表可以
+	// 立刻恢复高频——见 RefreshAll 里的同款注释）。
+	if err := st.ReduceBackoff(VendorBackoffKey(endpoint)); err != nil {
+		log.Printf("quota: 降低厂商 %s 的退避状态失败: %v", poolLabel(endpoint), err)
 	}
 	return dims, nil
 }

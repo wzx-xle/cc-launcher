@@ -136,7 +136,7 @@ func TestRefreshAll_MinGapBetweenRequests(t *testing.T) {
 		})
 	}
 	st := NewStore(t.TempDir())
-	if err := RefreshAll(context.Background(), refs, st, nil, nil, 0); err != nil {
+	if err := RefreshAll(context.Background(), refs, st, nil, nil, 0, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -182,7 +182,7 @@ func TestRefreshAll_RateLimitBacksOff(t *testing.T) {
 	st := NewStore(t.TempDir())
 
 	// 第 1 轮：被限流 → 退避
-	if err := RefreshAll(context.Background(), refs, st, nil, nil, 0); err != nil {
+	if err := RefreshAll(context.Background(), refs, st, nil, nil, 0, nil); err != nil {
 		t.Fatal(err)
 	}
 	mu.Lock()
@@ -200,8 +200,9 @@ func TestRefreshAll_RateLimitBacksOff(t *testing.T) {
 	if _, ok := f.EntryFor("p1"); ok {
 		t.Error("被限流时不该写额度条目")
 	}
-	pool := PoolID(srv.URL, "sk-1")
-	b := f.BackoffFor(pool)
+	// 退避按**厂商**记录（quota-per-vendor-rate-limit §D2）
+	vKey := VendorBackoffKey(srv.URL)
+	b := f.BackoffFor(vKey)
 	if b.RetryAfter <= time.Now().Unix() {
 		t.Errorf("应记录退避到未来, got %d", b.RetryAfter)
 	}
@@ -211,7 +212,7 @@ func TestRefreshAll_RateLimitBacksOff(t *testing.T) {
 	}
 
 	// 第 2 轮：退避中 → **不发请求**
-	if err := RefreshAll(context.Background(), refs, st, nil, nil, 0); err != nil {
+	if err := RefreshAll(context.Background(), refs, st, nil, nil, 0, nil); err != nil {
 		t.Fatal(err)
 	}
 	mu.Lock()
@@ -222,11 +223,11 @@ func TestRefreshAll_RateLimitBacksOff(t *testing.T) {
 
 	// 把退避时间改到过去 → 第 3 轮：又请求 → 仍被限流 → 退避翻倍
 	f2, _ := st.Load()
-	f2.Backoffs[pool] = Backoff{RetryAfter: time.Now().Unix() - 1, Seconds: f2.BackoffFor(pool).Seconds}
+	f2.Backoffs[vKey] = Backoff{RetryAfter: time.Now().Unix() - 1, Seconds: f2.BackoffFor(vKey).Seconds}
 	if err := st.Save(f2); err != nil {
 		t.Fatal(err)
 	}
-	if err := RefreshAll(context.Background(), refs, st, nil, nil, 0); err != nil {
+	if err := RefreshAll(context.Background(), refs, st, nil, nil, 0, nil); err != nil {
 		t.Fatal(err)
 	}
 	mu.Lock()
@@ -235,7 +236,7 @@ func TestRefreshAll_RateLimitBacksOff(t *testing.T) {
 	}
 	mu.Unlock()
 	f3, _ := st.Load()
-	if got := f3.BackoffFor(pool).Seconds; got != 120 {
+	if got := f3.BackoffFor(vKey).Seconds; got != 120 {
 		t.Errorf("连续限流后退避应翻倍到 120, got %d", got)
 	}
 
@@ -244,17 +245,19 @@ func TestRefreshAll_RateLimitBacksOff(t *testing.T) {
 	limited = false
 	mu.Unlock()
 	f4, _ := st.Load()
-	f4.Backoffs[pool] = Backoff{RetryAfter: time.Now().Unix() - 1, Seconds: f4.BackoffFor(pool).Seconds}
+	f4.Backoffs[vKey] = Backoff{RetryAfter: time.Now().Unix() - 1, Seconds: f4.BackoffFor(vKey).Seconds}
 	if err := st.Save(f4); err != nil {
 		t.Fatal(err)
 	}
-	if err := RefreshAll(context.Background(), refs, st, nil, nil, 0); err != nil {
+	if err := RefreshAll(context.Background(), refs, st, nil, nil, 0, nil); err != nil {
 		t.Fatal(err)
 	}
+	// 成功 → 退避**降一级**而不是清零（quota-per-vendor-rate-limit §D4）：
+	// 厂商的限流常是速率型的，一次成功不代表可以立刻恢复高频。
 	f5, _ := st.Load()
-	b5 := f5.BackoffFor(pool)
-	if b5.Seconds != 0 || b5.RetryAfter != 0 {
-		t.Errorf("成功后退避状态应复位, got backoff=%d retryAfter=%d", b5.Seconds, b5.RetryAfter)
+	b5 := f5.BackoffFor(vKey)
+	if b5.Seconds != 60 {
+		t.Errorf("成功后避应降一级（120 → 60）, got %d", b5.Seconds)
 	}
 }
 
@@ -286,7 +289,7 @@ func TestRefreshAll_RateLimitKeepsOldQuota(t *testing.T) {
 	}
 	before := f.Entries["p1"]
 
-	if err := RefreshAll(context.Background(), refs, st, nil, nil, 0); err != nil {
+	if err := RefreshAll(context.Background(), refs, st, nil, nil, 0, nil); err != nil {
 		t.Fatal(err)
 	}
 	after, err := st.Load()
@@ -300,7 +303,7 @@ func TestRefreshAll_RateLimitKeepsOldQuota(t *testing.T) {
 	if len(e.Dimensions) != 1 {
 		t.Errorf("旧额度数据不该被丢: %+v", e.Dimensions)
 	}
-	if after.BackoffFor(PoolID(srv.URL, "sk-1")).RetryAfter == 0 {
+	if after.BackoffFor(VendorBackoffKey(srv.URL)).RetryAfter == 0 {
 		t.Error("应记录退避时间")
 	}
 }
@@ -437,7 +440,7 @@ func TestRefreshAll_SkipsWhenNextAtInFuture(t *testing.T) {
 	if err := st.Save(f); err != nil {
 		t.Fatal(err)
 	}
-	if err := RefreshAll(context.Background(), refs, st, nil, nil, 0); err != nil {
+	if err := RefreshAll(context.Background(), refs, st, nil, nil, 0, nil); err != nil {
 		t.Fatal(err)
 	}
 	mu.Lock()
@@ -465,7 +468,14 @@ func writeFile(path, content string) error {
 // key（= 换了池）后，不该被老退避拦住。
 //
 // 这正是"限流是针对 key 的，额度也是按 key 分的"在实现上的落地。
-func TestRefreshAll_BackoffIsPerPool(t *testing.T) {
+// TestRefreshAll_BackoffIsPerVendor 断言退避按**厂商**记：同一 endpoint 的
+// 两个池（**不同的 key**）一起被退避拦住；不同 endpoint 的池不受影响。
+//
+// 这条是 quota-per-vendor-rate-limit §D2 的守门人：**语义与旧版相反**——
+// 旧版按池记退避，"换 key（换池）后不被老退避拦住"。实测同一厂商的两个不同
+// key 的 provider 被同时限流 → 厂商限的是账号/出口 IP，不是那把 key → 换 key
+// 躲不掉，同厂商必须一起停。
+func TestRefreshAll_BackoffIsPerVendor(t *testing.T) {
 	var mu sync.Mutex
 	requests := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -481,7 +491,7 @@ func TestRefreshAll_BackoffIsPerPool(t *testing.T) {
 
 	// 用 key-A → 池 A → 被限流 → 池 A 进入退避
 	refA := ProviderRef{Name: "p1", Config: &Config{Source: "newapi", Endpoint: srv.URL}, APIKey: "key-A"}
-	if err := RefreshAll(context.Background(), []ProviderRef{refA}, st, nil, nil, 0); err != nil {
+	if err := RefreshAll(context.Background(), []ProviderRef{refA}, st, nil, nil, 0, nil); err != nil {
 		t.Fatal(err)
 	}
 	mu.Lock()
@@ -489,19 +499,39 @@ func TestRefreshAll_BackoffIsPerPool(t *testing.T) {
 		t.Fatalf("应发 1 个请求, got %d", requests)
 	}
 	mu.Unlock()
-	if f, _ := st.Load(); f.BackoffFor(PoolID(srv.URL, "key-A")).RetryAfter == 0 {
-		t.Fatal("池 A 应进入退避")
+	if f, _ := st.Load(); f.BackoffFor(VendorBackoffKey(srv.URL)).RetryAfter == 0 {
+		t.Fatal("厂商应进入退避")
 	}
 
-	// 同一个 provider 名，但换成 key-B（= 池 B）→ 不该被池 A 的退避拦住
-	refB := ProviderRef{Name: "p1", Config: &Config{Source: "newapi", Endpoint: srv.URL}, APIKey: "key-B"}
-	if err := RefreshAll(context.Background(), []ProviderRef{refB}, st, nil, nil, 0); err != nil {
+	// 同一 endpoint、**不同的 key** → 厂商级退避应把它一起拦住（厂商限的是
+	// 账号/出口 IP，不是那把 key）
+	refB := ProviderRef{Name: "p2", Config: &Config{Source: "newapi", Endpoint: srv.URL}, APIKey: "key-B"}
+	if err := RefreshAll(context.Background(), []ProviderRef{refB}, st, nil, nil, 0, nil); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	if requests != 1 {
+		t.Errorf("同厂商的另一个池应被退避拦住, requests=%d（期望仍是 1）", requests)
+	}
+	mu.Unlock()
+
+	// **不同** endpoint 的池 → 不受该厂商退避影响
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"data": {"total_quota": 1, "used_quota": 0}}`))
+	}))
+	defer other.Close()
+	refC := ProviderRef{Name: "p3", Config: &Config{Source: "newapi", Endpoint: other.URL}, APIKey: "key-C"}
+	if err := RefreshAll(context.Background(), []ProviderRef{refC}, st, nil, nil, 0, nil); err != nil {
 		t.Fatal(err)
 	}
 	mu.Lock()
 	defer mu.Unlock()
 	if requests != 2 {
-		t.Errorf("换 key（换池）后不该被老退避拦住, requests=%d（期望 2）", requests)
+		t.Errorf("不同厂商的池不该被牵连, requests=%d（期望 2）", requests)
 	}
 }
 
@@ -584,7 +614,7 @@ func TestRefreshAll_InactiveProviderKeepsEntry(t *testing.T) {
 
 	// 只有 active 在活跃名单里
 	active := map[string]bool{"active": true}
-	if err := RefreshAll(context.Background(), refs, st, nil, active, 0); err != nil {
+	if err := RefreshAll(context.Background(), refs, st, nil, active, 0, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -631,7 +661,7 @@ func TestRefreshAll_NoneActiveKeepsAllEntries(t *testing.T) {
 		}
 	}
 
-	if err := RefreshAll(context.Background(), refs, st, nil, map[string]bool{}, 0); err != nil {
+	if err := RefreshAll(context.Background(), refs, st, nil, map[string]bool{}, 0, nil); err != nil {
 		t.Fatal(err)
 	}
 	mu.Lock()
@@ -709,7 +739,7 @@ func TestRefreshAll_LogsRoundSummary(t *testing.T) {
 	var logged []string
 	err := RefreshAll(context.Background(), refs, st, func(format string, args ...any) {
 		logged = append(logged, fmt.Sprintf(format, args...))
-	}, map[string]bool{"a": true}, 0)
+	}, map[string]bool{"a": true}, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

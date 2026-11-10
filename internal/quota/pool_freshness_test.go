@@ -65,7 +65,7 @@ func TestRefreshAll_PoolMembersShareOneRecord(t *testing.T) {
 	// 只有 p1 活跃。
 	active := map[string]bool{"p1": true}
 
-	if err := RefreshAll(context.Background(), refs, st, nil, active, 0); err != nil {
+	if err := RefreshAll(context.Background(), refs, st, nil, active, 0, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -109,7 +109,7 @@ func TestRefreshAll_InactivePoolRefreshedWhenStale(t *testing.T) {
 	}
 
 	// 没有活跃的 provider（active 非 nil 且为空名单）。
-	if err := RefreshAll(context.Background(), refs, st, nil, map[string]bool{}, DefaultFreshnessThreshold); err != nil {
+	if err := RefreshAll(context.Background(), refs, st, nil, map[string]bool{}, DefaultFreshnessThreshold, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := stub.count(); got != 1 {
@@ -137,7 +137,7 @@ func TestRefreshAll_InactivePoolNotRefreshedBeforeThreshold(t *testing.T) {
 
 	// 连跑三轮：每一轮都不该发请求。
 	for i := 0; i < 3; i++ {
-		if err := RefreshAll(context.Background(), refs, st, nil, map[string]bool{}, DefaultFreshnessThreshold); err != nil {
+		if err := RefreshAll(context.Background(), refs, st, nil, map[string]bool{}, DefaultFreshnessThreshold, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -168,7 +168,7 @@ func TestRefreshAll_RefreshesStaleActivePool(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := RefreshAll(context.Background(), refs, st, nil, map[string]bool{"p1": true}, 0); err != nil {
+	if err := RefreshAll(context.Background(), refs, st, nil, map[string]bool{"p1": true}, 0, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := stub.count(); got != 1 {
@@ -204,7 +204,7 @@ func TestRefreshAll_FreshnessThresholdIgnoresLongInterval(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := RefreshAll(context.Background(), refs, st, nil, map[string]bool{}, DefaultFreshnessThreshold); err != nil {
+	if err := RefreshAll(context.Background(), refs, st, nil, map[string]bool{}, DefaultFreshnessThreshold, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := stub.count(); got != 1 {
@@ -228,14 +228,15 @@ func TestRefreshAll_BackoffBeatsFreshness(t *testing.T) {
 			"p1": {Source: "newapi", Pool: pool, FetchedAt: time.Now().Add(-20 * time.Minute).Unix()},
 		},
 		Backoffs: map[string]Backoff{
-			pool: {RetryAfter: time.Now().Add(5 * time.Minute).Unix(), Seconds: 300},
+			// 退避按**厂商**记（quota-per-vendor-rate-limit §D2）
+			VendorBackoffKey(stub.srv.URL): {RetryAfter: time.Now().Add(5 * time.Minute).Unix(), Seconds: 300},
 		},
 	}
 	if err := st.Save(f); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := RefreshAll(context.Background(), refs, st, nil, map[string]bool{}, DefaultFreshnessThreshold); err != nil {
+	if err := RefreshAll(context.Background(), refs, st, nil, map[string]bool{}, DefaultFreshnessThreshold, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := stub.count(); got != 0 {
@@ -251,7 +252,7 @@ func TestRefreshAll_InactivePoolWithoutRecordIsNotQueried(t *testing.T) {
 
 	st := NewStore(t.TempDir()) // 空文件 → 没有任何记录
 
-	if err := RefreshAll(context.Background(), refs, st, nil, map[string]bool{}, DefaultFreshnessThreshold); err != nil {
+	if err := RefreshAll(context.Background(), refs, st, nil, map[string]bool{}, DefaultFreshnessThreshold, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := stub.count(); got != 0 {
@@ -267,7 +268,7 @@ func TestRefreshAll_ActivePoolWithoutRecordIsQueried(t *testing.T) {
 
 	st := NewStore(t.TempDir()) // 空文件 → 没有任何记录
 
-	if err := RefreshAll(context.Background(), refs, st, nil, map[string]bool{"p1": true}, DefaultFreshnessThreshold); err != nil {
+	if err := RefreshAll(context.Background(), refs, st, nil, map[string]bool{"p1": true}, DefaultFreshnessThreshold, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := stub.count(); got != 1 {
@@ -299,7 +300,7 @@ func TestRefreshAll_ResultCountsPools(t *testing.T) {
 	var logged []string
 	if err := RefreshAll(context.Background(), refs, st, func(format string, args ...any) {
 		logged = append(logged, fmt.Sprintf(format, args...))
-	}, map[string]bool{"p1": true}, 0); err != nil {
+	}, map[string]bool{"p1": true}, 0, nil); err != nil {
 		t.Fatal(err)
 	}
 	joined := ""
