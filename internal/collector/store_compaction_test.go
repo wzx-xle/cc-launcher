@@ -427,3 +427,78 @@ func fileSizeOf(t *testing.T, path string) int64 {
 	}
 	return fi.Size()
 }
+
+// TestStore_MigrationBackupIncludesWALData 断言迁移前的备份**包含 WAL 里
+// 已提交但尚未 checkpoint 的数据**。
+//
+// 为什么这条至关重要（实测踩过的坑）：db 是 WAL 模式，最近提交的事务还在
+// -wal 里。直接复制 db 主文件当备份会**静默丢数据**——实测 5001 行只剩 5000 行，
+// 且没有任何报错。备份必须用 VACUUM INTO（事务一致快照）。
+//
+// 本测试刻意让数据留在 WAL 里（连接 A 一直开着、不 checkpoint），然后触发迁移。
+func TestStore_MigrationBackupIncludesWALData(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "telemetry.db")
+
+	// 连接 A：建表 + 插入，**保持打开**（连接关闭时 SQLite 会 checkpoint，
+	// 数据就进主文件了 → 测试就失去意义）。
+	connA, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connA.Close()
+	if _, err := connA.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := connA.Exec(`CREATE TABLE sessions (id TEXT PRIMARY KEY, started_at INTEGER NOT NULL,
+		ended_at INTEGER, provider TEXT NOT NULL DEFAULT '', provider_endpoint TEXT NOT NULL DEFAULT '',
+		cwd TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := connA.Exec(`CREATE TABLE metrics (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
+		name TEXT NOT NULL, value REAL NOT NULL, labels TEXT NOT NULL DEFAULT '{}', captured_at INTEGER NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	const total = 200
+	for i := 0; i < total; i++ {
+		if _, err := connA.Exec(`INSERT INTO metrics (session_id, name, value, labels, captured_at) VALUES (?,?,?,?,?)`,
+			"s1", "claude_code.token.usage", float64(i), `{"type":"input"}`, time.Now().UnixMilli()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := connA.Exec(`PRAGMA user_version = 2`); err != nil {
+		t.Fatal(err)
+	}
+
+	// 确认数据确实还在 WAL 里（主文件里看不到）
+	walPath := dbPath + "-wal"
+	walInfo, err := os.Stat(walPath)
+	if err != nil {
+		t.Fatalf("-wal 文件不存在（数据可能已被 checkpoint 进主文件）: %v", err)
+	}
+	if walInfo.Size() == 0 {
+		t.Fatal("-wal 是空的，数据没留在 WAL 里 → 本测试测不到东西")
+	}
+
+	// 触发迁移（OpenStore 内部调 migrateLabelsToWhitelist）
+	s, err := OpenStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close(context.Background())
+
+	// 备份必须包含全部行
+	backupDir := filepath.Join(dir, "backups")
+	entries, err := os.ReadDir(backupDir)
+	if err != nil {
+		t.Fatalf("读备份目录失败: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("没有生成备份")
+	}
+	backupPath := filepath.Join(backupDir, entries[0].Name())
+	_, backupMetrics := dbCount(t, backupPath)
+	if backupMetrics != total {
+		t.Errorf("备份里的 metrics 行数 = %d，期望 %d —— 备份漏掉了 WAL 里的数据", backupMetrics, total)
+	}
+}

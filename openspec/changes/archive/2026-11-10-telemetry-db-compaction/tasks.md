@@ -72,3 +72,19 @@
 - [x] 6.4 **对 fixture 验证 compact**：跑 `--compact` → 断言**文件真的变小**（不是只看 VACUUM 返回值）、且 `sessions` / `metrics` 行数与 `sum(value)` 前后相等
 - [x] 6.5 **对同一 fixture 在改动前后各跑一次 `ccl stats --json`** 做 diff（固定 window），确认只有 `extra_labels` 变窄、token/cost 与各维度不变
 - [x] 6.6 真机只留一条 sanity check：`ccl serve --status` 看 db 大小与 session 数正常、`ccl stats` 输出正常；**并把回滚命令写进文档**（停 daemon → 用备份替换 `telemetry.db` → **删掉 `telemetry.db-wal` 与 `telemetry.db-shm`** → 重开。旧 WAL 会覆盖回滚内容，漏删等于没回滚）
+
+## 7. 补测（评审后追加：spec 的 scenario 需要真实用例）
+
+> 评审指出：最初的实现只有单元测试，**smoke 层零覆盖**，且 3 条 spec scenario
+> 没有对应测试（"备份含 WAL 数据"、"daemon 在跑时被停掉并拉起"、"压缩失败不毁
+> 数据"）—— 恰恰是评审实测踩到的两个坑所在。
+
+- [x] 7.1 `cmd/cc-launcher/serve_smoke_test.go`（`//go:build smoke`）：`ccl serve --help` 列出 --compact 且用法行含它；`ccl __complete serve ""` 含 --compact；`ccl __complete serve --compact ""` 输出为空（互斥防御）；`--compact --backfill` / `--compact --stop` 报互斥
+- [x] 7.2 `internal/collector/store_compaction_test.go`：迁移前的备份必须包含 **WAL 里已提交但未 checkpoint 的数据**
+      —— 造法：连接 A 一直开着（连接关闭会 checkpoint → 数据进主文件 → 测不到东西）+ 断言 -wal 非空；备份行数必须等于全部行数
+      —— **变异验证过**：把备份从 `VACUUM INTO` 改成复制 db 主文件 → 备份里 0 行（期望 200）→ 测试变红
+- [x] 7.3 `cmd/cc-launcher/compact_scenarios_test.go`：daemon 在跑时 compact 会停掉它、压缩、再拉起一个新的
+      —— 用假 daemon 脚本（自带进程组，PGID==pid，`kill(-pid)` 才杀得到）+ pidfile
+      —— **坑**：被 SIGTERM 杀掉后进程变 zombie，而 `kill(pid,0)` 对 zombie 仍返回成功 → 探测会把"已死"判成"活着"（且 stopDaemon 因此等满死线）。测试要后台 `cmd.Wait()` 回收，且 pidAlive 要认 /proc/<pid>/stat 的 'Z' 状态
+- [x] 7.4 `cmd/cc-launcher/compact_scenarios_test.go`：压缩失败时报错、且原数据仍可读（db 设只读 → VACUUM 写不进去 → 失败；只读文件里的数据仍能读）
+- [x] 7.5 `cmd/cc-launcher/probe.go`：把 `forkDaemon` 的可执行文件路径与就绪探测做成**可注入点**（各 1 个变量）—— 否则在 go test 里 `exec.Command(os.Executable(), "serve")` 会 fork **测试二进制**（子进程把 "serve" 当 -test.run 模式 → 跑测试 → 递归）

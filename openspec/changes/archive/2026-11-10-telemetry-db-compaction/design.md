@@ -147,6 +147,7 @@ SQLite 行为（本机用仓库同版本驱动 modernc.org/sqlite v1.59.0 实测
 - **为什么按原状态恢复**：daemon 停了用户的 Claude Code 就推不上遥测。执行完自动拉起，用户无感；daemon 本来就没在跑则不拉起。
 - **停止的死线要放宽**：`stop_unix.go` 的 5s 死线短于 daemon 自己的关闭预算（`server.go:149` 的 5s + `serve.go:242` 的 5s = 最多 10s）→ SIGKILL 兜底可达，而 SIGKILL 会**打断 `store.go:606` 的 checkpoint**，留下残缺 WAL。`--compact` 走停止流程时把死线放宽到 15s。
 - **不需要额外备份**：VACUUM 是**重写文件**而非删除数据，中途失败 SQLite 保证原文件完好（原子性），不像"重写 labels"那种有损操作。
+- **可测性**：这条 scenario 需要验证"停旧 → 拉新"的编排，而 `forkDaemon` 是 `exec.Command(os.Executable(), "serve")` —— 在 go test 里它会 fork **测试二进制**（子进程把 "serve" 当 -test.run 模式 → 跑测试 → 递归）。因此把"fork 哪个可执行文件"与"怎么等就绪"做成**可注入点**（各 1 个包级变量），测试覆盖成假 daemon 脚本与"立即就绪"即可安全验证。
 
 ### D8: `ccl stats --json` 的 `extra_labels` 会变（对外可见的行为变更）
 

@@ -47,6 +47,17 @@ func waitForDaemonReady() error {
 	return fmt.Errorf("daemon 在 3s 内未就绪")
 }
 
+// daemonExePath 返回要 fork 出来的 daemon 可执行文件路径。
+//
+// **做成变量是为了测试能覆盖它**：在 go test 里直接 fork os.Executable() 会 fork
+// **测试二进制**——子进程拿到 "serve" 参数后会当成 -test.run 模式去跑测试 →
+// 递归。测试覆盖成假 binary 就能安全地验证"compact 后确实拉起了新 daemon"。
+var daemonExePath = os.Executable
+
+// waitDaemonReadyFn 等 fork 出来的 daemon 就绪；做成变量供测试覆盖（真实实现
+// 会探 :4318 端口，测试里换成"立即就绪"）。
+var waitDaemonReadyFn = waitForDaemonReady
+
 // forkDaemon fork 当前 binary 为 ccl serve 子进程。
 //
 // 决策（见 design.md §3）：
@@ -54,7 +65,7 @@ func waitForDaemonReady() error {
 //   - stdin/stdout/stderr = nil → disown
 //   - Wait = nil（不等）；ccl 自己探端口就绪
 func forkDaemon() error {
-	exe, err := os.Executable()
+	exe, err := daemonExePath()
 	if err != nil {
 		return fmt.Errorf("找自己可执行文件失败: %w", err)
 	}

@@ -553,7 +553,7 @@ func runCompactInner() error {
 		if err := forkDaemon(); err != nil {
 			return err
 		}
-		if err := waitForDaemonReady(); err != nil {
+		if err := waitDaemonReadyFn(); err != nil {
 			return fmt.Errorf("新 daemon fork 成功但 3s 内未就绪: %w", err)
 		}
 		fmt.Println("daemon ready (port :4318 reachable)")
