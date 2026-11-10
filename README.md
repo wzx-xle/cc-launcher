@@ -12,6 +12,8 @@
 
 ## 安装
 
+### Linux / macOS
+
 ```bash
 # 编译 + 安装到 /usr/local/bin（需要 sudo）
 ./build.sh install
@@ -24,6 +26,51 @@
 ```
 
 之后直接使用 `ccl` 命令即可（`~/.local/bin` 需要加入 PATH）。
+
+### Windows（scoop）
+
+Windows 版通过 [scoop](https://scoop.sh) 分发 —— 装的是 GitHub Release 上的
+`cc-launcher-windows-amd64.zip`，由 CI 构建并把 sha256 写进 release body，
+scoop manifest 直接引用那个 hash。
+
+```powershell
+# 1. 先装 scoop（没装过的话；官方安装脚本）
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+irm get.scoop.sh | iex
+
+# 2. 添加本项目的 bucket
+scoop bucket add wzx-xle/scoop-bucket
+
+# 3. 安装
+scoop install cc-launcher
+
+# 4. 更新到最新版
+scoop update cc-launcher
+
+# 5. 卸载
+scoop uninstall cc-launcher
+```
+
+装完直接用 `ccl` 命令 —— scoop 会把 zip 里那个 `ccl.cmd` 链进 `PATH`（它是个
+38 字节的 shim，内容是 `"%~dp0cc-launcher.exe" %*`，用来调用同目录的 exe）。
+
+manifest 的 `version` 与 GitHub Release 的 tag 一一对应（如 `0.22.1` ↔
+`v0.22.1`），`scoop update` 拉的就是对应 release 的资产。
+
+**只提供 windows/amd64**（没有 arm64 构建）—— ARM 版 Windows 走
+Windows 11 自带的 x64 模拟层。
+
+**卸载前会自动停掉 OTel daemon**：manifest 里的 `pre_uninstall` 钩子会先跑
+`ccl serve --stop`，再杀掉还占着应用目录的进程。没有它的话，daemon 仍开着
+`cc-launcher.exe` → 应用目录被锁 → 卸载不干净（文件残留、`scoop uninstall`
+报错）。
+
+**不想用 scoop** 也可以直接从
+[Releases](https://github.com/wzx-xle/cc-launcher/releases) 下载
+`cc-launcher-windows-amd64.zip`，解压后得到 `cc-launcher.exe` + `ccl.cmd`
+（`ccl.cmd` 是个 38 字节的 shim，内容是 `"%~dp0cc-launcher.exe" %*`）——
+把**这两个文件所在的目录**整个加进 `PATH`（exe 必须和 cmd 在同一目录，shim 用
+`%~dp0` 找它）。这样卸载时需要自己 `ccl serve --stop`。
 
 ## 用法
 
