@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-11-10 — telemetry-db-compaction + web-home-path-tilde
+
+### Features
+- **`telemetry.db` 瘦身**：`~/.cc-launcher/telemetry.db` 只增不减，Windows 主环境已涨到 **29 MB**。实测根因不是"数据多"，而是**每行重复存同一份主机级常量**——parser 把 resource / scope / datapoint 三层 attributes 全量合并进每行的 `labels` JSON，同一会话的 162 行 metrics 里有 11 个 key 逐字相同（`service.*` / `host.*` / `os.*` / `terminal.type` / `query_source` / `effort` / `user.id`），每行 labels 占 ~380 字节（实测平均 373.5）。而真正读 labels 的只有两处：`JSON_EXTRACT(m.labels,'$.type')`（token 分类）与 `providerName()` 兜底读 `ccl.provider`——其余 key **从没被任何代码读过**
+  - **写入时按白名单裁剪**：labels 只留 `type` / `model` / `ccl.provider` / `provider`。裁在 store 层（`WriteMetric` 入队前，队列内存也一起降），parser 提取 model 到 `sessions` 表的链路完好。用**白名单**而非黑名单：以后 Claude Code 加新的 resource attribute 不会再撑大每一行
+  - **`ccl serve --compact`**（新 flag，进 serve 的互斥组）：停 daemon → `VACUUM` → `wal_checkpoint(TRUNCATE)` → 按原状态拉起 daemon。**最后那步 checkpoint 不能省**：WAL 模式下 VACUUM 把新内容写进 `-wal`，主文件要等 checkpoint 才被覆盖——实测 2.4 MB 的库 VACUUM 后主文件纹丝不动（2437120 字节），checkpoint 后才降到 1224704。少了它整个命令等于空跑
+  - **90 天保留策略**：daemon 启动时清一次 + 每 24 小时一次。按 `captured_at` 判年龄（不是 session 开始时刻——否则"91 天前开始但今天仍在跑"的会话今天的 token 会从看板消失，`stats-query` spec 明确不允许）；顺带清掉永远清不掉的孤儿 metric 行。剪枝不做 VACUUM（空闲页被后续写入复用 → 文件不再涨）
+  - 实测（17402 行的真实库）：平均 labels **373.5 → 48.3 字节（-87%）**，`ccl serve --compact` 后文件 **9.2 MB → 3.1 MB（-66%）**
+- **web 控制台的 Claude 页不再显示用户目录**：两个可编辑文件的路径原样显示成 `/home/zxwang/.claude/settings.json`，这段前缀几乎全是主目录、既占地方又不带信息量。改成 `~/.claude/settings.json`（Windows 上是 `~\.claude\settings.json`，保留原生分隔符）。**脱敏在后端完成**——`/api/claude/files` 是局域网可访问的接口（daemon 监听 `:4318` 全网卡，token 保护），绝对路径会把用户名暴露给同网段拿到 token 的人。读写仍走真实绝对路径，只有返回给前端展示的那一份被替换
+
+### Compatibility
+- **存量 `telemetry.db` 会在下次 daemon 启动时被自动迁移**：把历史 metric 行的 labels 重写成白名单形式（17402 行实测 389 ms）。迁移**失败不影响使用**——db 保持旧格式，功能照常，下次启动自动重试
+- **迁移前会在 `~/.cc-launcher/backups/` 留一份快照**（`telemetry.db.pre-compact-<时间戳>`）。用 SQLite 的 `VACUUM INTO` 而非复制 db 文件：WAL 模式下最近提交的事务还在 `-wal` 里，复制主文件会**静默丢数据**（实测 5001 行只剩 5000 行，无任何报错）。**回滚步骤**：停 daemon → 用备份替换 `telemetry.db` → **删掉 `telemetry.db-wal` 与 `telemetry.db-shm`** → 重开（漏删旧 WAL 会把回滚内容覆盖掉）
+- **超过 90 天的遥测数据会被删除**（session 行与它们的 metric 行，按产生时刻算）。90 天覆盖"回头看上个月用量"这类常见需求
+- **`ccl stats --json` 的 `extra_labels` 内容变窄**：该字段装的是整段 labels（14 个 key → 白名单后的 ≤4 个），直接进 JSON 输出。字段本身仍在，token / cost 与各维度（project / model / provider）口径**完全不变**。被剥掉的包括 `user.id`（64 字节主机指纹）与 `ccl.cwd`（完整路径）——正是 `apiResponse` 注释里标为"不该 marshal 到局域网可访问的 API"的那两个
+- **`/api/claude/files` 的 `path` 字段值语义变化**：从绝对路径变成 `~` 形式。字段名与接口形状不变，仓库内前端同步改
+- **CI 新增 gofmt 检查**：PR / 分支 push 阶段会因格式不对而红。本仓库的 40 个历史文件已在本版一次性格式化（Go 1.25.4 与 1.26.10 的 gofmt 输出实测逐字节相同，两边不会打架）
+
+### Fixes
+- **`ccl web --help` 的 flag 断言靠子串巧合通过**：断言对整个 help 输出做 `strings.Contains(out, "--backfill")`，但 web 根本没有 `--backfill` flag（早已挪到 `ccl serve --backfill`）——它命中的只是 help 说明文字里"在 ccl serve --backfill"这句交叉引用。改文案就会毫无预兆地红，而只要文案还留着 `--backfill`，这条断言就一直"绿"却什么都没断言到。改成从"选项:"段里取 flag 名，断言集合含 `--rotate` / `--open`，并把 `--backfill` 变成一条有意的负向断言
+- **bump-scoop skill 的 insteadOf 指令方向写反**：照做会把改动推到错误的远端
+- **`internal/collector/store.go` 的 `backfillCwdDB` 注释**：gofmt 的 doc comment 智能引号规则会把成对单引号转成右双引号（`''` → `”`），改写成"只处理 cwd 为空的行"——既说清了意思，也不再被 gofmt 改一次
+
+### Refactor
+- **全量 gofmt 格式化 40 个文件**（165 增 / 162 删）：这批文件写于 Go 1.19 之前（doc comment 格式化规则变更之前），叠加 struct / map 字面量的行内注释对齐规则，差异一直攒着没人管——`internal/config/ordered.go` 末尾多一个空行就这么躺了很久。改动是**纯格式**：去掉所有空白后逐行相同，唯一的非空白变化是 4 处 doc comment 空行的增删
+- **`shortenHomePath` 下沉为 `internal/pathutil.Shorten`**：CLI 的 `ccl serve --status` 早就在把绝对路径缩成 `~/...`，web 页没接上，两边各写各的。现在共用一份实现。顺带修掉一个既有小缺陷：原实现用纯字符串前缀匹配，home 是 `/home/user` 时会把 `/home/userx` 误判成 home 下的路径（显示成 `~x`）
+
+### Tests
+- **smoke 层覆盖 `ccl serve --compact`**：`--help` 列出它且用法行含它；`ccl __complete serve ""` 含它；`ccl __complete serve --compact ""` 输出为空（互斥防御）；`--compact --backfill` / `--compact --stop` 报互斥
+- **三条 spec scenario 补上真实用例**：备份必须含 WAL 里已提交未 checkpoint 的数据（**变异验证**：把备份换成复制 db 主文件 → 备份里 0 行 → 测试变红）；daemon 在跑时被停掉、压缩、再拉起新的；压缩失败时报错且原数据仍可读
+- **白名单漂移防护**：`internal/stats` 的测试断言 stats SQL 里用到的每个 labels key 都在落库白名单里——将来 stats 加 `JSON_EXTRACT(m.labels,'$.xxx')` 而白名单没同步，那个维度会静默变空，这条断言是唯一的编译期保障（变异验证过）
+- **`forkDaemon` 的可执行文件路径与就绪探测做成可注入点**：否则在 go test 里 `exec.Command(os.Executable(), "serve")` 会 fork **测试二进制**——子进程把 "serve" 当 `-test.run` 模式 → 跑测试 → 递归
+
+### OpenSpec
+- `telemetry-db-compaction`：db 瘦身（labels 白名单 + 保留策略 + 一次性迁移 + `ccl serve --compact`）
+- `web-home-path-tilde`：web Claude 页路径脱敏
+
 ## [0.21.2] - 2026-11-09 — console-editor-layout
 
 ### Features
