@@ -523,7 +523,7 @@ func BackfillCwdInFile(dbPath string, resolver CwdResolver, limit int) (resolved
 	return backfillCwdDB(db, resolver, limit)
 }
 
-// backfillCwdDB 是回填的核心：只处理 cwd = ” 的行。
+// backfillCwdDB 是回填的核心：只处理 cwd 为空的行。
 //
 // 幂等由**数据驱动**：不动非空行，也不消耗任何一次性标记（PRAGMA
 // user_version 之类）——跑第二次结果与第一次一致，且之后新建的空 cwd 行
