@@ -900,8 +900,15 @@ func RefreshAll(ctx context.Context, refs []ProviderRef, st *Store, logf func(fo
 	// **每轮汇总**（一行）：这一轮查了几个、跳过了几个、失败几个。
 	// 出问题时第一眼看这行就知道"是不是全查了""是不是被限流了"。
 	// **计数单位是额度池**（请求本来就按池发）。
-	logf("额度刷新一轮（池）：查了 %d / 不活跃跳过 %d / 未到期或退避跳过 %d / 失败 %d",
-		res.Refreshed, res.SkippedInactive, res.SkippedNotDue, res.Failed)
+	//
+	// **只在真的发了请求（或有失败）时才打**：ticker 每 8 秒一轮，全打的话
+	// 绝大多数行都是"查了 0 / 跳过 7"——真正的限流与失败信息被淹在噪音里
+	// （实测 Windows 上一小时 450 行里 445 行是"查了 0"）。零请求的轮次没有
+	// 信息量：没有任何池需要查，被退避拦下的池另有 429 那行单独记录。
+	if res.Refreshed > 0 || res.Failed > 0 {
+		logf("额度刷新一轮（池）：查了 %d / 不活跃跳过 %d / 未到期或退避跳过 %d / 失败 %d",
+			res.Refreshed, res.SkippedInactive, res.SkippedNotDue, res.Failed)
+	}
 	return nil
 }
 
