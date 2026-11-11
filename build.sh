@@ -2,6 +2,10 @@
 set -euo pipefail
 
 BINARY="cc-launcher"
+# CMD_NAME 是**对外暴露的命令名** —— README、Windows（scoop 装的是 ccl.cmd）、
+# 以及所有文档里用的都是它。cc-launcher 只是构建产物名（= Go 模块名），
+# 装到 PATH 时必须用 ccl，否则用户敲 ccl 得到 "command not found"。
+CMD_NAME="ccl"
 INSTALL_DIR="/usr/local/bin"
 
 usage() {
@@ -70,16 +74,28 @@ build() {
 install() {
     build
     echo "==> 安装到 $INSTALL_DIR ..."
-    sudo cp "$BINARY" "$INSTALL_DIR/"
-    echo "==> 已安装: $INSTALL_DIR/$BINARY"
+    # **先 rm 再 cp**：目标是符号链接时 cp 会跟随链接写入 —— 用户自己
+    # `ln -s ccl <repo>/cc-launcher` 是很常见的做法，不 rm 就会把仓库里的
+    # 二进制覆盖掉（而且链接还在，看起来"装成功了"其实是坏的）。
+    sudo rm -f "$INSTALL_DIR/$CMD_NAME"
+    sudo cp "$BINARY" "$INSTALL_DIR/$CMD_NAME"
+    sudo chmod 755 "$INSTALL_DIR/$CMD_NAME"
+    # 保留长名（软链）：老用户习惯敲 cc-launcher，别突然断掉。
+    sudo ln -sf "$CMD_NAME" "$INSTALL_DIR/$BINARY"
+    echo "==> 已安装: $INSTALL_DIR/$CMD_NAME（$BINARY 是它的软链）"
 }
 
 local_install() {
     build
     local dir="${HOME}/.local/bin"
     mkdir -p "$dir"
-    cp "$BINARY" "$dir/"
-    echo "==> 已安装: $dir/$BINARY"
+    # 先 rm 再 cp：目标可能是符号链接（cp 会跟随链接写入 → 覆盖源文件）
+    rm -f "$dir/$CMD_NAME"
+    cp "$BINARY" "$dir/$CMD_NAME"
+    chmod 755 "$dir/$CMD_NAME"
+    # 保留长名（软链）：老用户习惯敲 cc-launcher
+    ln -sf "$CMD_NAME" "$dir/$BINARY"
+    echo "==> 已安装: $dir/$CMD_NAME（$BINARY 是它的软链）"
     if ! echo "$PATH" | grep -q "$dir"; then
         echo "==> 提示: $dir 不在 PATH 中，请添加: export PATH=\"$dir:\$PATH\""
     fi

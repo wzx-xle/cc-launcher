@@ -27,6 +27,9 @@
 
 之后直接使用 `ccl` 命令即可（`~/.local/bin` 需要加入 PATH）。
 
+构建产物名是 `cc-launcher`（= Go 模块名），但**装到 PATH 上的是 `ccl`**；
+长名 `cc-launcher` 会以软链形式留在同一目录，老用户敲长名也照样能用。
+
 ### Windows（scoop）
 
 Windows 版通过 [scoop](https://scoop.sh) 分发 —— 装的是 GitHub Release 上的
