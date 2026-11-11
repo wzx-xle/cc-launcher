@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.22.2] - 2026-11-11 — install-command-name
+
+### Fixes
+- **`./build.sh install` / `local` 装出来的命令名改回 `ccl`**：构建产物名是 `cc-launcher`（= Go 模块名），但**对外命令名一直是 `ccl`** —— README 全篇、Windows（scoop 装 `ccl.cmd`）、所有文档都用 `ccl`。而 install / local 此前直接 `cp "$BINARY" "$INSTALL_DIR/"` → 用户装完敲 `ccl` 得到 `command not found`，只能自己 `ln -s` 兜着。现在装的是 `ccl`，并建 **`cc-launcher` → `ccl`** 的软链（老用户敲长名照常可用，不破坏任何现有用法）
+- **写入前先删目标（防覆盖源文件）**：`cp` 在目标是**符号链接**时会跟随链接写入 —— 用户自己 `ln -s ccl <repo>/cc-launcher` 很常见，不先 `rm -f` 就会把仓库里的二进制覆盖掉，而链接还在 → 看起来"装成功了"其实已经损坏
+
+### Docs
+- **README 补 Windows 的 scoop 安装流程**：原先「安装」章节只有 Linux/macOS 的编译安装，Windows 用户（scoop 分发的实际用户群）看不到自己该怎么装。补了 scoop 五步（装 scoop → 加 bucket `wzx-xle/scoop-bucket` → install / update / uninstall）、sha256 的来源（CI 写进 release body，manifest 直接引用）、**卸载前会自动停掉 OTel daemon**（`pre_uninstall` 钩子；没有它 daemon 仍占着应用目录 → 卸载不干净）、version↔tag 对照、只提供 windows/amd64，以及不用 scoop 的手动路径（`ccl.cmd` 与 `cc-launcher.exe` 必须在同一目录）
+
 ## [0.22.1] - 2026-11-10 — quota-per-vendor-rate-limit
 
 ### Fixes
