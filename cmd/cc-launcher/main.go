@@ -313,6 +313,19 @@ func buildLaunchOptions(pm *provider.Manager, cm *config.Manager, sm *state.Mana
 		_ = os.Setenv(provider.EnvProviderName, providerName)
 	}
 
+	// quota-read-endpoint：把 daemon 上**只读额度端点**的地址交给消费方。
+	//
+	// 与 CCL_PROVIDER 完全同构：--settings 的 env 块（主通道，优先级最高）+
+	// 进程环境（冗余第二通道）。放在 deliver 汇流**之后** → provider 自己的
+	// env 块里若写了同名键，ccl 的值覆盖它（"ccl 自己的键赢"的纪律）。
+	//
+	// **无条件交付**（不因 daemon 没起来就不给）：消费方拿到 URL 连不上就自己
+	// 回落（读 `ccl quota --json`）。条件交付会把 buildLaunchOptions 与
+	// ensureDaemonRunning 的先后顺序耦合进来——那是个陷阱：daemon 可能在这
+	// 之后才起来，也可能压根起不来。
+	deliver[provider.EnvQuotaURL] = quotaEndpointURL()
+	_ = os.Setenv(provider.EnvQuotaURL, quotaEndpointURL())
+
 	// 注入 launch 上下文（provider / cwd / 端点 host → OTEL_RESOURCE_ATTRIBUTES）。
 	// 必须在 provider 选定之后、launcher.Launch 之前——上下文描述的是"这次启动"。
 	//

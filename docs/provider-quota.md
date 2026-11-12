@@ -40,8 +40,12 @@ ccl quota --provider minimax-m3 --json
 ccl quota --refresh --json
 ```
 
-**默认只读本地数据文件，一次网络都不发。** 数据由 `ccl serve` 周期刷新
-（默认 60 秒）写入 `~/.cc-launcher/quota.json`。
+**默认只读本机数据，不向任何额度接口发请求。** 数据由 `ccl serve` 周期刷新
+（默认 60 秒）写入 `~/.cc-launcher/quota.json`；`ccl quota` 优先经 daemon 的
+**回环端点**读它（daemon 不可达时直读同一个文件）——**回环 HTTP ≠ 向外网发
+请求**，原纪律的意图（不打扰厂商的额度接口）不变。
+
+> 状态栏要**零进程**读额度，见下一节「[零进程读额度](#零进程读额度daemon-的只读端点)」。
 
 ### provider 怎么定
 
@@ -168,6 +172,178 @@ ccl quota --refresh --json
 （**当前没人在用的** provider 靠兜底保鲜每 10 分钟才刷新一次 → 它们的 `stale`
 会持续为 true，因为数据**确实**已经旧了。这是**可见**的，不是静默失效。切换到
 这样的 provider 时，ccl 会立刻声明并触发刷新，数字随即变新。）
+
+## 零进程读额度（daemon 的只读端点）
+
+### 为什么
+
+状态栏是 ccl 额度的唯一消费者，而它的调用节奏极其苛刻：Claude Code 的状态栏
+约每 **300ms** 刷新一次，每次都是**新起的进程**。
+
+走命令的问题不在"读"，在"起进程"。Windows 实测（2026-11-12）：
+
+| 调用方式 | 耗时 |
+|---|---|
+| `ccl quota --json`（node `execSync`，状态栏的真实路径） | p50 **166~190ms**，max **252ms** |
+| 同一命令在 PowerShell 里直接调 | p50 **266ms**，max **299ms** |
+
+耗时的**全部**在进程启动上：`cmd.exe(scoop shim)` → `cmd.exe(app\ccl.cmd)` →
+`cc-launcher.exe`。而 `ccl quota` 本身已经是纯本地读（读一个 JSON 文件），
+毫秒级。
+
+状态栏脚本给这次调用设了 `timeout: 250`——**余量只有 60~80ms**。系统繁忙时
+（Claude Code 刚启动、用户配的三个 hook 各起一个 node 进程、Defender 实时扫描
+18MB 的 exe 与上百 MB 的 node.exe、daemon 正在写额度数据文件）→ 这次调用必然
+超过 250ms → 脚本 `catch` → 返回 null → **状态栏回落到 Claude Code 自己的
+`rate_limits` 槽位**。
+
+用户看到的就是"额度显示成默认的用量"，而且**只在忙的时候错**——闲下来
+（166ms）就对。这解释了"刚启动不对、等会就正常"。
+
+**daemon 是常驻的**：HTTP 回环请求是**毫秒级**，且**不落进 300ms 的去抖
+窗口**（它不是"新起的进程"，只是一次连接）。
+
+### 端点契约
+
+```
+GET http://127.0.0.1:4318/ccl/quota?provider=<名字>
+```
+
+| 情况 | 状态码 | body |
+|---|---|---|
+| 有记录 | **200** | 额度文档（与 `ccl quota --json` **逐字段同构**） |
+| `provider` 缺失或空 | **400** | 纯文本 |
+| 来源不是回环 | **403** | 纯文本 |
+| provider 未配置 / 没有额度记录 | **404** | 纯文本 |
+| provider 没有额度接口 | **422** | 纯文本 |
+
+- **200 的 body** 就是上面「[输出契约](#输出契约)」那份文档：`provider` /
+  `source` / `stale` / `fetched_at` / `dimensions`——**消费方换通道时解析逻辑
+  一行都不用改**。
+- **404 与 422 要分开**：消费方要能区分"这厂商没额度"（422）与"数据还没准备好"
+  （404）——`ccl quota` 的退出码 2 与 1 就是这个区分。
+- **端点未注册时**（daemon 没跑这个能力）请求得到 **404**，且响应**不带**
+  `X-Ccl-Endpoint: quota` 头 → 客户端据此知道"这个端点不存在"（而不是
+  "没有额度记录"）→ **回落直读本地数据文件**。这在 **ccl 升级但 daemon 还是
+  旧进程**时会发生。
+- 端点**只读**：不写数据文件、不触发刷新。
+
+### 回环限制
+
+端点**只接受回环来源**（连接的来源地址是回环地址），否则 **403**。
+
+- 判定看的是 daemon **实际接受的那个连接的来源地址**（`RemoteAddr`），
+  **不看任何请求头**——daemon 是裸 HTTP server，没有可信的转发链，读
+  `X-Forwarded-For` 等于把判定交给请求方（伪造一个头就能拿到额度数据）。
+- **为什么必须限**：daemon 监听 `:4318` = **所有网卡**。不限的话，局域网内
+  任意机器都能读到本机额度余额。
+- **为什么限回环就够**：本机任何进程本来就能直读 `~/.cc-launcher/quota.json`
+  （0600 只挡别的用户，挡不住同用户的进程）→ "回环来源"这个边界**恰好等于
+  本机进程能直接读文件的边界**，不引入新的本机暴露面。
+- 同样的限制也套在 `POST /ccl/activate`（ccl 声明本次用哪个 provider）上——
+  它与新端点一样属于"ccl 自己 ↔ daemon"的内部交换。
+
+### `CCL_QUOTA_URL` 的契约
+
+ccl 启动 Claude Code 时，把额度端点的地址放进环境变量 **`CCL_QUOTA_URL`**：
+
+```
+CCL_QUOTA_URL=http://127.0.0.1:4318/ccl/quota
+```
+
+| 契约 | 说明 |
+|---|---|
+| **名字** | `CCL_QUOTA_URL`。**改名 = breaking change**（会静默弄坏仓库外的消费方）。名字**不能带凭证特征**（`TOKEN`/`KEY`/`SECRET`/`PASSWORD`）——Claude Code 的 subprocess scrub 会把凭证类变量从子进程环境里删掉 |
+| **值** | daemon 的固定端口 + 端点路径。**URL 形态也是契约**——改形态按 breaking change 处理 |
+| **两条交付通道** | ① `--settings` 交付对象的 `env` 块（**主通道**，命令行层压过用户 `settings.json` 的 env 块，也压过进程环境）；② 进程环境（**冗余第二通道**，万一某版 Claude Code 不把 settings 的 env 块落到子进程环境） |
+| **ccl 的键赢** | provider 配置的 `env` 块里若写了同名键 → **ccl 的值覆盖**；用户 `settings.json` 里的同名键也压不过它（主通道优先级更高） |
+| **无条件交付** | **不因 daemon 没起来就不给**——消费方拿到 URL 连不上就自己回落。条件交付会把"交付"与"daemon 状态"耦合起来 |
+| **缺席 ≠ 空串** | 直接跑 `claude`（不经 ccl）的会话**拿不到**这个变量 → 消费方知道"这个会话不是 ccl 起的"。ccl **永不交付空值** |
+
+它**不承载**额度的生效语义——额度数据由 daemon 周期刷新写进本地数据文件，
+这个变量只告诉消费方"去哪儿读"。
+
+### 状态栏脚本的推荐写法
+
+**HTTP 优先（不起进程，几 ms）+ 命令兜底（永远可用，但慢）**：
+
+```js
+#!/usr/bin/env node
+// ~/.claude/statusline.js
+const fs = require('fs');
+const http = require('http');
+const { execFileSync } = require('child_process');
+
+const input = JSON.parse(fs.readFileSync(0, 'utf8')); // Claude Code 的 stdin JSON
+
+// 回环 HTTP 读额度：不起进程，几 ms。
+function fetchQuota(base, provider, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const req = http.get(
+      `${base}?provider=${encodeURIComponent(provider)}`,
+      { timeout: timeoutMs },
+      (res) => {
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (c) => { body += c; });
+        res.on('end', () => {
+          if (res.statusCode !== 200) { reject(new Error(`status ${res.statusCode}`)); return; }
+          try { resolve(JSON.parse(body)); } catch (e) { reject(e); }
+        });
+      },
+    );
+    req.on('timeout', () => req.destroy(new Error('timeout')));
+    req.on('error', reject);
+  });
+}
+
+async function loadQuota() {
+  const provider = process.env.CCL_PROVIDER;   // undefined = 不是 ccl 起的会话
+  if (!provider) return null;
+  const base = process.env.CCL_QUOTA_URL;       // undefined = 没有端点可用
+  if (base) {
+    try {
+      const q = await fetchQuota(base, provider, 200); // 超时给足余量
+      if (q && Array.isArray(q.dimensions)) return q;
+    } catch (_) { /* 端点不可用 → 走命令 */ }
+  }
+  try {                                          // 兜底：daemon 没跑 / 端点不可用
+    return JSON.parse(execFileSync('ccl', ['quota', '--json'], { timeout: 250, encoding: 'utf8' }));
+  } catch (_) { return null; }
+}
+
+loadQuota().then((q) => {
+  // 渲染是你自己的事；注意 q 的形状与 `ccl quota --json` **完全一样**。
+  const q5h = q?.dimensions?.find((d) => d.id === 'interval');
+  const pct = q5h?.used_percentage;
+  const line = `5h: ${pct == null ? '--' : pct + '%'}`;
+  process.stdout.write(line + '\n');
+});
+```
+
+**两条通道的输出同构**（同一份文档）→ 消费方拿到什么就渲染什么，**解析逻辑
+一行都不用改**。
+
+> **为什么是异步**：Node 的 `http` 模块只有异步 API（没有同步 socket）。上面
+> 的写法在 promise 落定后才写 stdout 再退出——Claude Code 读的是进程的
+> stdout，Node 在事件循环空时退出，所以不会截断输出。若你的脚本必须是**纯
+> 同步**的，那就只能用命令兜底那条路（慢，但正确）。
+
+### 哪些端点不受回环限制（维护者判据）
+
+daemon 上有三类无鉴权端点，语义不同，**不能一刀切**：
+
+| 端点 | 合法调用方 | 收紧会打断谁 | 处置 |
+|---|---|---|---|
+| `/ccl/activate`、`/ccl/quota` | 只有本机 ccl 与本机消费方 | 无人 | **限回环** |
+| `/v1/metrics`、`/v1/logs`、`/v1/traces` | 任意 OTLP 客户端 | **WSL2 / 容器里的 Claude Code**：WSL2 连 Windows 的 `localhost:4318` 走 NAT，Windows 侧看到的源地址是虚拟网段（`172.x`），**不是回环** → 一收紧遥测就断，且报错难懂 | 不动 |
+| `/ui`、`/api/*` | 用户浏览器 | 从别的机器看看板（已有 token 保护） | 不动 |
+
+**daemon 的监听地址保持 `:4318` 不变**——把它绑到 `127.0.0.1` 会同时打断上面
+两类，所以收紧只发生在**端点级**。
+
+`/v1/*` 的收紧若将来要做，前置条件是**先确认没有 WSL2 / 容器 / 跨机 Claude Code
+推遥测的场景**，否则要配套一个"可信来源白名单"配置项。
 
 ## 数据文件
 
@@ -397,7 +573,9 @@ interval` 递推，不用"now + interval"重算——后者会把刷新耗时累
 
 ## 状态栏怎么用
 
-状态栏脚本**只调命令，不直接读数据文件**（文件位置与格式是 ccl 的内部细节）。
+状态栏脚本**只调命令或打端点，不直接读数据文件**（文件位置与格式是 ccl 的内部
+细节）。**优先走 daemon 的回环端点**（零进程，几 ms），命令兜底——见
+「[零进程读额度](#零进程读额度daemon-的只读端点)」里的推荐写法。
 
 **两条分支不合并**：
 
@@ -416,7 +594,12 @@ interval` 递推，不用"now + interval"重算——后者会把刷新耗时累
 
 **超时保护**：`execSync` 的 timeout 设 **250ms**（Claude Code 状态栏有 300ms
 去抖窗口且每次执行前 abort 上一次——超时 10 分钟不是瓶颈，300ms 窗口才是）。
-正常路径 ~15ms。任何失败**静默回落**，状态栏不能因为额度查询卡住或崩掉。
+走端点时给 **200ms** 就够（回环请求是毫秒级）。任何失败**静默回落**，状态栏
+不能因为额度查询卡住或崩掉。
+
+> **为什么不能只留命令那条路**：Windows 上命令的 p50 是 170ms，而预算只有
+> 250ms——**余量 60~80ms**。系统繁忙时必然超时 → 状态栏回落到 Claude Code 自己的
+> `rate_limits` → 用户看到"额度显示成默认的用量"，而且**只在忙的时候错**。
 
 **渲染约定**：**label 已经是 unit 时不要重复显示单位**（非窗口型维度的 label
 就是 unit）——`"CNY: 5.17 CNY"` 应渲染成 `"CNY: 5.17"`。
@@ -426,7 +609,8 @@ interval` 递推，不用"now + interval"重算——后者会把刷新耗时累
 上下文接近上限才是真问题，额度是消耗类指标宁可早一点预警。
 
 **调用极其频繁是常态**：状态栏命令在生成过程中约每 300ms 被调一次（每秒 3.3
-次）→ 设计必须假设这一点。由于命令纯本地读，耗时恒定。
+次）→ 设计必须假设这一点。**读取侧只读本机数据**（走回环端点或直读文件），
+**一次向外网的请求都不发**。
 
 ## 外部行为实测结论
 

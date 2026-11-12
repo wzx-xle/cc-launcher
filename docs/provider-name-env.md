@@ -95,6 +95,16 @@ provider 的**生效**靠的是 `--settings` 交付 provider 自己的 `env` 块
 
 想看 provider 实际连到哪，看 provider 配置里的 `ANTHROPIC_BASE_URL`。
 
+## 同族的对外变量
+
+`CCL_QUOTA_URL` 是**同族**的对外变量（ccl 注入给消费方的只读变量，同样是
+"--settings 的 env 块 + 进程环境"两条通道、同样"ccl 的键赢"、同样改名 =
+breaking change）：它把 daemon 上**只读额度端点**的地址交给消费方，让状态栏
+能**零进程**读额度。
+
+它的完整契约在 [`provider-quota.md`](provider-quota.md) 的
+「[零进程读额度](provider-quota.md#零进程读额度daemon-的只读端点)」一节。
+
 ## 相关的外部行为
 
 statusLine 子进程能看到什么环境变量，取决于 Claude Code 的子进程环境策略。

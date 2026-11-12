@@ -24,6 +24,11 @@ func quotaHome(t *testing.T) string {
 	t.Setenv("HOME", dir)
 	// 关掉环境变量回落，避免测试受外部环境影响。
 	t.Setenv("CCL_PROVIDER", "")
+	// **默认不走 daemon 端点**：开发机上可能恰好跑着真 daemon → 命令会读到
+	// 真数据，测试就不确定了。指向一个没人监听的端口 → 确定性地回落本地文件。
+	old := quotaDaemonBaseURL
+	quotaDaemonBaseURL = func() string { return "http://127.0.0.1:1" }
+	t.Cleanup(func() { quotaDaemonBaseURL = old })
 	return filepath.Join(dir, ".cc-launcher")
 }
 
@@ -123,7 +128,7 @@ func TestRunQuota_ReadsLocalFileWithoutNetwork(t *testing.T) {
 		t.Errorf("不带 --refresh 不该发网络请求, calls=%d", calls)
 	}
 
-	var out quotaOutput
+	var out quota.Output
 	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
 		t.Fatalf("输出不是合法 JSON: %v\n%s", err, stdout)
 	}
@@ -186,7 +191,7 @@ func TestRunQuota_RefreshMakesRequest(t *testing.T) {
 	}
 
 	// 输出的是**刚查到的**值
-	var out quotaOutput
+	var out quota.Output
 	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
 		t.Fatalf("输出不是合法 JSON: %v\n%s", err, stdout)
 	}
@@ -296,7 +301,7 @@ func TestRunQuota_ProviderFromEnv(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("退出码 = %d, stderr=%s", code, stderr)
 	}
-	var out quotaOutput
+	var out quota.Output
 	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
 		t.Fatal(err)
 	}
@@ -328,7 +333,7 @@ func TestRunQuota_ExplicitProviderWinsOverEnv(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("退出码 = %d, stderr=%s", code, stderr)
 	}
-	var out quotaOutput
+	var out quota.Output
 	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
 		t.Fatal(err)
 	}
@@ -365,7 +370,7 @@ func TestRunQuota_StaleFlag(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("退出码 = %d, stderr=%s", code, stderr)
 	}
-	var out quotaOutput
+	var out quota.Output
 	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
 		t.Fatal(err)
 	}
@@ -524,7 +529,7 @@ func TestRunQuota_StaleTolerance(t *testing.T) {
 		t.Fatalf("退出码 = %d, stderr=%s", code, stderr)
 	}
 	stdout, _, _ := captureQuotaRun(t, "--provider", "p1", "--json")
-	var out quotaOutput
+	var out quota.Output
 	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
 		t.Fatal(err)
 	}
@@ -535,7 +540,7 @@ func TestRunQuota_StaleTolerance(t *testing.T) {
 	// age 明显超过周期 + 容忍 → 标 stale
 	writeEntry(70 * time.Second)
 	stdout2, _, _ := captureQuotaRun(t, "--provider", "p1", "--json")
-	var out2 quotaOutput
+	var out2 quota.Output
 	if err := json.Unmarshal([]byte(stdout2), &out2); err != nil {
 		t.Fatal(err)
 	}

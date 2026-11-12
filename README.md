@@ -385,8 +385,15 @@ ccl quota --refresh --json
 ```
 
 额度由 **`ccl serve` 周期刷新**（默认 60 秒，可配）写进
-`~/.cc-launcher/quota.json`；`ccl quota` **默认只读这个本地文件，一次网络都
-不发**（状态栏命令生成过程中约每 300ms 调一次，读取侧不能有网络）。
+`~/.cc-launcher/quota.json`；`ccl quota` **默认只读本机数据，不向任何额度接口
+发请求**（状态栏命令生成过程中约每 300ms 调一次，读取侧不能有网络）。
+
+**状态栏可以零进程读额度**：daemon 上有个只读的额度端点
+（`GET http://127.0.0.1:4318/ccl/quota?provider=<名字>`，只接受回环来源），
+ccl 启动 Claude Code 时把它的地址交给消费方（环境变量 `CCL_QUOTA_URL`）。
+Windows 上 `ccl quota --json` 的耗时几乎全在进程启动（p50 170ms，而状态栏的
+预算只有 250ms）→ 走端点是毫秒级。完整契约与可直接粘贴的状态栏写法见
+[`docs/provider-quota.md`](docs/provider-quota.md)。
 
 输出是一个**额度维度列表**（不是一个固定形状）——各家额度形态完全不同：
 

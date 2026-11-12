@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"time"
+
+	"cc-launcher/internal/collector"
 )
 
 // daemonAddr 是 daemon 的监听地址（loopback）。
@@ -20,6 +22,14 @@ const daemonAddr = "127.0.0.1:4318"
 
 // daemonBaseURL 返回 daemon 的 HTTP 基地址。
 func daemonBaseURL() string { return "http://" + daemonAddr }
+
+// quotaEndpointURL 返回 daemon 上**只读额度端点**的地址。
+//
+// **对外契约**：这个 URL 的形态一旦发布就不能改（与 CCL_PROVIDER 同等对待：
+// 改名 / 改形态 = breaking change，会静默弄坏仓库外的消费方）。
+//
+// daemon 的端口是常量（4318）→ URL 是常量，不随运行状态变化。
+func quotaEndpointURL() string { return daemonBaseURL() + collector.QuotaPath }
 
 // probeDaemonAddr 探 :4318 是否可达（200ms timeout）。
 //

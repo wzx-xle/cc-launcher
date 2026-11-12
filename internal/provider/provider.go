@@ -40,6 +40,26 @@ import (
 // provider 自己的 env 块（provider-settings-injection）。这个变量只传名字。
 const EnvProviderName = "CCL_PROVIDER"
 
+// EnvQuotaURL 是 ccl 注入给消费方的环境变量名，值是 daemon 上**只读额度端点**
+// 的地址（`http://127.0.0.1:4318/ccl/quota`）。
+//
+// 用途：让**仓库外**的程序（最典型的是 Claude Code 的状态栏脚本）**不启动任何
+// 进程**就能读到额度——Windows 上 `ccl quota --json` 的耗时几乎全在进程启动
+// （cmd.exe shim → cmd.exe → exe，p50 170ms），而状态栏的调用预算只有 250ms，
+// 系统繁忙时必然超时。
+//
+// 交付方式与 EnvProviderName **完全同构**：--settings 的 env 块（主通道）+ 进程
+// 环境（冗余副本）。
+//
+// **这是对外契约**：变量名与 URL 的形态都不能随便改，改名 / 改形态按 breaking
+// change 处理（会静默弄坏所有仓库外的消费方）。名字同样**不能带凭证特征**
+// （TOKEN / KEY / SECRET / PASSWORD）——Claude Code 的 subprocess scrub 会把
+// 凭证类变量从子进程环境里删掉。
+//
+// 它**不承载**额度的生效语义：额度数据由 daemon 周期刷新写进本地数据文件，
+// 这个变量只告诉消费方"去哪儿读"。
+const EnvQuotaURL = "CCL_QUOTA_URL"
+
 // Info 提供商概要信息。
 type Info struct {
 	Name  string // 文件名去掉 .json

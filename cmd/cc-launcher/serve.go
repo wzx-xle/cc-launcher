@@ -191,6 +191,11 @@ func runServe(args []string) error {
 		OnActivate: func(provider string) error {
 			return notifyActivate(activateCh, provider, filepath.Join(stateBaseDir, "providers"))
 		},
+		// 只读额度端点（GET /ccl/quota?provider=X）：状态栏用它**零进程**读额度
+		//（Windows 上起进程 p50 170ms，状态栏的预算只有 250ms）。
+		OnQuota: func(name string) (any, int) {
+			return serveQuota(stateBaseDir, name)
+		},
 	})
 
 	// Signal handler：SIGTERM → graceful shutdown；SIGINT 同样。
@@ -422,6 +427,51 @@ func providerExists(providersDir, name string) bool {
 	}
 	_, err := os.Stat(filepath.Join(providersDir, name+".json"))
 	return err == nil
+}
+
+// serveQuota 实现 daemon 的只读额度端点（GET /ccl/quota?provider=X）。
+//
+// **为什么要它**：状态栏读额度时**起进程太慢**——Windows 上 `ccl quota --json`
+// 的 p50 是 170ms，而状态栏的调用预算只有 250ms（忙的时候必然超时 → 静默
+// 回落成 Claude Code 自己的 rate_limits）。走 daemon 的回环端点只要几 ms。
+//
+// 状态码：
+//   - 200 有额度（文档与 `ccl quota --json` **逐字段同构**）
+//   - 404 provider 未配置 / 没有额度记录
+//   - 422 provider 没有额度接口（与"没记录"分开，消费方才分得清"这厂商没
+//     额度"与"数据还没准备好"）
+//
+// **白名单校验**：provider 名来自 HTTP 查询串 → 先过 providerExists（挡路径
+// 穿越），再读它的配置。
+//
+// **读数据文件必须走 quota.Store.Load()**（不能裸 os.ReadFile）：Windows 上
+// daemon 写文件用 tmp+rename，替换瞬间目标可能短暂不存在 → Store 里有 5ms
+// 重试兜住它。
+func serveQuota(baseDir, name string) (any, int) {
+	providersDir := filepath.Join(baseDir, "providers")
+	if !providerExists(providersDir, name) {
+		return fmt.Sprintf("提供商 %q 不存在", name), http.StatusNotFound
+	}
+	ref, hasQuota, err := quota.LoadProviderRef(providersDir, name)
+	if err != nil {
+		return fmt.Sprintf("读提供商 %q 的配置失败: %v", name, err), http.StatusNotFound
+	}
+	if !hasQuota {
+		return fmt.Sprintf("提供商 %q 没有额度接口", name), http.StatusUnprocessableEntity
+	}
+	file, err := quota.NewStore(baseDir).Load()
+	if err != nil {
+		return fmt.Sprintf("读额度数据失败: %v", err), http.StatusInternalServerError
+	}
+	entry, ok := file.EntryFor(name)
+	if !ok {
+		return fmt.Sprintf("还没有 %q 的额度记录", name), http.StatusNotFound
+	}
+	out, ok := quota.BuildOutput(ref, entry, time.Now())
+	if !ok {
+		return fmt.Sprintf("还没有 %q 的额度记录", name), http.StatusNotFound
+	}
+	return out, http.StatusOK
 }
 
 // markRecordedActiveProvider 把 state.json 里记录的 active provider 标记为活跃。

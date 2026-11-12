@@ -7,11 +7,14 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
+	neturl "net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"cc-launcher/internal/collector"
 	"cc-launcher/internal/provider"
 	"cc-launcher/internal/quota"
 	"cc-launcher/internal/state"
@@ -22,8 +25,9 @@ const quotaHelp = `用法: ccl quota [选项]
 
 显示某个 provider 的额度（窗口限额 / 令牌额度 / 余额）。
 
-**默认只读本地数据文件，一次网络都不发**——数据由 ` + "`ccl serve`" + ` 周期刷新
-（默认 60 秒）写入 ~/.cc-launcher/quota.json。加 --refresh 才会联网查一次。
+**默认只读本机数据，一次网络都不发**——daemon（` + "`ccl serve`" + `）在跑时经它的
+回环端点读，否则直读数据文件（数据由 daemon 周期刷新，默认 60 秒，写入
+~/.cc-launcher/quota.json）。加 --refresh 才会联网查一次。
 
 选项:
     --provider <名字>   要查询的 provider（缺省：环境变量 CCL_PROVIDER → state.json 的 active provider）
@@ -77,24 +81,80 @@ func registerQuotaFlags(fs *flag.FlagSet) quotaFlags {
 // 同模式：退出码是**契约的一部分**，不能靠 return error 表达）。
 var quotaExitFn = func(code int) { os.Exit(code) }
 
-// quotaOutput 是 `ccl quota --json` 的输出结构。
+// quotaDaemonBaseURL 是 ccl quota 读额度时用的 daemon 基地址（测试可覆盖）。
+var quotaDaemonBaseURL = daemonBaseURL
+
+// quotaEndpointTimeout 是读 daemon 额度端点的超时。
 //
-// 字段是**对外契约**（仓库外的状态栏脚本消费它）：
-//   - fetched_at 让消费方不必读数据文件就知道数据多旧
-//   - stale 由 ccl 判定（消费方不必自己算阈值）
-//   - 每个维度省略自己没有的字段（不写 null）
-type quotaOutput struct {
-	Provider   string            `json:"provider"`
-	Source     string            `json:"source"`
-	Stale      bool              `json:"stale"`
-	FetchedAt  int64             `json:"fetched_at"`
-	Dimensions []quota.Dimension `json:"dimensions"`
+// **500ms**：回环请求是毫秒级，500ms 足够宽松；又不至于在 daemon 假死时把
+// 命令卡住（状态栏约每 300ms 调一次 → 卡住就是 abort 风暴）。
+const quotaEndpointTimeout = 500 * time.Millisecond
+
+// quotaFetchOutcome 是"走 daemon 端点"的结果。
+type quotaFetchOutcome int
+
+const (
+	// quotaFetchFallback：端点不可用（连不上 / 超时 / 响应不是端点给的）
+	// → **回落直读本地数据文件**。
+	quotaFetchFallback quotaFetchOutcome = iota
+	// quotaFetchGot：拿到了额度文档。
+	quotaFetchGot
+	// quotaFetchNoRecord：端点说没有额度记录（404）→ 退出码 1。
+	quotaFetchNoRecord
+	// quotaFetchNoInterface：端点说该 provider 没有额度接口（422）→ 退出码 2。
+	quotaFetchNoInterface
+)
+
+// fetchQuotaFromDaemon 向 daemon 的只读额度端点要额度。
+//
+// **为什么优先走它**：daemon 在跑时，命令与状态栏拿到的是**同一份数据、同一
+// 时刻的 stale 判定**；而且状态栏走的就是这条通道（零进程，几 ms）。
+//
+// **回落**：端点不可达 / 超时 / 响应不是端点给的 → 直读本地数据文件（同一个
+// 文件、同一份组装逻辑 → 输出逐字节一致）。**回落是常态而非异常**——daemon
+// 可能压根没跑（`ccl quota --refresh` 逃生舱的场景）。
+func fetchQuotaFromDaemon(baseURL, providerName string) (quota.Output, quotaFetchOutcome) {
+	url := fmt.Sprintf("%s%s?provider=%s", baseURL, collector.QuotaPath, neturl.QueryEscape(providerName))
+	client := &http.Client{Timeout: quotaEndpointTimeout}
+	resp, err := client.Get(url)
+	if err != nil {
+		return quota.Output{}, quotaFetchFallback
+	}
+	defer resp.Body.Close()
+
+	// **只认带端点标记头的响应**：daemon 可能是**旧版本**的进程（ccl 升级了
+	// 但 daemon 还在跑）→ 那时没有这个路径，mux 会回 404 "404 page not
+	// found"。把它当成"没有额度记录"会让状态栏显示成空的——必须回落直读
+	// 本地文件（那里有数据）。
+	if resp.Header.Get(collector.QuotaEndpointHeader) != collector.QuotaEndpointHeaderValue {
+		return quota.Output{}, quotaFetchFallback
+	}
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		var out quota.Output
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			return quota.Output{}, quotaFetchFallback
+		}
+		return out, quotaFetchGot
+	case http.StatusNotFound:
+		return quota.Output{}, quotaFetchNoRecord
+	case http.StatusUnprocessableEntity:
+		return quota.Output{}, quotaFetchNoInterface
+	default:
+		return quota.Output{}, quotaFetchFallback
+	}
 }
 
 // runQuota 是 `ccl quota` 的入口。
 //
-// **默认纯本地读**：状态栏命令实测生成过程中约每 300ms 被调一次，读取侧
-// 一次网络都不能发（否则会落进 Claude Code 的 300ms 去抖窗口 + abort 风暴）。
+// **默认只读本机数据**：状态栏命令实测生成过程中约每 300ms 被调一次，读取侧
+// **一次向外网的请求都不能发**（否则会落进 Claude Code 的 300ms 去抖窗口 +
+// abort 风暴，更会打扰厂商的额度接口）。
+//
+// 读的是**同一个本地数据文件**——daemon 在跑时经它的回环端点读（与状态栏
+// 同源同构），否则直读文件。两条路径共用同一份组装逻辑（quota.BuildOutput）
+// → 输出逐字节一致。
 func runQuota(args []string) error {
 	fs := flag.NewFlagSet("quota", flag.ContinueOnError)
 	// 自己处理 help 与错误文案：flag package 默认会把 "Usage of quota:" 打到
@@ -158,6 +218,31 @@ func runQuota(args []string) error {
 		fetchedAt int64
 	)
 
+	// **优先走 daemon 端点**：daemon 在跑时，命令与状态栏拿到的是**同一份
+	// 数据、同一时刻的 stale 判定**（状态栏走的就是这条通道）。
+	//
+	// `--refresh` 不走它：那条路径自己联网查 → 写文件 → 直接组装（刚查到的
+	// 数据，不绕 daemon）。
+	//
+	// 端点不可达 / 超时 / 响应不是端点给的 → **回落直读本地文件**（同一个
+	// 文件、同一份组装逻辑 → 输出逐字节一致）。
+	if !*fl.refresh {
+		out, outcome := fetchQuotaFromDaemon(quotaDaemonBaseURL(), name)
+		switch outcome {
+		case quotaFetchGot:
+			return printQuotaResult(out, quota.IntervalOf(ref), *fl.asJSON)
+		case quotaFetchNoRecord:
+			fmt.Fprintf(os.Stderr, "还没有 %q 的额度记录（跑 `ccl serve` 或 `ccl quota --refresh` 抓一次）\n", name)
+			quotaExitFn(1)
+			return nil
+		case quotaFetchNoInterface:
+			fmt.Fprintf(os.Stderr, "提供商 %q 没有额度接口\n", name)
+			quotaExitFn(2)
+			return nil
+		}
+		// quotaFetchFallback → 继续走下面的本地文件路径。
+	}
+
 	if *fl.refresh {
 		// 联网查一次 → 写回数据文件 → 照常输出（输出的是**刚查到的值**）。
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -216,30 +301,24 @@ func runQuota(args []string) error {
 		fetchedAt = entry.FetchedAt
 	}
 
-	// stale 判定：用条目的 fetched_at 算 age，超过该 provider 的
-	// refreshInterval（**兜底 60 秒**）→ 标 stale。
-	//
-	// 阈值额外给 1 秒容忍（quota.StaleTolerance）：fetched_at 只有秒精度，
-	// 取整误差最多 +1 秒 → 阈值正好等于周期时，稳态下每次刷新前约 1 秒会
-	// 误报 stale（状态栏上表现为 "(stale)" 偶尔闪一下）。
-	interval := quota.DefaultRefreshInterval
-	if ref.Config != nil {
-		interval = ref.Config.Interval()
-	}
-	stale := time.Since(time.Unix(fetchedAt, 0)) > interval+quota.StaleTolerance
-
-	out := quotaOutput{
-		Provider:   name,
+	// 组装对外文档（stale 判定在这里，命令与 daemon 端点共用同一份实现）。
+	out, ok := quota.BuildOutput(ref, quota.Entry{
 		Source:     source,
-		Stale:      stale,
-		FetchedAt:  fetchedAt,
 		Dimensions: dims,
-	}
-	if out.Dimensions == nil {
-		out.Dimensions = []quota.Dimension{}
+		FetchedAt:  fetchedAt,
+	}, time.Now())
+	if !ok {
+		fmt.Fprintf(os.Stderr, "还没有 %q 的额度记录（跑 `ccl serve` 或 `ccl quota --refresh` 抓一次）\n", name)
+		quotaExitFn(1)
+		return nil
 	}
 
-	if *fl.asJSON {
+	return printQuotaResult(out, quota.IntervalOf(ref), *fl.asJSON)
+}
+
+// printQuotaResult 打印额度文档（JSON 或人看的表格）。
+func printQuotaResult(out quota.Output, interval time.Duration, asJSON bool) error {
+	if asJSON {
 		data, err := json.MarshalIndent(out, "", "  ")
 		if err != nil {
 			return err
@@ -247,7 +326,6 @@ func runQuota(args []string) error {
 		fmt.Println(string(data))
 		return nil
 	}
-
 	printQuotaTable(out, interval)
 	return nil
 }
@@ -265,7 +343,7 @@ func detectSource(ref quota.ProviderRef) string {
 // printQuotaTable 打印给人看的额度表格。
 //
 // **绝对量与百分比都列**：窗口型看百分比，余额型只能看绝对量（无分母）。
-func printQuotaTable(out quotaOutput, interval time.Duration) {
+func printQuotaTable(out quota.Output, interval time.Duration) {
 	fmt.Printf("provider: %s\n", out.Provider)
 	if out.Source != "" {
 		fmt.Printf("来源: %s\n", out.Source)

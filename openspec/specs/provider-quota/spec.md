@@ -385,7 +385,9 @@ The data file MUST NOT keep an entry for a provider that no longer exists, and M
 
 ### Requirement: ccl reports the quota through a command that reads the local data file
 
-ccl MUST provide a command that reports the quota of a provider. The command MUST read the recorded quota from the local data file and MUST NOT make a request to the quota interface itself.
+ccl MUST provide a command that reports the quota of a provider. The command MUST read the recorded quota from the local data file — either by reading that file itself, or by asking the daemon, which reads that same file — and MUST NOT make a request to the quota interface itself.
+
+When the daemon is reachable, the command MUST obtain the quota through the daemon and MUST report the document the daemon serves, so that the command and a consumer that reads the quota over the daemon's endpoint report the same document for the same provider. When the daemon cannot be reached, the command MUST read the local data file itself and MUST report the same document it would have reported through the daemon.
 
 Its JSON output MUST carry the dimensions of the quota as a list, each with a kind, a duration where one is known, a used percentage where one can be derived, and a reset time where one is known. A dimension that could not be determined MUST be absent from the list rather than reported as an empty value.
 
@@ -403,7 +405,7 @@ A missing quota MUST NOT prevent the launch of Claude Code, and MUST NOT affect 
 - **WHEN** the command runs for a provider with a recorded quota
 - **THEN** its JSON output carries a `dimensions` list whose entries carry a `kind` and, where derivable, a `used_percentage`
 
-#### Scenario: the command makes no request
+#### Scenario: the command makes no request to a quota interface
 - **WHEN** the command runs
 - **THEN** it makes no request to any quota interface
 
@@ -434,6 +436,22 @@ A missing quota MUST NOT prevent the launch of Claude Code, and MUST NOT affect 
 #### Scenario: a missing quota does not block the launch
 - **WHEN** no quota has been recorded for the selected provider
 - **THEN** ccl reports the failure and the launch of Claude Code proceeds unaffected
+
+#### Scenario: the command reads the quota through the daemon when the daemon is reachable
+- **WHEN** the command runs for a provider with a recorded quota while the daemon is running
+- **THEN** the command obtains the quota from the daemon and reports the document the daemon serves
+
+#### Scenario: the command reads the quota itself when the daemon cannot be reached
+- **WHEN** the command runs for a provider with a recorded quota while the daemon is not running, or the daemon cannot be reached
+- **THEN** the command reads the local data file itself and reports the same document it would have reported through the daemon
+
+#### Scenario: the command does not report an absent quota because the daemon is down
+- **WHEN** the command runs for a provider with a recorded quota while the daemon cannot be reached
+- **THEN** the command exits with status 0 and prints the quota document
+
+#### Scenario: both paths agree on the document
+- **WHEN** the daemon serves a provider's quota and the quota command runs for that same provider
+- **THEN** the document the command prints carries the same fields and the same stale verdict as the document the daemon serves
 
 ### Requirement: ccl can refresh a provider's quota on demand
 
@@ -481,6 +499,8 @@ When ccl starts Claude Code with a selected provider, it MUST tell the daemon wh
 
 The declaration MUST NOT delay the launch of Claude Code, and a daemon that cannot be reached MUST NOT stop the launch.
 
+The daemon MUST accept the declaration only when it arrives over a loopback connection, and MUST refuse a declaration that arrives from a source address that is not a loopback address. The decision MUST be based on the address of the peer the daemon actually accepted the connection from, and MUST NOT be based on any header the request carries, because the daemon serves the endpoint directly and has no trusted forwarding chain.
+
 The daemon MUST treat a declared provider as recently active, and MUST refresh the quota pool of that provider in that cycle. A provider that becomes active this way MUST be queried without waiting for its refresh interval to elapse, when its recorded quota is older than that interval.
 
 The daemon MUST accept a provider name only when it names a provider that is configured, and MUST reject a name that names no configured provider.
@@ -500,4 +520,16 @@ The daemon MUST accept a provider name only when it names a provider that is con
 #### Scenario: an unknown provider name is rejected
 - **WHEN** the daemon receives a declaration for a name that matches no configured provider
 - **THEN** the daemon rejects it and queries no quota interface
+
+#### Scenario: a declaration from outside the loopback is refused
+- **WHEN** the daemon receives a declaration from a source address that is not a loopback address
+- **THEN** the daemon refuses the declaration and queries no quota interface
+
+#### Scenario: ccl's own declaration is still accepted
+- **WHEN** ccl declares the selected provider to the daemon it started on the same machine
+- **THEN** the daemon accepts the declaration and treats that provider as recently active
+
+#### Scenario: a forwarded address does not grant access
+- **WHEN** the daemon receives a declaration over a loopback connection but the request carries a header naming a non-loopback address as its origin
+- **THEN** the daemon accepts the declaration, because the header does not decide the answer
 
