@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-11-12 — quota-daemon-endpoint
+
+### Features
+- **daemon 新增只读额度端点** `GET /ccl/quota?provider=<名字>`：返回与 `ccl quota --json` **逐字段同构**的文档（`provider` / `source` / `stale` / `fetched_at` / `dimensions`），**只接受回环来源**。状态栏因此能**零进程**读额度（实测本机 HTTP 通道 **1.3 ms**）
+  - **为什么**：Windows 上 `ccl quota --json` 的耗时几乎全在**进程启动**（`cmd.exe(scoop shim)` → `cmd.exe(app\ccl.cmd)` → `cc-launcher.exe`，p50 **166~190ms** / max 252ms），而状态栏的调用预算只有 **250ms**——余量仅 60~80ms。系统繁忙时（Claude Code 刚启动、三个 hook 各起一个 node 进程、Defender 扫 18MB 的 exe）必然超时 → 脚本 catch → 回落到 Claude Code 自己的 `rate_limits` → **用户看到"额度显示成默认的用量"，而且只在忙的时候错**（闲下来 166ms 就对）。这就是"刚启动不对、等会就正常"的成因
+  - **只读**：不写数据文件、不触发刷新。数据仍由 daemon 周期刷新写进 `~/.cc-launcher/quota.json`
+  - **回环限制是必需的**：daemon 监听 `:4318` = **所有网卡**，不限的话局域网内任意机器都能读到本机额度余额。限回环**恰好等于**"本机进程本来就能直读数据文件"的边界，不引入新的本机暴露面
+- **新增对外环境变量 `CCL_QUOTA_URL`**（值 = `http://127.0.0.1:4318/ccl/quota`）：ccl 启动 Claude Code 时交付给消费方，交付方式与 `CCL_PROVIDER` **完全同构**（`--settings` 的 `env` 块为主通道 + 进程环境为冗余副本），"ccl 自己的键赢"的纪律不变，**无条件交付**（不因 daemon 没起来就不给——消费方连不上就自己回落）
+- **`ccl quota` 优先走 daemon 端点**，不可达时回落直读本地数据文件：两条路径读同一个文件、用同一份组装逻辑 → **输出逐字节一致**，退出码 0/1/2 的语义不变
+- **额度输出的组装逻辑搬到 `internal/quota`**（`Output` + `BuildOutput`）：命令与端点**共用同一份实现** → stale 判定（周期 + 1 秒容忍 + 读不到配置兜底 60 秒）只有一处，不会出现"命令说 stale、状态栏说不 stale"
+
+### Security
+- **`POST /ccl/activate` 收紧到只接受回环来源**（此前无鉴权）：daemon 是 ccl fork 出来的子进程（或用户在本机手动起的）→ 声明方必然与 daemon 同机 → **永远是回环来源**，收紧零风险。而不收紧的话，局域网内任意机器都能让 daemon 带着用户的 API key 去查其**已配置** provider 的额度端点
+- **判定只看连接的来源地址**（`RemoteAddr`），**不读任何请求头**：daemon 是裸 HTTP server，没有可信的转发链——看 `X-Forwarded-For` 等于把鉴权交给请求方
+- **`/v1/*`（OTel 协议端点）与 `/ui`、`/api/*`（看板）不受此限制**：OTel 的合法调用方可能是 WSL2 / 容器里的 Claude Code（WSL2 连 Windows 的 `localhost:4318` 走 NAT，源地址是虚拟网段**不是回环**）→ 一收紧遥测就断；看板本就要支持从别的机器打开（已有 token 保护）。**daemon 的监听地址保持 `:4318` 不变**，收紧只落在端点级
+
+### Compatibility
+- **新增对外契约 `CCL_QUOTA_URL`**：变量名与 URL 的形态都是对外契约，**改名 / 改形态按 breaking change 处理**（会静默弄坏仓库外的消费方）。名字不带凭证特征（`TOKEN`/`KEY`/`SECRET`/`PASSWORD`）——Claude Code 的 subprocess scrub 会把凭证类变量从子进程环境删掉
+- **`ccl quota --json` 的输出字段、退出码语义、"不向额度接口发请求"的纪律全部不变**：读取侧只读**本机**数据（daemon 可达时经回环端点，否则直读文件）——**回环 HTTP ≠ 向外网发请求**，原纪律的意图（不打扰厂商的额度接口）不变
+- **旧版本 daemon 在跑时行为不变**：那时没有 `/ccl/quota` 这个路径（mux 回 `404 page not found`）→ 客户端识别出"这不是端点的应答"→ **回落直读本地数据文件**（不误报"没有额度记录"）。端点的每个响应都带 `X-Ccl-Endpoint: quota` 标记头，用来区分"端点说没有记录"与"端点根本不存在"
+- **`ccl quota --refresh` 的路径不变**：它自己联网查 → 写文件 → 直接组装（刚查到的数据，不绕 daemon）
+
+### Docs
+- **`docs/provider-quota.md` 增补端点契约与 `CCL_QUOTA_URL` 的契约**，并给出**可直接粘贴的状态栏脚本**（Node 内置 http 的 HTTP 优先 + 命令兜底双通道）；两条通道的输出同构 → **消费方的解析逻辑一行都不用改**
+- **`docs/provider-name-env.md` 加同族变量的交叉引用**；**README 额度一节**补一句"状态栏可以零进程读额度"
+
+### OpenSpec
+- `quota-daemon-endpoint`：daemon 的只读额度端点 + `CCL_QUOTA_URL` 的交付契约 + `/ccl/*` 的回环收紧
+
 ## [0.22.2] - 2026-11-11 — install-command-name
 
 ### Fixes
