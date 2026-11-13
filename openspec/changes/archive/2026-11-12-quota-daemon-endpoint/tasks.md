@@ -63,4 +63,26 @@
 - [x] 7.3 **变异验证**：把回环判定改成恒真 → 3.5 的非回环测试必须红（activate 与 quota 两处都要红）；把 `BuildOutput` 的 stale 阈值改掉 → 1.4 的 stale 测试必须红
 - [x] 7.4 Linux 真机：起 daemon → `curl "http://127.0.0.1:4318/ccl/quota?provider=<name>"` 的返回与 `ccl quota --json` **逐字段一致**；`/ccl/activate` 从非回环来源被拒；从非回环地址访问 `/v1/metrics` **仍被服务**（证明收紧没蔓延）
 - [x] 7.5 Linux 真机：真 ccl 启动 → serve.log 里有 `provider "xxx" 激活，立即刷新一轮`（证明收紧没打断 ccl 自己的声明）；检查交付的 settings JSON 的 env 块含 `CCL_QUOTA_URL`；真 claude 消费该文件 → statusLine 子进程读得到该变量
-- [ ] 7.6 Windows 复测：状态栏改为 HTTP 读取后，额度**稳定显示**（不再随系统繁忙回落）；`ccl quota --json` 的耗时分布仍记录在案（说明为什么需要零进程通道）
+- [x] 7.6 Windows 复测：状态栏改为 HTTP 读取后，额度**稳定显示**（不再随系统繁忙回落）；`ccl quota --json` 的耗时分布仍记录在案（说明为什么需要零进程通道）
+      —— **实测（2026-11-13，Windows 11 24H2 / node v22.23.2 / scoop 装在 D:\Scoop，工具 = bin/statusline-probe.js，n=30）**：
+      - 通道耗时：HTTP 回环端点 p50 **6.1ms** / p95 7.7ms / max 12.9ms（0/30 超时）；
+        命令 `ccl quota --json` p50 **263ms** / p95 272ms / max 272ms（**30/30 全部超时**）
+        → 命令通道**常态越过 250ms 预算**（2026-11-12 早先抽样是 p50 166~190ms / max 252ms，
+        只看出"忙的时候会超时"；30 次采样才看清是常态失败）
+      - 状态栏实测（喂带哨兵 rate_limits 的 stdin，判据 = 额度段是否等于不可能撞上的
+        哨兵 4321%）：**空闲 30/30、繁忙（8 个 CPU hog）30/30 都读到 ccl 的额度，0 次回落**
+        → 额度**稳定显示** ✓
+      - **遗留**：状态栏**整体** p50 = 286ms（空闲）/ 314ms（繁忙），**超过 250ms 预算**——
+        但额度通道只占 6ms，剩下的花在 node 启动与 `git branch --show-current` 子进程上。
+        额度数据是对的（30/30 正确），但 Claude Code 仍可能因超时 abort 这次调用 →
+        **下一个瓶颈是状态栏脚本自身，不是 ccl**（见 docs/provider-quota.md 的诊断脚本一节）
+      - **复测后的收尾（2026-11-13 第二轮）**：把状态栏脚本的 `git branch --show-current`
+        换成**零进程读 `.git/HEAD`**（`bin/patch-statusline-git.js`，幂等 + 备份 + 语法自检；
+        普通仓 / worktree / detached HEAD / 非 git 目录四个场景与 git 命令输出**逐一致**），
+        并把 probe 的状态栏测量改成**异步 spawn**（spawnSync 的同步包装在 Windows 上要
+        ~117ms，是测量工具自身的开销）→ 状态栏整体 **307.6ms → 140.7ms（空闲，进 250ms
+        预算，余量 109ms）**；繁忙（8 个 CPU hog）258.4ms，只超 8.4ms
+        - 最终构成：**node 启动 128.5ms + 额度通道 7.5ms + git 零进程 0.24ms**（≈140.7ms）
+        - 剩下的 128.5ms 是 **node 启动本身**（Windows 上起任何未签名 exe 都要付 Defender
+          深扫）→ **ccl 这边已无优化空间**（额度通道只剩 7.5ms）；要再进一步只能换掉
+          node 写状态栏（超出本 change 范围）

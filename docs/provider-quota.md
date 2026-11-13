@@ -180,28 +180,61 @@ ccl quota --refresh --json
 状态栏是 ccl 额度的唯一消费者，而它的调用节奏极其苛刻：Claude Code 的状态栏
 约每 **300ms** 刷新一次，每次都是**新起的进程**。
 
-走命令的问题不在"读"，在"起进程"。Windows 实测（2026-11-12）：
+走命令的问题不在"读"，在"起进程"。Windows 实测（`bin/statusline-probe.js`，
+2026-11-13，Windows 11 24H2 / node v22.23.2 / scoop 装在 `D:\Scoop`）：
 
-| 调用方式 | 耗时 |
-|---|---|
-| `ccl quota --json`（node `execSync`，状态栏的真实路径） | p50 **166~190ms**，max **252ms** |
-| 同一命令在 PowerShell 里直接调 | p50 **266ms**，max **299ms** |
+| 调用方式 | p50 | p95 | max | 超时（>250ms） |
+|---|---|---|---|---|
+| `ccl quota --json`（node `execSync`，状态栏的真实路径） | **263ms** | **272ms** | 272ms | **30/30** |
+| 直接跑 `cc-launcher.exe`（绕过 cmd.exe 两层） | **259ms** | 270ms | 270ms | 30/30 |
+| HTTP 回环端点（零进程） | **6.1ms** | 7.7ms | 12.9ms | 0/30 |
 
-耗时的**全部**在进程启动上：`cmd.exe(scoop shim)` → `cmd.exe(app\ccl.cmd)` →
-`cc-launcher.exe`。而 `ccl quota` 本身已经是纯本地读（读一个 JSON 文件），
-毫秒级。
+（2026-11-12 早先的抽样是 p50 166~190ms / max 252ms —— 那次只看出"忙的时候
+会超时"；2026-11-13 用 30 次采样重测，**30/30 全部超时** → 这条路径在 Windows
+上是**常态失败**，不是偶发。）
 
-状态栏脚本给这次调用设了 `timeout: 250`——**余量只有 60~80ms**。系统繁忙时
-（Claude Code 刚启动、用户配的三个 hook 各起一个 node 进程、Defender 实时扫描
-18MB 的 exe 与上百 MB 的 node.exe、daemon 正在写额度数据文件）→ 这次调用必然
-超过 250ms → 脚本 `catch` → 返回 null → **状态栏回落到 Claude Code 自己的
-`rate_limits` 槽位**。
+**贵在"起进程"本身，而不在 cmd.exe 那两层**：直调 `cc-launcher.exe`（完全绕开
+`cmd.exe(scoop shim)` → `cmd.exe(app\ccl.cmd)`）是 259ms，走 shim 是 263ms——
+**只差 3ms**。也就是说 **scoop 的两层 cmd.exe 几乎不花时间**，真正贵的是
+**Windows Defender 对未签名 18MB exe 的实时深扫**（每起一个进程都付一次）。
+而 `ccl quota` 本身已经是纯本地读（读一个 JSON 文件），毫秒级。
+
+> **推论（Windows 上最硬的约束）**：任何"起一个进程"的读额度方案都不可能守住
+> 250ms 预算——cc-launcher.exe 259ms、git.exe ~178ms、node.exe 88ms，**每个
+> 未签名 exe 都要被 Defender 扫一遍**。只有**零进程**（常驻 daemon + 回环
+> HTTP）能进预算。
+
+状态栏脚本给这次调用设了 `timeout: 250`——**命令通道的 p50 已经越过它**。系统
+繁忙时（Claude Code 刚启动、用户配的三个 hook 各起一个 node 进程、Defender
+实时扫描 18MB 的 exe 与上百 MB 的 node.exe、daemon 正在写额度数据文件）→ 这次
+调用必然超过 250ms → 脚本 `catch` → 返回 null → **状态栏回落到 Claude Code 自己
+的 `rate_limits` 槽位**。
 
 用户看到的就是"额度显示成默认的用量"，而且**只在忙的时候错**——闲下来
 （166ms）就对。这解释了"刚启动不对、等会就正常"。
 
-**daemon 是常驻的**：HTTP 回环请求是**毫秒级**，且**不落进 300ms 的去抖
-窗口**（它不是"新起的进程"，只是一次连接）。
+**daemon 是常驻的**：HTTP 回环请求是**毫秒级**（本机实测 6.1ms，Linux 上
+1.1ms），且**不落进 300ms 的去抖窗口**（它不是"新起的进程"，只是一次连接）——
+余量 240ms 以上，是 250ms 预算的 **33 倍**。
+
+> **顺带一提：状态栏脚本自己也要零进程**。额度换成端点后，Windows 上状态栏
+> **整体**还有 307.6ms（其中 ~117ms 是测量工具 spawnSync 的同步开销）。构成拆开
+> 看：node 启动 **128.5ms** + 额度通道 7.5ms + **`git branch --show-current`
+> 子进程 61.3ms**（git.exe 同样被 Defender 扫）。把 git 那段换成**直接读
+> `.git/HEAD`**（零进程，0.24ms）之后：
+>
+> | 场景 | 状态栏整体 p50 | 250ms 预算 |
+> |---|---|---|
+> | 空闲 | **140.7ms** | ✓ 余量 109ms |
+> | 繁忙（8 个 CPU hog） | 258.4ms | ⚠ 超 8.4ms（node 启动在 CPU 被抢时从 128ms 涨到 ~250ms） |
+>
+> 剩下的 **128.5ms 是 node 启动本身** —— 技术栈固有成本（Windows 上起任何
+> 未签名 exe 都要付 Defender 深扫），**ccl 这边已经无能为力**（额度通道只剩
+> 7.5ms）。要再进一步只能换掉 node 写状态栏。
+>
+> 用 `bin/statusline-probe.js --cwd <项目目录>` 能量出这几个数；
+> `bin/patch-statusline-git.js` 能把状态栏的 git 子进程改成零进程（幂等、
+> 带备份与语法自检）。
 
 ### 端点契约
 
@@ -611,6 +644,35 @@ interval` 递推，不用"now + interval"重算——后者会把刷新耗时累
 **调用极其频繁是常态**：状态栏命令在生成过程中约每 300ms 被调一次（每秒 3.3
 次）→ 设计必须假设这一点。**读取侧只读本机数据**（走回环端点或直读文件），
 **一次向外网的请求都不发**。
+
+### 怎么验证额度通道（诊断脚本）
+
+状态栏的额度对不对、够不够快，用 `bin/statusline-probe.js` 量：
+
+```bash
+node bin/statusline-probe.js                    # 默认 20 次采样、6 个 CPU hog
+node bin/statusline-probe.js --runs 30 --load 8
+node bin/statusline-probe.js --provider minimax-m3 --json
+```
+
+它输出三块：
+
+1. **两条通道的耗时分布**（p50 / p95 / max / 超时次数）——命令那条走的是
+   **状态栏的真实路径**（Windows 上是 `cmd.exe(scoop shim)` → `cmd.exe(app\ccl.cmd)`
+   → `cc-launcher.exe`）；给出 `--exe <真实 exe 路径>` 可加测"直调 exe"，
+   用来证明耗时全在进程启动那一层
+2. **状态栏实测**：喂给 `statusline.js` 一份 `rate_limits` 塞着**哨兵值**
+   （4321% / 8765% —— 真实百分比到不了 100 以上，所以永远撞不上）的 stdin JSON，
+   看额度段显示的是 ccl 的额度还是回落到 Claude Code 自己的 `rate_limits`；
+   **空闲**与**繁忙**（起几个烧 CPU 的子进程）各测一轮
+3. **距离 250ms 预算的余量**
+
+**有回落时退出码是 1**（便于脚本 / CI 判定）。
+
+> **怎么判"回落了"**：另跑一次**不给 `CCL_PROVIDER`** 的作对照——没有 provider
+> 名时状态栏必然回落 `rate_limits`。于是"带 provider 名那次"的额度段 ≠ 哨兵
+> → 走的是 ccl 的额度通道；= 哨兵 → 回落了。不依赖"ccl 的额度恰好是某个数"
+> 这种脆弱假设。
 
 ## 外部行为实测结论
 
