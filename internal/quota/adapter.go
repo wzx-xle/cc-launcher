@@ -61,6 +61,7 @@ var adapters = []Adapter{
 	minimaxAdapter{},
 	deepseekAdapter{},
 	newapiAdapter{},
+	codex2apiAdapter{},
 }
 
 // AdapterByName 按名字（provider 配置里的 source 字段）找 adapter。

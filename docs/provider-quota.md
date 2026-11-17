@@ -459,14 +459,15 @@ Claude Code。
 | `minimax` | host 剥掉 `api.`/`www.` 后**恰好等于** `minimax.cn` / `minimax.io` | `https://www.<host>/v1/token_plan/remains` | body 的 `base_resp.status_code == 0`（**错误也返回 HTTP 200**） |
 | `deepseek` | host 剥掉 `api.`/`www.` 后**恰好等于** `deepseek.com` | `https://<host>/user/balance` | HTTP 状态码（401 = key 不对） |
 | `newapi` | **只能显式配 `source`**（任何 host 都可能是它） | `<base_url>/api/usage/token/` | body 的 `code == true` |
+| `codex2api` | **只能显式配 `source`**（自建服务，跑在任意 host 上） | `<base_url>/api/key-usage/summary` | HTTP 状态码（404 = 服务端关了公开用量页） |
 
 **识别规则为什么这么严**：用"包含 minimax"会把 `minimax-proxy.corp.example`
 这类自建域名误判成 MiniMax，推出一个不存在的端点——**识别错比识别不到更
 糟**（识别错 = 拿着你的 API key 去打一个不存在的地址）。
 
-**端点推导是 per-adapter 的**，不是全局规则：三家的规律完全不同（MiniMax 换
-子域、DeepSeek 同主机换路径、New API 同前缀加后缀）。任何全局规则都会推出
-错端点。
+**端点推导是 per-adapter 的**，不是全局规则：四家的规律完全不同（MiniMax 换
+子域、DeepSeek 同主机换路径、New API 同前缀加后缀、codex2api 同前缀加另一
+个后缀）。任何全局规则都会推出错端点。
 
 ### 代理
 
@@ -685,6 +686,7 @@ node bin/statusline-probe.js --provider minimax-m3 --json
 | MiniMax | `www.<host>/v1/token_plan/remains` | `base_resp.status_code == 0` | **HTTP 200 也可能是错误**（`1004` 登录失败 / `2049` key 无效） |
 | DeepSeek | `<host>/user/balance` | HTTP 状态码 | **可能是纯文本**（无 Authorization 头时 `Authentication Fails (governor)`） |
 | New API 系 | `<base_url>/api/usage/token/` | body 的 `code == true` | 认证层 `{"error":{…,"type":"new_api_error"}}` + 401；API 层 `{"code":false,"message":…}` |
+| codex2api（**2026-11-17 实测**，v3.1.6） | `<base_url>/api/key-usage/summary` | HTTP 状态码 | `{"error":"API Key 自助用量页未启用"}` + 404；`{"error":"账号用量查询未启用"}` + 404（另一个端点） |
 
 各家的响应形状（实测样本见 design.md）：
 
@@ -697,6 +699,27 @@ node bin/statusline-probe.js --provider minimax-m3 --json
 - **New API**：`total_granted` 是**建令牌时设的上限**（分母），`total_used` 是
   已用，`total_available` 是剩余；三者**代数自洽**（granted - used =
   available）；单位换算除以 `quotaPerUnit`（默认 500000）
+- **codex2api**：只取 `key` 对象里的三个数 —— `quota_used`（已用）、
+  `quota_limit`（总额度）、`quota_limit == 0` 表示**无限额度**（不派生百分比）。
+  **字段口径别搞混**（上游源码 `database/postgres.go`）：每次请求按 `user_billed`
+  累加时 `quota_used` 与 `total_used` **同步涨**，但 `ResetAPIKeyQuota` **只清
+  `quota_used`**（`total_used` 永不清零）→ `quota_used` = **自上次手动重置以来
+  的累计**（"配额周期"由管理员点重置才换，**没有天/周的自然周期**），
+  `total_used` = **历史总花费**。两者口径不同，**只能用 `quota_used` 配
+  `quota_limit`**（上游的额度耗尽判定就是 `QuotaLimit > 0 && QuotaUsed >=
+  QuotaLimit`）；混用会算出假百分比。`total_used` 只进 `dimension.raw`。
+  维度**不填重置时间**：配额周期结束于管理员手动重置的那一刻，不可知
+- **codex2api 的自助接口只有三个端点值得知道**（实测）：
+  - `GET /api/key-usage/summary`（别名 `/me`）—— key 级用量 + 自助统计报告
+    （`usage.windows` 里 today/5h/7d/30d 是**该 key 最近 N 小时花掉的钱**）
+  - `GET /api/key-usage/accounts` —— **上游 ChatGPT 账号**的 5h/7d 限额
+    百分比（`usage_percent_5h` / `usage_percent_7d`），**默认被管理员关掉**
+    （实测 404「账号用量查询未启用」）→ 要用得管理员在后台开「账号用量查看」
+  - `GET /api/image-studio/quota` —— 生图门户额度，与文本 provider 无关
+- **codex2api 的流量窗口没有分母**：`usage.windows.last_5h` 是"最近 5 小时花了
+  多少钱"，**不是**"5 小时限额用了百分之几"（硬上限在上游 ChatGPT 账号那边，
+  不在 key 上）→ **不映射成额度维度**。硬塞进 `window` 维度画不出条形图，塞进
+  `balance` 维度方向又反了（余额是剩余、额度是已用）
 
 ### 厂商改了字段怎么办
 
@@ -724,3 +747,11 @@ node bin/statusline-probe.js --provider minimax-m3 --json
   （只见 `1`）：当前**不解释**，原值进 `dimension.raw`
 - **New API 的 API 层失败体形状未实测**：需同时容忍 `code:false` 与
   `error` 对象两种
+- **codex2api 的 `key.status` 取值未特殊处理**（实测见过 `active`；上游还有
+  `expired` / `quota_exhausted`）——当前**原值进 `dimension.raw`**，不据此改
+  维度语义（key 过期时额度数字仍然是事实）
+- **codex2api 的无限额度（`quota_limit == 0`）在状态栏显示 `--`**：维度数据
+  本身是对的（`used` 有值、`unlimited: true`），是**消费方**的渲染选择——没有
+  分母就没有百分比，状态栏脚本没有"无限额度时显示已用金额"的分支。要显示
+  出来有两条路：服务端给 key 配一个金额上限（`quota_limit`），或消费方加一
+  条 fallback。**ccl 侧不改**——保持对外契约不变是这个设计的直接收益

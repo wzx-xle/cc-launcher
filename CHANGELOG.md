@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Features
+- **新增 codex2api 额度 adapter**（provider 配置里写 `"quota": {"source": "codex2api"}`）：读 codex2api 的 **API Key 自助用量接口** `GET <base_url>/api/key-usage/summary`（Bearer 鉴权），输出**一个**额度维度——key 级金额预算（`key.quota_used` 已用 / `key.quota_limit` 总额度，单位 USD）
+  - **识别靠显式配 `source`**：codex2api 是自建服务，跑在任意 host 上（实测是裸 IP + 端口），没有任何可据以识别的主机特征。**识别错比识别不到更糟**（识别错 = 拿着用户的 API key 去打一个不是 codex2api 的地址）→ `Match()` 恒 false，与 New API 同款处置
+  - **字段口径别搞混**（上游源码 `database/postgres.go`）：每次请求按 `user_billed` 累加时 `quota_used` 与 `total_used` **同步涨**，但 `ResetAPIKeyQuota` **只清 `quota_used`**（`total_used` 永不清零）→ `quota_used` = **自上次手动重置以来的累计**（"配额周期"由管理员点重置才换，**没有天/周的自然周期**），`total_used` = **历史总花费**。**只能用 `quota_used` 配 `quota_limit`**（上游的额度耗尽判定就是 `QuotaLimit > 0 && QuotaUsed >= QuotaLimit`）——混用会算出假百分比；`total_used` 只进 `dimension.raw` 供排查
+  - **`quota_limit == 0` = 无限额度** → 维度标记 `unlimited`，**不派生百分比**（没有上限就没有分母）
+  - **不填重置时间**：配额周期结束于管理员手动重置那一刻，不可知——填 `last_reset_at`（那是**过去**的时刻）会让人以为额度马上要恢复
+  - **summary 里的 5h/7d 流量窗口不映射成额度维度**：那是"最近 5 小时**花了多少钱**"，**没有分母**（硬上限在上游 ChatGPT 账号那边，不在 key 上）→ 塞进 `window` 画不出条形图，塞进 `balance` 方向又反了（余额是剩余、额度是已用）。要真正的 ChatGPT 5h/7d 限额百分比得走 `/api/key-usage/accounts`（**服务端默认关掉**，需管理员开「账号用量查看」）
+  - **降级不崩**：404（服务端关了公开用量页）/ 厂商改字段 / 解析失败 → 刷新失败 → **保留上一次的额度条目**（自动 stale），**绝不影响 Claude Code 启动**；429 走既有退避框架
+
+### Docs
+- **`docs/provider-quota.md`**：adapter 表补 codex2api 一行；「外部行为实测结论」补 codex2api 的端点、响应形状、**字段口径**，以及另两个自助端点（`/api/key-usage/accounts` = 上游账号的 5h/7d 限额百分比，默认被管理员关掉；`/api/image-studio/quota` = 生图门户额度，与文本 provider 无关）；「已知偏差」记两条——`key.status` 取值未特殊处理（原值进 raw）；**无限额度时状态栏显示 `--` 是消费方的渲染选择，不是数据问题**（没有分母就没有百分比）
+
+### OpenSpec
+- `quota-codex2api-adapter`：codex2api 的额度 adapter（端点推导 / 鉴权 / 字段口径 / 无限额度 / 降级）
+
 ## [0.23.0] - 2026-11-12 — quota-daemon-endpoint
 
 ### Features

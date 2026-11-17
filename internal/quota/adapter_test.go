@@ -2,6 +2,7 @@ package quota
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -30,9 +31,15 @@ func TestEndpointDerivation(t *testing.T) {
 		{newapiAdapter{}, "https://one.example.com/api/llm/console/chat", "https://one.example.com/api/llm/console/chat/api/usage/token/", false},
 		// 尾斜杠规范化：拼接前去掉 base_url 的尾斜杠
 		{newapiAdapter{}, "https://one.example.com/api/llm/console/chat/", "https://one.example.com/api/llm/console/chat/api/usage/token/", false},
+		// codex2api：同前缀 + 固定后缀（公开自助用量页）
+		{codex2apiAdapter{}, "http://49.51.34.139:8317", "http://49.51.34.139:8317/api/key-usage/summary", false},
+		{codex2apiAdapter{}, "http://49.51.34.139:8317/", "http://49.51.34.139:8317/api/key-usage/summary", false},
+		// base_url 里的路径前缀保留（反代到子路径的部署）
+		{codex2apiAdapter{}, "https://gw.example.com/codex2api", "https://gw.example.com/codex2api/api/key-usage/summary", false},
 		// 识别不出来 → 推导不出端点
 		{minimaxAdapter{}, "https://minimax-proxy.corp.example/anthropic", "", true},
 		{deepseekAdapter{}, "https://api.example.com/anthropic", "", true},
+		{codex2apiAdapter{}, "", "", true},
 	}
 	for _, tc := range cases {
 		got, ok := tc.adapter.Endpoint(tc.baseURL)
@@ -74,6 +81,11 @@ func TestMatch(t *testing.T) {
 	if (newapiAdapter{}).Match("https://one.example.com/api/llm/console/chat") {
 		t.Error("New API 不该靠 host 识别")
 	}
+	// codex2api 同理：跑在任意 host 上（实测是裸 IP + 端口）→ 只能显式配 source。
+	// 认错的后果是拿着用户的 API key 去打一个不是 codex2api 的地址。
+	if (codex2apiAdapter{}).Match("http://49.51.34.139:8317") {
+		t.Error("codex2api 不该靠 host 识别")
+	}
 }
 
 // TestDetectAdapter 断言按 host 的兜底检测。
@@ -89,7 +101,7 @@ func TestDetectAdapter(t *testing.T) {
 
 // TestAdapterByName 断言按 source 查找。
 func TestAdapterByName(t *testing.T) {
-	for _, name := range []string{"minimax", "deepseek", "newapi"} {
+	for _, name := range []string{"minimax", "deepseek", "newapi", "codex2api"} {
 		ad, ok := AdapterByName(name)
 		if !ok {
 			t.Errorf("adapter %q 应存在", name)
@@ -445,6 +457,216 @@ func TestNewAPIFetch_ExpiresAt(t *testing.T) {
 	}
 	if dims[0].ExpiresAt.Unix() != 1794323556 {
 		t.Errorf("到期时间 = %v", dims[0].ExpiresAt.Unix())
+	}
+}
+
+// --- codex2api ------------------------------------------------------------
+
+// codex2apiSummaryBody 是实测的响应形状（2026-11-17，v3.1.6）的节选。
+//
+// key 对象里的字段口径（上游源码 database/postgres.go）：
+//   - quota_used  = 自上次**手动**重置以来的累计花费（配额周期由管理员点重置决定）
+//   - total_used  = 历史总花费（永不清零）
+//   - quota_limit = 当前配额周期的上限，0 = 无限额度
+const codex2apiSummaryBody = `{
+  "key": {
+    "name": "王志翔", "key": "sk-8****...****54f9",
+    "quota_limit": 100, "quota_used": 0.8024772, "total_used": 12.5,
+    "reset_count": 1, "last_reset_at": "2026-11-17T10:00:00+08:00",
+    "limits": {"allow_live": true, "upstream_channel": "codex"},
+    "status": "active", "created_at": "2026-11-17T15:38:11+08:00"
+  },
+  "range": {"name": "30d", "start": "2026-10-18T18:23:33+08:00", "end": "2026-11-17T18:23:33+08:00"},
+  "usage": {"summary": {"requests": 45, "tokens": 1667493, "user_billed": 0.8024772}},
+  "model_request_usage": []
+}`
+
+// TestCodex2APIFetch 断言解析：quota_used / quota_limit → 已用 / 总额。
+func TestCodex2APIFetch(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		fmt.Fprint(w, codex2apiSummaryBody)
+	}))
+	defer srv.Close()
+
+	dims, err := (codex2apiAdapter{}).Fetch(context.Background(), ProviderInfo{
+		Endpoint: srv.URL,
+		APIKey:   "sk-secret",
+	})
+	if err != nil {
+		t.Fatalf("不该报错: %v", err)
+	}
+	if gotAuth != "Bearer sk-secret" {
+		t.Errorf("Authorization = %q, 应为 Bearer <key>", gotAuth)
+	}
+	if len(dims) != 1 {
+		t.Fatalf("应有 1 个维度, got %d", len(dims))
+	}
+	d := dims[0]
+	if d.Kind != KindQuota {
+		t.Errorf("kind = %q, want quota", d.Kind)
+	}
+	if d.Unit != "USD" {
+		t.Errorf("unit = %q, want USD", d.Unit)
+	}
+	if d.Used == nil || *d.Used != 0.8024772 {
+		t.Errorf("已用 = %v, want 0.8024772", d.Used)
+	}
+	if d.Limit == nil || *d.Limit != 100 {
+		t.Errorf("总额 = %v, want 100", d.Limit)
+	}
+	if d.Remaining == nil || *d.Remaining < 99.19 || *d.Remaining > 99.2 {
+		t.Errorf("剩余 = %v, want ≈99.1975", d.Remaining)
+	}
+	if d.Unlimited {
+		t.Error("有额度上限时不该标记为无限")
+	}
+	if pct := d.UsedPct(); pct == nil || *pct < 0.8 || *pct > 0.81 {
+		t.Errorf("已用百分比 = %v, want ≈0.802", pct)
+	}
+}
+
+// TestCodex2APIFetch_NoResetTime 断言**不填重置时间**。
+//
+// quota_used 的"配额周期"结束于管理员手动点重置的那一刻——不可知。填
+// last_reset_at（那是**过去**的时刻）会让人以为额度马上要恢复。
+func TestCodex2APIFetch_NoResetTime(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, codex2apiSummaryBody)
+	}))
+	defer srv.Close()
+
+	dims, err := (codex2apiAdapter{}).Fetch(context.Background(), ProviderInfo{Endpoint: srv.URL})
+	if err != nil {
+		t.Fatalf("不该报错: %v", err)
+	}
+	if dims[0].ResetsAt != nil {
+		t.Errorf("不该有重置时间: %v", dims[0].ResetsAt)
+	}
+}
+
+// TestCodex2APIFetch_Unlimited 断言 quota_limit=0 → 无限额度、不派生百分比。
+//
+// 0 = 这个 key 没有金额上限 → 没有分母 → 百分比无意义（不是"用了 0%"）。
+func TestCodex2APIFetch_Unlimited(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"key":{"name":"王志翔","quota_limit":0,"quota_used":0.8024772,"total_used":0.8024772,"reset_count":0,"status":"active"}}`)
+	}))
+	defer srv.Close()
+
+	dims, err := (codex2apiAdapter{}).Fetch(context.Background(), ProviderInfo{Endpoint: srv.URL})
+	if err != nil {
+		t.Fatalf("不该报错: %v", err)
+	}
+	d := dims[0]
+	if !d.Unlimited {
+		t.Error("应标记为无限额度")
+	}
+	if d.Limit != nil {
+		t.Errorf("无限额度不该有总额: %v", *d.Limit)
+	}
+	if pct := d.UsedPct(); pct != nil {
+		t.Errorf("无限额度 → 不该有百分比, got %v", *pct)
+	}
+	if d.Used == nil || *d.Used != 0.8024772 {
+		t.Errorf("已用仍应有值: %v", d.Used)
+	}
+}
+
+// TestCodex2APIFetch_TotalUsedNotUsed 断言 **total_used 不当已用量**。
+//
+// total_used 是历史累计（永不清零），quota_limit 是当前周期的上限——两个口径
+// 混用会算出假百分比。total_used 只进 Raw 供排查。
+func TestCodex2APIFetch_TotalUsedNotUsed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, codex2apiSummaryBody)
+	}))
+	defer srv.Close()
+
+	dims, err := (codex2apiAdapter{}).Fetch(context.Background(), ProviderInfo{Endpoint: srv.URL})
+	if err != nil {
+		t.Fatalf("不该报错: %v", err)
+	}
+	d := dims[0]
+	if d.Used == nil || *d.Used == 12.5 {
+		t.Errorf("已用不该用 total_used: %v", d.Used)
+	}
+	if got, ok := d.Raw["total_used"].(float64); !ok || got != 12.5 {
+		t.Errorf("total_used 该进 Raw: %+v", d.Raw)
+	}
+}
+
+// TestCodex2APIFetch_DisplayUnit 断言 displayUnit 能覆盖单位。
+func TestCodex2APIFetch_DisplayUnit(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, codex2apiSummaryBody)
+	}))
+	defer srv.Close()
+
+	dims, err := (codex2apiAdapter{}).Fetch(context.Background(), ProviderInfo{
+		Endpoint:    srv.URL,
+		DisplayUnit: "CNY",
+	})
+	if err != nil {
+		t.Fatalf("不该报错: %v", err)
+	}
+	if dims[0].Unit != "CNY" {
+		t.Errorf("unit = %q, want CNY", dims[0].Unit)
+	}
+}
+
+// TestCodex2APIFetch_NotFound 断言 404 是失败（服务端关了公开用量页）。
+func TestCodex2APIFetch_NotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, `{"error":"API Key 自助用量页未启用"}`)
+	}))
+	defer srv.Close()
+
+	dims, err := (codex2apiAdapter{}).Fetch(context.Background(), ProviderInfo{Endpoint: srv.URL})
+	if err == nil {
+		t.Fatal("404 应报错")
+	}
+	if dims != nil {
+		t.Errorf("失败时不该返回维度: %+v", dims)
+	}
+	if !strings.Contains(err.Error(), "404") {
+		t.Errorf("错误应带上状态码: %v", err)
+	}
+}
+
+// TestCodex2APIFetch_BadJSON 断言解析失败是失败（厂商改了字段）。
+func TestCodex2APIFetch_BadJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"key":"not-an-object"}`)
+	}))
+	defer srv.Close()
+
+	dims, err := (codex2apiAdapter{}).Fetch(context.Background(), ProviderInfo{Endpoint: srv.URL})
+	if err == nil {
+		t.Fatal("解析失败应报错")
+	}
+	if dims != nil {
+		t.Errorf("失败时不该返回维度: %+v", dims)
+	}
+}
+
+// TestCodex2APIFetch_RateLimited 断言 429 被认成限流（走退避，不当普通失败）。
+func TestCodex2APIFetch_RateLimited(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		fmt.Fprint(w, `{"error":"slow down"}`)
+	}))
+	defer srv.Close()
+
+	_, err := (codex2apiAdapter{}).Fetch(context.Background(), ProviderInfo{Endpoint: srv.URL})
+	var rle *RateLimitError
+	if !errors.As(err, &rle) {
+		t.Fatalf("429 应是 RateLimitError, got %v", err)
+	}
+	if rle.Status != http.StatusTooManyRequests {
+		t.Errorf("状态码 = %d", rle.Status)
 	}
 }
 
