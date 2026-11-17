@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-11-17 — quota-codex2api-adapter + windows-statusline-probe
+
 ### Features
 - **新增 codex2api 额度 adapter**（provider 配置里写 `"quota": {"source": "codex2api"}`）：读 codex2api 的 **API Key 自助用量接口** `GET <base_url>/api/key-usage/summary`（Bearer 鉴权），输出**一个**额度维度——key 级金额预算（`key.quota_used` 已用 / `key.quota_limit` 总额度，单位 USD）
   - **识别靠显式配 `source`**：codex2api 是自建服务，跑在任意 host 上（实测是裸 IP + 端口），没有任何可据以识别的主机特征。**识别错比识别不到更糟**（识别错 = 拿着用户的 API key 去打一个不是 codex2api 的地址）→ `Match()` 恒 false，与 New API 同款处置
@@ -16,11 +18,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   - **summary 里的 5h/7d 流量窗口不映射成额度维度**：那是"最近 5 小时**花了多少钱**"，**没有分母**（硬上限在上游 ChatGPT 账号那边，不在 key 上）→ 塞进 `window` 画不出条形图，塞进 `balance` 方向又反了（余额是剩余、额度是已用）。要真正的 ChatGPT 5h/7d 限额百分比得走 `/api/key-usage/accounts`（**服务端默认关掉**，需管理员开「账号用量查看」）
   - **降级不崩**：404（服务端关了公开用量页）/ 厂商改字段 / 解析失败 → 刷新失败 → **保留上一次的额度条目**（自动 stale），**绝不影响 Claude Code 启动**；429 走既有退避框架
 
+### Tests
+- **新增 `bin/statusline-probe.js` 诊断脚本**（Windows 7.6 复测的诊断工具，留在仓库里做日常回归）：测两条额度通道的耗时分布（命令那条走状态栏的**真实路径**：cmd.exe shim → cmd.exe → exe）、状态栏在**空闲/繁忙**两种负载下额度段到底是 ccl 的额度还是回落到 `rate_limits`、以及耗时构成（node 启动 / git 子进程 / 额度通道）
+  - **判据用不可能撞上的哨兵**：构造 `rate_limits` 塞 **4321%**（真实百分比到不了 100 以上）+ 不给 `CCL_PROVIDER` 的对照组 → **不依赖"ccl 的额度恰好是某个数"这种脆弱假设**；**有回落时退出码 1**（可脚本判定）
+  - **状态栏测量用异步 spawn**：`spawnSync` 的同步包装在 Windows 上要 ~117ms，那是**测量工具自身的开销**，不是被测物的
+- **实测结论修正了此前的归因**：Windows 上贵的**不是** scoop 的两层 cmd.exe（直调 exe 259ms vs 走 shim 261ms，**只差 3ms**），而是 **Windows Defender 对未签名 exe 的实时深扫**——每起一个进程都付一次（cc-launcher.exe 259ms、git.exe 61ms、node.exe 128ms）。推论：Windows 上任何"起进程"的读额度方案都进不了 250ms 预算，**只有零进程（常驻 daemon + 回环 HTTP）行**
+
 ### Docs
 - **`docs/provider-quota.md`**：adapter 表补 codex2api 一行；「外部行为实测结论」补 codex2api 的端点、响应形状、**字段口径**，以及另两个自助端点（`/api/key-usage/accounts` = 上游账号的 5h/7d 限额百分比，默认被管理员关掉；`/api/image-studio/quota` = 生图门户额度，与文本 provider 无关）；「已知偏差」记两条——`key.status` 取值未特殊处理（原值进 raw）；**无限额度时状态栏显示 `--` 是消费方的渲染选择，不是数据问题**（没有分母就没有百分比）
+- **`docs/provider-quota.md` 的 Windows 实测数字换成 2026-11-13 的**（命令通道 **30/30 全部超时** p50 261ms / p95 271ms——不是"忙的时候才超时"；HTTP 回环端点 p50 **7.5ms**，余量 24 倍），并补"**状态栏脚本自己也要零进程**"一节：额度换成端点后，状态栏**整体**仍是 307.6ms（node 启动 128.5ms + 额度 7.5ms + `git branch --show-current` 子进程 61.3ms）→ 把 git 换成零进程读 `.git/HEAD`（0.24ms）后整体 **140.7ms**（进 250ms 预算，余量 109ms）
+
+### Chore
+- **删掉 `bin/patch-statusline-git.js`**：它是为了"改另一台机器上我碰不到的状态栏脚本"造的——本人直接手动替换那一段更快，也不需要它的版本识别/备份/回滚那套逻辑。**保留 `bin/statusline-probe.js`**（测量脚本：7.6 的耗时分布靠它留档，也是判断"额度通道有没有退化"的日常工具）
 
 ### OpenSpec
 - `quota-codex2api-adapter`：codex2api 的额度 adapter（端点推导 / 鉴权 / 字段口径 / 无限额度 / 降级）
+- `quota-daemon-endpoint` §7.6 补记两轮 Windows 复测与最终结论（40/40 全勾）
 
 ## [0.23.0] - 2026-11-12 — quota-daemon-endpoint
 
