@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.24.1] - 2026-11-18 — web-unlimited-quota-amount
+
+### Fixes
+- **网页额度卡对"无限额度"的维度显示 `--`**：codex2api 的 key 级金额预算在 `quota_limit == 0`（无限额度）时，维度形状是**无分母 + 无 `remaining` + 只有 `used`** —— 网页的 `dimText` 只读 `remaining` → 渲染成 `--`
+  - **`--` 会被读成"没有额度"**，而事实是"没有上限、只知道花了多少" —— 两者含义完全相反（同一张卡片的隔壁还专门写过"这不是无限额"，结果无限额的那条自己显示成了 `--`）
+  - **改法**：没有百分比时，`remaining` 有就显示 `remaining`（余额语义），没有就退回**已用绝对值**，**并带标记词**（网页"已用 12.16"）—— 裸数字会被读成余额，方向正好相反
+  - **与终端状态栏口径一致**：终端在同样情况下显示 `12.16 used`（只能用 ASCII —— 终端字形缺失时中文渲染不了）→ 两边**数值口径一致，措辞按介质适配**（`web-config-console` spec 要求"网页与状态栏 never disagree about the same provider"，这条把它落到了实处）
+
+### Docs
+- **`docs/provider-quota.md`**：「三种 kind」一节补上这**第四种形状**（无分母 + 无 `remaining` + 只有 `used`）的渲染规则 —— 这是给仓库外消费方的契约；并删掉「已知偏差」里那条已经过时的说明
+
+### Tests
+- **前端单测加 5 条**（`internal/web/jstest/quotaformat.test.mjs`）：无限额度的三种形状 + 两条回归（`remaining` 优先、什么数都没有时仍是 `--`）。前端单测被 `internal/web/jstest_test.go` 接进 `go test`
+
 ## [0.24.0] - 2026-11-17 — quota-codex2api-adapter + windows-statusline-probe
 
 ### Features
