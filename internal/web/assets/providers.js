@@ -107,6 +107,19 @@
     var pct = d.used_percentage;
     if (typeof pct !== 'number') {
       // 没有百分比（分母未知）→ 只显示能显示的量（quotaKindStr 同规则）
+      if (typeof d.remaining === 'number') {
+        return fmtAmount(d.remaining) + unit;
+      }
+      // **无限额度 + 接口只报"已用"**：没有"剩余"可言（无限额度下 remaining
+      // 是 ∞，没有有限值可报），唯一有意义的数是已用绝对值
+      // （codex2api 的 quota_limit=0 就是这个形状）。
+      //
+      // **必须带标记词**：裸数字会被读成余额（方向相反）。终端状态栏在同样
+      // 情况下显示 "12.1 used"（那里只能用 ASCII），网页用中文措辞 ——
+      // **数值口径一致，措辞按介质适配**。
+      if (typeof d.used === 'number') {
+        return '已用 ' + fmtAmount(d.used) + unit;
+      }
       return fmtAmount(d.remaining) + unit;
     }
     var text = dimPctText(pct, kind) + '%';

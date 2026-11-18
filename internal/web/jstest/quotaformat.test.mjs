@@ -119,6 +119,49 @@ test('没有百分比：只显示剩余量（quotaKindStr 的无百分比分支�
   );
 });
 
+/* 无限额度：**无分母 + 无 remaining + 只有 used**。
+ *
+ * codex2api 的 key 级金额预算在 quota_limit=0 时就是这个形状（上游源码：
+ * `quota_used` 是"自上次手动重置以来的累计"，`quota_limit=0` = 没有金额上限）。
+ *
+ * 之前网页只读 remaining → 渲染成 "--"（**看起来像没有额度**，其实是"无限额、
+ * 只知道已花了多少"）。终端状态栏有同样的坑，两边一起修。
+ *
+ * 措辞按介质适配：终端只能用 ASCII（"12.1 used"），网页是中文界面（"已用
+ * 12.1"）—— **数值口径一致**，不互相矛盾（web-config-console spec 的硬要求）。
+ */
+const unlimitedDim = {
+  id: 'quota',
+  label: 'USD',
+  kind: 'quota',
+  used: 12.1,
+  unit: 'USD',
+  unlimited: true,
+};
+
+test('无限额度（无分母无剩余）：显示已用绝对值，不显示 "--"', () => {
+  assert.equal(qf.dimText(unlimitedDim), '已用 12.1');
+});
+
+test('无限额度：单位按 unitSuffix 规则（label==unit 时不重复）', () => {
+  assert.equal(qf.dimText({ ...unlimitedDim, label: '花费' }), '已用 12.1 USD');
+});
+
+test('无限额度：已用为 0 时也显示数字（不是 "--"）', () => {
+  assert.equal(qf.dimText({ ...unlimitedDim, used: 0 }), '已用 0');
+});
+
+test('回归：remaining 与 used 都有时，优先显示 remaining（余额语义优先）', () => {
+  assert.equal(
+    qf.dimText({ id: 'x', label: 'USD', kind: 'quota', remaining: 12.5, used: 3, unit: 'USD' }),
+    '12.5'
+  );
+});
+
+test('回归：什么数都没有时仍是 "--"', () => {
+  assert.equal(qf.dimText({ id: 'x', label: 'USD', kind: 'quota', unit: 'USD' }), '--');
+});
+
 test('balance 且没有 remaining：显示 "--"', () => {
   assert.equal(qf.dimText({ id: 'b', label: 'CNY', kind: 'balance', unit: 'CNY' }), '--');
 });

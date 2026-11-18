@@ -141,6 +141,18 @@ ccl quota --refresh --json
 | `quota` | 无周期 + 有分母 | New API 令牌额度 | 条形图 + 绝对值 |
 | `balance` | **无分母** | DeepSeek 预付费余额 | **只显示数字**（画不出条形图，且"已用"与"剩余"方向相反） |
 
+**第四种形状：无分母 + 无 `remaining` + 只有 `used`**（无限额度的 key，例如
+codex2api 的 `quota_limit == 0`）。没有分母就没有百分比，**"剩余"在无限额度下
+是 ∞、没有有限值可报** → 唯一有意义的数是已用绝对值。
+
+**消费方必须把它渲染出来，不能显示 `--`** —— 显示 `--` 会被读成"没有额度"，
+而事实是"没有上限、只知道花了多少"。**已用量必须带标记词**（终端 `12.1 used`
+/ 网页 `已用 12.1`）：裸数字会被读成余额，方向正好相反。
+
+ccl 自带的两个消费方都按这条渲染：终端状态栏（`~/.claude/statusline.js` 的
+`quotaKindStr`）与网页控制台（`internal/web/assets/providers.js` 的
+`dimText`）。
+
 ### label 与 unit 的规则
 
 - **`label` 与 `unit` 永远是纯 ASCII**——它们要渲染到终端的一行文本里，
@@ -750,8 +762,3 @@ node bin/statusline-probe.js --provider minimax-m3 --json
 - **codex2api 的 `key.status` 取值未特殊处理**（实测见过 `active`；上游还有
   `expired` / `quota_exhausted`）——当前**原值进 `dimension.raw`**，不据此改
   维度语义（key 过期时额度数字仍然是事实）
-- **codex2api 的无限额度（`quota_limit == 0`）在状态栏显示 `--`**：维度数据
-  本身是对的（`used` 有值、`unlimited: true`），是**消费方**的渲染选择——没有
-  分母就没有百分比，状态栏脚本没有"无限额度时显示已用金额"的分支。要显示
-  出来有两条路：服务端给 key 配一个金额上限（`quota_limit`），或消费方加一
-  条 fallback。**ccl 侧不改**——保持对外契约不变是这个设计的直接收益
