@@ -38,6 +38,18 @@ Claude Code Launcher — 一个终端启动器，在启动 Claude Code 时提供
 
 项目使用 OpenSpec 规范驱动开发（`spec-driven` schema），配置文件在 `openspec/config.yaml`。所有功能开发应遵循 OpenSpec 的 proposal → design → specs → tasks 流程。
 
+## CHANGELOG 维护
+
+**平时做功能时就把变更记进 `CHANGELOG.md` 的 `[Unreleased]` 段**（按既有分类：Refactor / Features / Fix / Tests / Docs / OpenSpec / Compatibility），**与代码在同一个 commit 里提交**。
+
+**为什么不能在发版时才补写**：
+
+- **会漏**——实测 v0.24.0 段就漏记了 `9295cb4 fix(statusline): 零进程读分支要向上找仓库根`。发版时靠回忆补写，漏掉的项**没有任何东西能提醒你**
+- **是事后行为**——补写时实测数字、决策原因已经要翻 commit 才能找回来；当场写的时候那些细节还在上下文里
+- **`[Unreleased]` 段本来就是 Keep a Changelog 为"未发布版本的累积变更"设计的**——**一直空着就是形同虚设**（实测：仓库历史上 15 次 CHANGELOG 改动全是发版时一次性加版本段，`[Unreleased]` 从没被用过）
+
+**`[Unreleased]` 段里不带版本号**——版本号由发版时的 `bump-version` 产生。
+
 ## Release Tag 流程
 
 **强约束**：打 tag 之前必须先把 `CHANGELOG.md` 该版本的变更记录写好；CHANGELOG commit 与 tag 应在**同一次推送**内完成，不能"今天 commit changelog、明天打 tag"——否则 `git checkout v0.X.Y` 拿到的代码没有对应 CHANGELOG 段。
@@ -45,9 +57,8 @@ Claude Code Launcher — 一个终端启动器，在启动 Claude Code 时提供
 操作顺序：
 
 1. 完成 OpenSpec change（实施 + `openspec archive` 归档）
-2. 在 `CHANGELOG.md` 的 `[Unreleased]` 段下加新版本段（按既有版本格式：Refactor / Features / Fix / Tests / OpenSpec / Compatibility 等分类）
-   - **版本段是"做版本"时才新增的**，平时做功能**不动 CHANGELOG**（历史 15 次 CHANGELOG 改动全是发版时一次性加的版本段——**没有"先在 `[Unreleased]` 堆着、发布时再转正"的模式**）
-   - **段里的版本号要与 bump-version 推断出的一致**——写之前先 `bin/bump-version.sh current` 看当前 tag，再按改动性质选 major/minor/patch（`minor` 会把 `v0.24.1` 变成 `v0.25.0`）
+2. **把 `CHANGELOG.md` 的 `[Unreleased]` 段转成 `## [v0.X.Y]` 正式段**（`[Unreleased]` 清空）——**版本号由第 4 步的 `bump-version` 产生**：先 `bin/bump-version.sh current` 看当前 tag，再按改动性质选 major/minor/patch（`minor` 会把 `v0.24.1` 变成 `v0.25.0`），**段里的版本号必须与 tag 一致**
+   - 转段时**逐条核对 `[Unreleased]` 与这一版的 commit 列表**——历史教训：v0.24.0 段漏记了 `9295cb4`（平时没写 CHANGELOG，发版时凭记忆补写就漏了）
 3. `git commit -m "docs: CHANGELOG 加 <change-name> 段"`（CHANGELOG commit；**message 里不写版本号**——版本号由第 4 步的 `bump-version` 产生，在 commit message 里手写会造成"commit 说的版本"与"tag 实际打的版本"两套说法）
 4. 打 tag（两种都行，**区别在第 5 步**）：
    - `bin/bump-version.sh bump <major|minor|patch>` —— 仓库脚本，打 **lightweight tag**
