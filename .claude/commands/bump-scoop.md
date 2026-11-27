@@ -31,8 +31,9 @@ Bump the wzx-xle/scoop-bucket manifest for a new cc-launcher release.
   git clone https://github.com/wzx-xle/scoop-bucket /tmp/scoop-bucket
   ```
 
-  **remote 用 https URL**（不是 `git@github.com:`）—— 本机的全局 insteadOf 规则会把
-  https 改写成 SSH，正好走通；写成 `git@` 反而会被改写成 https 而直连超时
+  **remote 用 https URL**（不是 `git@github.com:`）—— 本机到 GitHub 的 https **直连不通**
+  （60s 超时），但按 URL 匹配的 git proxy 规则（`http.https://github.com.proxy`）会让它走通；
+  写成 `git@` 反而没有这条 proxy 规则匹配、容易直连超时
 
 **Why hash comes from GitHub API (not local build)**
 
@@ -128,21 +129,21 @@ Therefore the new flow fetches the release zip SHA256 from **GitHub release body
    git push origin main
    ```
 
-   **Do NOT touch the global `url.https://github.com/.insteadof` rules.** They read:
+   **Do NOT touch the global git config.** 本机到 GitHub 的 https **直连不通**（60s 超时），
+   走通靠的是**按 URL 匹配的 git proxy**：
 
    ```
-   url.https://github.com/.insteadof = git@github.com:
-   url.https://github.com/.insteadof = ssh://git@github.com:
+   http.https://github.com.proxy  = http://proxy.local:7890
+   https.https://github.com.proxy = http://proxy.local:7890
    ```
 
-   `insteadOf` rewrites **https://github.com/ → SSH**（方向是"URL 写的是 https，实际走
-   SSH 通道"）。本机到 GitHub 的 https **直连不通**（60s 超时），这两条规则正是让它
-   走通的原因 —— clone / push 用 `https://github.com/...` 这个 URL 即可。**unset 掉它们
-   反而会让 push 走直连 https 而超时失败**（2026-11-09 实测：保持原样，clone + push
-   都成功；全局配置零改动）。
+   clone / push 用 `https://github.com/...` 这个 URL 即可（proxy 规则按 URL 匹配它）。
+   **全局配置零改动**（2026-11-27 实测：clone + push `wzx-xle/scoop-bucket` 成功）。
 
-   只有在**手动**用 `git@github.com:` 形式的 remote 时才会被改写成 https 而失败 ——
-   那时把 remote 换成 https URL 即可，**不要动全局配置**。
+   > **历史说明**：这条曾经写成"别 unset 全局 `url.https://github.com/.insteadof` 规则"——
+   > 那是 2026-10-14 的一次**无效操作**被写成了规则（当时的 remote 是 `git@github.com:`
+   > 形式，压根不受 insteadOf 影响），规则后来又被加回来。**2026-11-27 再测，那两条
+   > insteadOf 规则已经不存在了** —— 现在起作用的是上面那两条 proxy 规则。
 
    **Commit message 用 `-F -` + heredoc**，不要用 `-m "...\n\n..."`：bash 的双引号里
    `\n` 是**字面两个字符**，不会换行 → commit message 里会出现字面的 `\n`。
@@ -165,10 +166,11 @@ Therefore the new flow fetches the release zip SHA256 from **GitHub release body
 **Common mistakes**
 
 - **Including an `arm64` block** in the manifest — breaks `scoop install` because the release no longer ships a windows/arm64 zip. Removed in commit `299a2a4`.
-- **Unsetting the global `url.https://github.com/.insteadof` rules before pushing** — those rules rewrite
-  https://github.com/ → SSH, which is exactly how this machine reaches GitHub (its https直连不通).
-  Unsetting them makes `git push` go over a direct https connection and time out (2026-11-09 实测).
-  **Leave the global config alone**; use an `https://github.com/...` remote URL.
+- **Touching the global git config before pushing** — this machine reaches GitHub through the
+  per-URL git proxy rules (`http.https://github.com.proxy = http://proxy.local:7890`); its
+  direct https connection times out (60s). Changing/unsetting them makes `git push` go over a
+  direct connection and hang. **Leave the global config alone**; use an `https://github.com/...`
+  remote URL (2026-11-27 实测：clone + push 成功，全局配置零改动).
 - **Hand-writing the manifest and dropping `pre_uninstall`** — that hook stops the daemon during
   `scoop uninstall`; without it the app directory stays locked on Windows. Copy the script's output
   wholesale instead of retyping the JSON.
@@ -185,9 +187,9 @@ Therefore the new flow fetches the release zip SHA256 from **GitHub release body
 - `bin/bump-scoop.ps1` — PowerShell 版（Windows 原生，只需 pwsh；不打本地 zip，只取 release 真值 hash）
 - `.github/workflows/release.yml` — produces the release assets + writes the marker into release body
 - memory `scoop-bucket-zip-hash-stability` — historical context (the "four conventions" no longer suffice for byte-level match)
-- memory `github-push-via-ssh-with-insteadof` — the SSH push workflow
-  （注：该 memory 说"全局规则已删"，但 2026-11-09 实测**规则仍在**（两条 insteadOf），
-  且正是它们让 github 的 https 走 SSH 通道 —— 见步骤 3）
+- memory `github-push-via-ssh-with-insteadof` — GitHub 走按 URL 匹配的 git proxy
+  （该 memory 2026-11-27 已更新：全局 insteadOf 规则**实测已不存在**，别按旧版本的
+  "unset 那两条规则"说法操作 —— 见步骤 3）
 - memory `github-vs-gitea-usernames` — `wzx-xle` vs `wxyz` distinction
 - `.claude/commands/bump-version.md` — companion slash command
 - `openspec/changes/archive/2026-10-14-bump-scoop-hash-trace/` — full change rationale
