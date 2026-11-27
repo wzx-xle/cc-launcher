@@ -46,11 +46,14 @@ Claude Code Launcher — 一个终端启动器，在启动 Claude Code 时提供
 
 1. 完成 OpenSpec change（实施 + `openspec archive` 归档）
 2. 在 `CHANGELOG.md` 的 `[Unreleased]` 段下加新版本段（按既有版本格式：Refactor / Features / Fix / Tests / OpenSpec / Compatibility 等分类）
-3. `git commit -m "docs: CHANGELOG 加 v0.X.Y <change-name> 段"`（CHANGELOG commit）
+   - **版本段是"做版本"时才新增的**，平时做功能**不动 CHANGELOG**（历史 15 次 CHANGELOG 改动全是发版时一次性加的版本段——**没有"先在 `[Unreleased]` 堆着、发布时再转正"的模式**）
+   - **段里的版本号要与 bump-version 推断出的一致**——写之前先 `bin/bump-version.sh current` 看当前 tag，再按改动性质选 major/minor/patch（`minor` 会把 `v0.24.1` 变成 `v0.25.0`）
+3. `git commit -m "docs: CHANGELOG 加 <change-name> 段"`（CHANGELOG commit；**message 里不写版本号**——版本号由第 4 步的 `bump-version` 产生，在 commit message 里手写会造成"commit 说的版本"与"tag 实际打的版本"两套说法）
 4. 打 tag（两种都行，**区别在第 5 步**）：
    - `bin/bump-version.sh bump <major|minor|patch>` —— 仓库脚本，打 **lightweight tag**
    - `git tag -a v0.X.Y HEAD -m "<release message>"` —— **annotated tag**，带发布说明
    （两种都指向 CHANGELOG commit）
+   —— **版本号的唯一来源是 git tag**：CHANGELOG 段里的版本号要与 tag 对齐，但**不要在 commit message 里写它**
 5. 一次推送：`git push origin main v0.X.Y`（commit + tag 一起推）
    —— **不要用 `--follow-tags`**：它只推 annotated tag，lightweight tag 会被**静默
    跳过**（命令返回成功，但 tag 没上去 → 远端 `git ls-remote --tags` 查不到
