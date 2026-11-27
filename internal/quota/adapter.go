@@ -42,6 +42,14 @@ type ProviderInfo struct {
 	BaseURL string
 	// APIKey 是 provider 的凭证（Bearer）。
 	APIKey string
+	// AccessKey 是厂商的 Access Key ID（AK）；空表示这个厂商的额度接口不用它。
+	//
+	// **它与 APIKey 是两回事**：APIKey 是推理凭证（provider 的
+	// ANTHROPIC_AUTH_TOKEN），而有些厂商的额度接口**只接受 Access Key 签名**
+	// ——火山引擎方舟实测：拿推理 key 打过去是 400 `InvalidAuthorization`。
+	AccessKey string
+	// SecretKey 是 Access Key 对应的 Secret Access Key（SK）。
+	SecretKey string
 	// Model 是本次使用的模型名（厂商若按模型分池则需要；当前三家都是 key 级）。
 	Model string
 
@@ -62,6 +70,7 @@ var adapters = []Adapter{
 	deepseekAdapter{},
 	newapiAdapter{},
 	codex2apiAdapter{},
+	arkAdapter{},
 }
 
 // AdapterByName 按名字（provider 配置里的 source 字段）找 adapter。
@@ -302,4 +311,17 @@ func hostOf(rawURL string) string {
 		return ""
 	}
 	return u.Hostname()
+}
+
+// quotaBodySnippet 截断响应体摘要（用于错误信息）。
+//
+// 服务端的错误信息是排查的第一手线索（"API Key 自助用量页未启用"、
+// "账号用量查询未启用"…），不能丢；但响应体可能很大（用量报告里带
+// recent_logs），所以截断。
+func quotaBodySnippet(body []byte) string {
+	s := strings.TrimSpace(string(body))
+	if len(s) > 200 {
+		return s[:200] + "…"
+	}
+	return s
 }

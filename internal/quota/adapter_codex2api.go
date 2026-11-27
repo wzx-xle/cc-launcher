@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 )
 
 // codex2apiAdapter 适配 codex2api 的 API Key 自助用量接口。
@@ -99,7 +98,7 @@ func (codex2apiAdapter) Fetch(ctx context.Context, p ProviderInfo) ([]Dimension,
 	if err := json.Unmarshal(body, &resp); err != nil {
 		if status < 200 || status >= 300 {
 			return nil, fmt.Errorf("codex2api 额度接口返回 HTTP %d: %s",
-				status, codex2apiBodySnippet(body))
+				status, quotaBodySnippet(body))
 		}
 		return nil, fmt.Errorf("codex2api 额度响应解析失败: %w", err)
 	}
@@ -108,11 +107,11 @@ func (codex2apiAdapter) Fetch(ctx context.Context, p ProviderInfo) ([]Dimension,
 	// 后台开开关还是换 key）。
 	if status < 200 || status >= 300 {
 		return nil, fmt.Errorf("codex2api 额度接口返回 HTTP %d: %s",
-			status, codex2apiBodySnippet(body))
+			status, quotaBodySnippet(body))
 	}
 	// 响应里没有 key 对象 → 接口形状变了（不是"额度为 0"）。
 	if resp.Key == nil {
-		return nil, fmt.Errorf("codex2api 额度响应里没有 key 对象: %s", codex2apiBodySnippet(body))
+		return nil, fmt.Errorf("codex2api 额度响应里没有 key 对象: %s", quotaBodySnippet(body))
 	}
 
 	key := resp.Key
@@ -161,17 +160,4 @@ func (codex2apiAdapter) Fetch(ctx context.Context, p ProviderInfo) ([]Dimension,
 
 	d.Finalize()
 	return []Dimension{d}, nil
-}
-
-// codex2apiBodySnippet 截断响应体摘要（用于错误信息）。
-//
-// 服务端的错误信息是排查的第一手线索（"API Key 自助用量页未启用"、
-// "账号用量查询未启用"…），不能丢；但响应体可能很大（usage 报告里带
-// recent_logs），所以截断。
-func codex2apiBodySnippet(body []byte) string {
-	s := strings.TrimSpace(string(body))
-	if len(s) > 200 {
-		return s[:200] + "…"
-	}
-	return s
 }

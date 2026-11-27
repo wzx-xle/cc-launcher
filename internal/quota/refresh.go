@@ -211,6 +211,55 @@ type Config struct {
 	// VendorGap 是**同一 quota 接口**两次请求之间的最小间隔（跨轮也成立）；
 	// 0 表示用 DefaultVendorGap。
 	VendorGap time.Duration
+	// AccessKey 是厂商的 Access Key ID（AK）。
+	//
+	// **它不是 provider 的 API Key**：provider 的 `ANTHROPIC_AUTH_TOKEN` 是推理
+	// 凭证，而有些厂商的额度接口**只接受 Access Key 签名鉴权**——火山引擎方舟
+	// 的 GetAFPUsage 就是（拿推理用的 API Key 打过去，实测 400
+	// `InvalidAuthorization`）。
+	//
+	// **为什么放在 quota 块而不是 env 块**：env 块会**原样交付给 Claude Code**
+	// （经 --settings），账号级凭证不能交给模型、它的 hook 与它的子进程。
+	AccessKey string
+	// SecretKey 是 Access Key 对应的 Secret Access Key（SK）。
+	SecretKey string
+}
+
+// 火山引擎凭证的环境变量名（quota 块没配时的兜底）。
+//
+// **为什么允许从进程环境读**：凭证明文落盘在 provider 配置文件里是用户的
+// 反感点（那个文件里已经有推理用的 ANTHROPIC_AUTH_TOKEN 了）。给一条
+// "不落盘"的路，用户可以二选一。
+//
+// **这是与"代理设置从 provider 的 env 块取"的例外**：代理是 provider 相关的
+// （同一 provider 的额度查询必须走同一条网络路径），而这里的凭证是**账号级**的
+// ——哪个 provider 在用它，就配在哪个 provider 上。
+const (
+	arkAccessKeyEnv = "VOLCENGINE_ACCESS_KEY_ID"
+	arkSecretKeyEnv = "VOLCENGINE_SECRET_ACCESS_KEY"
+)
+
+// Credentials 返回查询额度用的 AK / SK。
+//
+// **优先级：quota 块 > 进程环境变量**。
+//
+// **只配一半不算错误**：别的厂商的额度接口根本不用 AK/SK（配了 accessKey
+// 没配 secretKey 对它们无害），所以"要不要 AK/SK、配全了没有"必须由
+// **adapter** 判断——它才知道自己需不需要这两个值。
+//
+// 目前只有火山引擎方舟用得上（它的额度接口只认 Access Key 签名）；将来别的
+// 厂商要环境变量兜底时，在这里加对应的变量名即可。
+func (c *Config) Credentials() (accessKey, secretKey string) {
+	if c == nil {
+		return "", ""
+	}
+	accessKey = strings.TrimSpace(c.AccessKey)
+	secretKey = strings.TrimSpace(c.SecretKey)
+	if accessKey == "" && secretKey == "" {
+		accessKey = strings.TrimSpace(os.Getenv(arkAccessKeyEnv))
+		secretKey = strings.TrimSpace(os.Getenv(arkSecretKeyEnv))
+	}
+	return accessKey, secretKey
 }
 
 // Interval 返回实际生效的刷新周期。
@@ -326,6 +375,20 @@ func ParseConfig(raw any) (*Config, error) {
 		if f > 0 {
 			cfg.VendorGap = time.Duration(f) * time.Millisecond
 		}
+	}
+	if v, ok := obj["accessKey"]; ok && v != nil {
+		s, ok := v.(string)
+		if !ok {
+			return nil, fmt.Errorf("quota.accessKey 必须是字符串")
+		}
+		cfg.AccessKey = strings.TrimSpace(s)
+	}
+	if v, ok := obj["secretKey"]; ok && v != nil {
+		s, ok := v.(string)
+		if !ok {
+			return nil, fmt.Errorf("quota.secretKey 必须是字符串")
+		}
+		cfg.SecretKey = strings.TrimSpace(s)
 	}
 	return cfg, nil
 }
@@ -519,6 +582,7 @@ func (r ProviderRef) providerInfo(endpoint string) ProviderInfo {
 	if r.Config != nil {
 		p.QuotaPerUnit = r.Config.QuotaPerUnit
 		p.DisplayUnit = r.Config.DisplayUnit
+		p.AccessKey, p.SecretKey = r.Config.Credentials()
 	}
 	return p
 }
@@ -541,9 +605,46 @@ func VendorBackoffKey(endpoint string) string {
 	return "v:" + hex.EncodeToString(sum[:])
 }
 
-func PoolID(endpoint, apiKey string) string {
-	sum := sha256.Sum256([]byte(endpoint + "\x00" + apiKey))
+// PoolID 算额度池标识：sha256(端点 + "\x00" + 池键)。
+//
+// **池键默认是 API key**（额度按 key 分）；厂商的额度若按别的依据分，
+// 它的 adapter 实现 PoolKeyer 换一个键即可（见 poolKeyFor）。
+//
+// **含池键**：额度是**按厂商的计数单位分**的，不是按 provider 名分的——
+// 同池的不同 provider 共用一个额度池（如 minimax-m3 与 minimax-m3.1-flash）。
+// **只存哈希，不存明文**：数据文件里不该躺凭证。
+func PoolID(endpoint, poolKey string) string {
+	sum := sha256.Sum256([]byte(endpoint + "\x00" + poolKey))
 	return hex.EncodeToString(sum[:])
+}
+
+// PoolKeyer 是**可选**接口：厂商的额度池划分依据与 API key 不同时实现它。
+//
+// **为什么不改 Adapter 主接口**：改主接口会让已有 adapter 全部要动
+// （破坏性），而实际只有需要它的厂商才需要——用类型断言取，拿不到就回退
+// 默认行为。
+type PoolKeyer interface {
+	// PoolKey 返回这个 provider 的额度池键。
+	//
+	// **同一个池键的 provider 共享一次查询、共享一份额度数据**。
+	//
+	// **返回空串是不行的**：所有池键为空的 provider 会挤进同一个池，
+	// 被算成"同一个额度"。
+	PoolKey(p ProviderInfo) string
+}
+
+// poolKeyFor 算 provider 的额度池键。
+//
+// **默认是 API key**；adapter 实现了 PoolKeyer 就用它的。
+//
+// **三个调用点（枚举 / 单刷 / 池统计）必须都走这里**——同一个池在不同路径上
+// 被算成不同的键，去重就失效了（那会让同一份额度被查多次、存多份）。
+func poolKeyFor(ad Adapter, ref ProviderRef, endpoint string) string {
+	p := ref.providerInfo(endpoint)
+	if pk, ok := ad.(PoolKeyer); ok {
+		return pk.PoolKey(p)
+	}
+	return p.APIKey
 }
 
 // RefreshResult 是一次刷新的结果。
@@ -659,7 +760,7 @@ func RefreshAll(ctx context.Context, refs []ProviderRef, st *Store, logf func(fo
 			}
 			continue
 		}
-		pool := PoolID(endpoint, ref.APIKey)
+		pool := PoolID(endpoint, poolKeyFor(ad, ref, endpoint))
 		providerPool[ref.Name] = pool
 		poolMembers[pool] = append(poolMembers[pool], ref.Name)
 		if _, ok := pools[pool]; !ok {
@@ -923,7 +1024,7 @@ func RefreshOne(ctx context.Context, ref ProviderRef, st *Store) ([]Dimension, e
 	if err != nil {
 		return nil, err
 	}
-	pool := PoolID(endpoint, ref.APIKey)
+	pool := PoolID(endpoint, poolKeyFor(ad, ref, endpoint))
 
 	// **退避中 → 不发请求**（手动刷不能冲掉退避：它打的是同一个接口）。
 	// 退避按**厂商**记录（quota-per-vendor-rate-limit §D2）→ 同厂商的池一起
@@ -1022,11 +1123,11 @@ func TickInterval(refs []ProviderRef) time.Duration {
 	counts := map[time.Duration]int{}
 	pools := map[string]bool{}
 	for _, ref := range refs {
-		_, endpoint, err := ref.Resolve()
+		ad, endpoint, err := ref.Resolve()
 		if err != nil {
 			continue
 		}
-		pool := PoolID(endpoint, ref.APIKey)
+		pool := PoolID(endpoint, poolKeyFor(ad, ref, endpoint))
 		if pools[pool] {
 			continue
 		}

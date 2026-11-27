@@ -116,6 +116,79 @@ func TestParseConfig(t *testing.T) {
 	}
 }
 
+// TestConfigCredentials 断言 AK/SK 的来源与优先级。
+//
+// **quota 块优先于进程环境变量**；块里没配才读环境。
+func TestConfigCredentials(t *testing.T) {
+	t.Setenv(arkAccessKeyEnv, "ENV-AK")
+	t.Setenv(arkSecretKeyEnv, "ENV-SK")
+
+	// 块里配了 → 用块里的，环境变量不参与
+	cfg, err := ParseConfig(map[string]any{
+		"source":    "ark",
+		"accessKey": "BLOCK-AK",
+		"secretKey": "BLOCK-SK",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ak, sk := cfg.Credentials()
+	if ak != "BLOCK-AK" || sk != "BLOCK-SK" {
+		t.Errorf("应优先用 quota 块里的凭证, got %q/%q", ak, sk)
+	}
+
+	// 块里没配 → 读进程环境变量
+	cfg2, err := ParseConfig(map[string]any{"source": "ark"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ak, sk = cfg2.Credentials()
+	if ak != "ENV-AK" || sk != "ENV-SK" {
+		t.Errorf("应回退到环境变量, got %q/%q", ak, sk)
+	}
+
+	// 只配了一半 → **不从环境变量补另一半**。
+	//
+	// "一半用块里的、一半用环境里的" 会把两份来源拼成一个凭据——看着能用，
+	// 但出了错根本查不出是哪一份配错了。宁可整个不成立。
+	cfg3, err := ParseConfig(map[string]any{"source": "ark", "accessKey": "BLOCK-AK"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ak, sk = cfg3.Credentials()
+	if ak != "BLOCK-AK" || sk != "" {
+		t.Errorf("只配 accessKey 时不该从环境补 secretKey, got %q/%q", ak, sk)
+	}
+}
+
+// TestCredentialsIgnoreProviderEnvBlock 是**护栏测试**。
+//
+// provider 的 `env` 块会**原样交付给 Claude Code**（经 --settings）——
+// 账号级的 AK/SK 绝不能从那里取。
+//
+// 进程环境变量也一并清空：这样"拿到了凭证"就只可能来自 provider 的 env 块，
+// 断言才有意义。
+func TestCredentialsIgnoreProviderEnvBlock(t *testing.T) {
+	t.Setenv(arkAccessKeyEnv, "")
+	t.Setenv(arkSecretKeyEnv, "")
+
+	ref := ProviderRef{
+		Name:   "ark-deepseek-flash",
+		Config: &Config{Source: "ark"},
+		Env: map[string]string{
+			// 这两个键出现在 provider 的 env 块里 —— 但 env 块是要交给
+			// Claude Code 的，不能当凭证来源。
+			arkAccessKeyEnv:        "ENVBLOCK-AK",
+			arkSecretKeyEnv:        "ENVBLOCK-SK",
+			"ANTHROPIC_AUTH_TOKEN": "ark-推理用的key",
+		},
+	}
+	p := ref.providerInfo("")
+	if p.AccessKey != "" || p.SecretKey != "" {
+		t.Errorf("provider 的 env 块不该被当作凭证来源, got %q/%q", p.AccessKey, p.SecretKey)
+	}
+}
+
 // TestResolve 断言 adapter 与端点的解析（含显式覆盖）。
 func TestResolve(t *testing.T) {
 	// 显式 source

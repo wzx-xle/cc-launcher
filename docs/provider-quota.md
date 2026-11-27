@@ -448,7 +448,9 @@ Claude Code。
     "endpoint": "https://…",     // 可选：覆盖自动推导
     "quotaPerUnit": 500000,      // 可选：额度点换算比例
     "displayUnit": "USD",        // 可选：显示单位
-    "refreshInterval": 60        // 可选：刷新周期（秒），缺省 60
+    "refreshInterval": 60,       // 可选：刷新周期（秒），缺省 60
+    "accessKey": "AK…",          // 可选：Access Key ID（只有方舟要用）
+    "secretKey": "SK…"           // 可选：Access Key 对应的 Secret
   }
 }
 ```
@@ -460,6 +462,14 @@ Claude Code。
 | `quotaPerUnit` | ❌ | 额度点换算比例（默认 500000 = New API 出厂默认） |
 | `displayUnit` | ❌ | 显示单位（默认由 adapter 决定） |
 | `refreshInterval` | ❌ | 刷新周期，**秒**（缺省 60） |
+| `accessKey` | ❌ | Access Key ID（AK）。**只有方舟的额度接口用得到**——它只认 Access Key 签名，provider 的推理 key 打过去会被拒（见下方「方舟」） |
+| `secretKey` | ❌ | Access Key 对应的 Secret（SK）。与 `accessKey` **必须同时配** |
+
+> 🔐 **`accessKey` / `secretKey` 为什么放在 `quota` 块而不是 `env` 块**：`env` 块
+> 会**原样交付给 Claude Code**（经 `--settings`），账号级凭证不能交给模型、
+> 它的 hook 与它的子进程。不想明文落盘的话，用环境变量
+> `VOLCENGINE_ACCESS_KEY_ID` / `VOLCENGINE_SECRET_ACCESS_KEY` 兜底（**改完要
+> 重启 `ccl serve`**——daemon 是常驻进程，环境变量在它启动时就固定了）。
 
 > ⚠️ **`quota.endpoint` 会把你的 API key 发给那个地址**。它是你自己的选择
 > （provider 配置本来就带端点与凭证），但配置前想清楚：这个地址是你信任的吗？
@@ -472,14 +482,19 @@ Claude Code。
 | `deepseek` | host 剥掉 `api.`/`www.` 后**恰好等于** `deepseek.com` | `https://<host>/user/balance` | HTTP 状态码（401 = key 不对） |
 | `newapi` | **只能显式配 `source`**（任何 host 都可能是它） | `<base_url>/api/usage/token/` | body 的 `code == true` |
 | `codex2api` | **只能显式配 `source`**（自建服务，跑在任意 host 上） | `<base_url>/api/key-usage/summary` | HTTP 状态码（404 = 服务端关了公开用量页） |
+| `ark` | host 形如 `ark.<region>.volces.com` **且** path 含 `/api/plan` | `https://ark.<region>.volcengineapi.com/?Action=GetAFPUsage&Version=2024-01-01` | HTTP 状态码（**只认 Access Key 签名**，Bearer 直接被拒） |
 
 **识别规则为什么这么严**：用"包含 minimax"会把 `minimax-proxy.corp.example`
 这类自建域名误判成 MiniMax，推出一个不存在的端点——**识别错比识别不到更
 糟**（识别错 = 拿着你的 API key 去打一个不存在的地址）。
 
-**端点推导是 per-adapter 的**，不是全局规则：四家的规律完全不同（MiniMax 换
+**端点推导是 per-adapter 的**，不是全局规则：五家的规律完全不同（MiniMax 换
 子域、DeepSeek 同主机换路径、New API 同前缀加后缀、codex2api 同前缀加另一
-个后缀）。任何全局规则都会推出错端点。
+个后缀、方舟换到管控面 host 并带固定 query）。任何全局规则都会推出错端点。
+
+**方舟为什么 host 与 path 两个条件缺一不可**：按量部署是**同一个 host**
+（`ark.cn-beijing.volces.com`）但路径是 `/api/v3`，它没有 Agent Plan 套餐——
+只看 host 会把按量用户也识别成套餐用户，然后拿着不存在的套餐去查。
 
 ### 代理
 
@@ -699,6 +714,7 @@ node bin/statusline-probe.js --provider minimax-m3 --json
 | DeepSeek | `<host>/user/balance` | HTTP 状态码 | **可能是纯文本**（无 Authorization 头时 `Authentication Fails (governor)`） |
 | New API 系 | `<base_url>/api/usage/token/` | body 的 `code == true` | 认证层 `{"error":{…,"type":"new_api_error"}}` + 401；API 层 `{"code":false,"message":…}` |
 | codex2api（**2026-11-17 实测**，v3.1.6） | `<base_url>/api/key-usage/summary` | HTTP 状态码 | `{"error":"API Key 自助用量页未启用"}` + 404；`{"error":"账号用量查询未启用"}` + 404（另一个端点） |
+| 火山方舟 Ark（**2026-11-27 实测**） | `ark.<region>.volcengineapi.com/?Action=GetAFPUsage&Version=2024-01-01` | HTTP 状态码 | `{"ResponseMetadata":{"Error":{"CodeN":…,"Code":"…","Message":"…"}}}`（错误在 `ResponseMetadata.Error` 里，**不在** body 顶层） |
 
 各家的响应形状（实测样本见 design.md）：
 
@@ -721,6 +737,33 @@ node bin/statusline-probe.js --provider minimax-m3 --json
   `quota_limit`**（上游的额度耗尽判定就是 `QuotaLimit > 0 && QuotaUsed >=
   QuotaLimit`）；混用会算出假百分比。`total_used` 只进 `dimension.raw`。
   维度**不填重置时间**：配额周期结束于管理员手动重置的那一刻，不可知
+- **火山方舟（Ark）Agent Plan 个人版**（2026-11-27 实测）：
+  - **只认 Access Key 签名**——拿推理用的 `ark-…` API Key 打过去是 **400
+    `InvalidAuthorization`**（100024），无鉴权是 **400 `InvalidCredential`**
+    （100025）。签名是厂商的 **V4 签名**：`Credential={AK}/{8位日期}/{region}/{服务}/request`，
+    参与签名的头 = `Content-Type`/`Content-Md5`/`Host`/`X-Security-Token` **以及所有
+    `X-` 前缀的头**（**按规则动态确定，别写死列表**——漏签一个 `X-` 头就是 403，
+    且报错完全看不出是漏签）
+  - **`Quota` / `Used` 官方文档写的是 string，实测返回的是 number**
+    （`"Quota":10000`）→ 解析**两种都要吃**
+  - **接口返回四个窗口，但日额度不上报**：`AFPDaily.Used` 在**文本模型推理场景
+    恒为 0**（实测同刻 5h 窗口 328.5542 AFP、daily 是 0）——方舟文档写明日限额
+    "仅限视觉/语音模型、Harness"，它计的是图片/语音模型与 Harness 能力调用。
+    官方 CLI `arkcli usage plan` 同样只输出 5h / weekly / monthly 三个窗口
+  - **报的是账号额度，不是这把 API Key 的额度**：接口入参里**没有 API Key 的
+    位置**（签名只有 AK 代表"调用者是谁"），官方口径也一致："主账号下所有子账号
+    共享该额度池"。**实测**：子账号 AK 与主账号 AK 查到的额度**完全一致**
+  - **额度池按 Access Key 分**：同一对 AK 下的多个推理 key 共用一个套餐配额，
+    按 API key 分池会让同一份额度被查多次、存多份
+  - **AFP = Agent Fuel Point**（厂商文档写成 "Agent Frame Point"，是笔误），
+    `1 AFP ≈ 0.01 元`（按量口径）。**1 AFP 不是固定的 token 数**——抵扣系数随
+    模型变（`deepseek-v4.1-flash` 是 2.5、`deepseek-v4-flash` 是 0.5），所以
+    **不换算成 token 显示**
+  - **窗口时长是近似的**：5h 窗口锚在**首次请求**（正好 5 小时），周窗口是自然周
+    （周一 00:00），月窗口是**订阅月**（订阅日 → 次月同日 23:59:59，**不是固定
+    30 天**）。时长只用于派生展示标签，准确的重置时刻取自 `ResetTime`
+  - **权限最小化**：查额度是纯只读需求，**用只读 IAM 子账号的 AK**，别用主账号
+    AK（那是账号全权：能建资源、改账单、买套餐）。实测子账号 AK 可用
 - **codex2api 的自助接口只有三个端点值得知道**（实测）：
   - `GET /api/key-usage/summary`（别名 `/me`）—— key 级用量 + 自助统计报告
     （`usage.windows` 里 today/5h/7d/30d 是**该 key 最近 N 小时花掉的钱**）

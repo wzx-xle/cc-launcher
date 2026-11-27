@@ -101,7 +101,7 @@ func TestDetectAdapter(t *testing.T) {
 
 // TestAdapterByName 断言按 source 查找。
 func TestAdapterByName(t *testing.T) {
-	for _, name := range []string{"minimax", "deepseek", "newapi", "codex2api"} {
+	for _, name := range []string{"minimax", "deepseek", "newapi", "codex2api", "ark"} {
 		ad, ok := AdapterByName(name)
 		if !ok {
 			t.Errorf("adapter %q 应存在", name)

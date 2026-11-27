@@ -159,7 +159,10 @@ func (s *Server) handleAPIProviderQuotaRefresh(w http.ResponseWriter, r *http.Re
 			return
 		}
 		// 失败时**不写数据文件**（旧条目保留 → 慢慢变 stale）
-		writeJSONError(w, http.StatusBadGateway, "刷新失败: "+err.Error())
+		//
+		// **消息里不带"刷新失败"前缀**：那是展示层的事——前端已经会加一层
+		// （'刷新失败：' + message）。两边都加就成了"刷新失败：刷新失败: …"。
+		writeJSONError(w, http.StatusBadGateway, err.Error())
 		return
 	}
 
