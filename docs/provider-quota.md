@@ -432,6 +432,44 @@ serve 下轮自愈。
 
 ## provider 配置
 
+### provider 配置支持 JSONC 注释
+
+provider 的配置文件（`~/.cc-launcher/providers/<name>.json`）**支持注释**：
+
+```jsonc
+{
+  // 额度走 Access Key 签名查（不是推理用的 ark-… key）
+  "note": "火山方舟-AgentPlan",
+  "env": {
+    // Agent Plan 专用路径前缀（按量计费是 /api/v3，两者别混）
+    "ANTHROPIC_BASE_URL": "https://ark.cn-beijing.volces.com/api/plan",
+    "ANTHROPIC_AUTH_TOKEN": "ark-xxx"
+  },
+  /* 额度查询：火山方舟 Agent Plan 个人版 */
+  "quota": {"source": "ark", "accessKey": "AK…", "secretKey": "SK…"}
+}
+```
+
+| 规则 | 说明 |
+|---|---|
+| `//` 行注释 | 到行尾 |
+| `/* */` 块注释 | 不能嵌套；`*/` 提前结束 |
+| **尾随逗号** | **不支持**（`{"a":1,}` 报解析错误）——JSONC 规范本身不允许，且尾随逗号是"删键忘删逗号"的高发区，报错比容忍更有帮助 |
+| 字符串里的 `//` | **不是注释**——`"https://…"` 里的双斜杠照常是字符串的一部分 |
+| 注释的保存 | **保留**——网页编辑器保存后注释还在（保存走原样写盘，不重新序列化） |
+| 注释的去向 | **不进 Claude Code**——交付的 settings 是重新序列化出来的，注释只活在 provider 自己的文件里 |
+| 解析错误的位置 | 报**原文件**的行号列号（剥注释不改任何字节位置） |
+
+**为什么值得写注释**：配置里最该被解释的就是那些需要外部知识才能填对的字段——「这个 accessKey 去哪申请」「这个 endpoint 是私有网关」「这个额度是账号级还是 key 级」。JSON 的语法不允许注释（写进去就是解析失败，provider 直接加载不了），于是这些信息**只存在于人的脑子里**。
+
+**解析错误带行号**：
+
+```
+提供商 "ark" 配置解析失败: 第 12 行第 5 列: invalid character '@' looking for beginning of value
+```
+
+**划界**：`~/.claude/settings.json` 的注释**仍会丢**——网页的 Claude 视图是原样写盘（能保留），但 CLI 的 `ccl` 迁移路径用 `json.MarshalIndent` **重写整个文件**（必丢）。别以为"ccl 全局支持注释"。
+
 ### `quota` 块（可选）
 
 `quota` 是 **ccl 自己的元数据键**（与 `note` / `order` 同等），**不交付**给
@@ -764,6 +802,16 @@ node bin/statusline-probe.js --provider minimax-m3 --json
     30 天**）。时长只用于派生展示标签，准确的重置时刻取自 `ResetTime`
   - **权限最小化**：查额度是纯只读需求，**用只读 IAM 子账号的 AK**，别用主账号
     AK（那是账号全权：能建资源、改账单、买套餐）。实测子账号 AK 可用
+- **怎么申请这个 AK/SK**（实测可行，2026-11-27）：
+  1. 火山引擎控制台 → **访问控制（IAM）→ 用户 → 创建用户**（建**子账号**，别用主账号）
+  2. 给它绑**只读**策略：策略管理里搜 `Ark` → `ArkReadOnlyAccess` / `ArkPlanUserAccess` 之类
+     —— **别给 `ArkFullAccess`**（那是账号全权：能建资源、改账单、买套餐）
+  3. 用户详情 → **AccessKey 管理 → 创建 AccessKey**，拿到 AK / SK
+  4. 填进 provider 配置的 `quota` 块（见上面「provider 配置支持 JSONC 注释」的示例）
+  - **三个坑**：① IAM 策略生效有 **1~5 分钟延迟**，刚绑完就查可能仍报权限不足；
+    ② 子账号必须**绑定到同一个套餐主账号**，否则查不到这份套餐（查到的是子账号自己的空套餐）；
+    ③ 官方文档**没有列出 `GetAFPUsage` 的最小策略清单**（`ArkPlanReadOnlyAccess` 这个名字只在
+    营销文章里出现过，策略列表里查不到）→ 绑哪个策略要在控制台搜 `Ark` 逐个确认
 - **codex2api 的自助接口只有三个端点值得知道**（实测）：
   - `GET /api/key-usage/summary`（别名 `/me`）—— key 级用量 + 自助统计报告
     （`usage.windows` 里 today/5h/7d/30d 是**该 key 最近 N 小时花掉的钱**）

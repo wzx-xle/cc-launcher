@@ -18,6 +18,9 @@
    *   value    初始内容
    *   mode     'json'（高亮 + 解析校验）| 'text'（不高亮）
    *   onChange 内容变化时的回调（值, 编辑器）
+   *   jsonc    true = 容忍 JSONC 注释（// 与 /* *\/）。provider 配置用它——
+   *             后端已经容忍注释（internal/jsonc），前端不跟上就会出现
+   *             "能读不能改"（带注释的配置被判为非法，保存按钮被禁用）
    *
    * 返回：
    *   getValue() / setValue(v) / setStatus(text, kind) / focus() / element
@@ -25,6 +28,7 @@
   function createEditor(host, opts) {
     opts = opts || {};
     var mode = opts.mode === 'text' ? 'text' : 'json';
+    var allowComments = opts.jsonc === true;
 
     var wrap = document.createElement('div');
     wrap.className = 'editor';
@@ -53,13 +57,22 @@
       pre.appendChild(document.createTextNode(' '));
     }
 
-    /* 校验：JSON 模式下解析失败就不给保存（调用方据此禁用保存按钮）。 */
+    /* 校验：JSON 模式下解析失败就不给保存（调用方据此禁用保存按钮）。
+     *
+     * **jsonc 模式下先剥注释再 parse**——provider 配置支持注释，而后端
+     * （internal/jsonc）已经容忍它；前端用标准 JSON.parse 的话，带注释的
+     * 配置会被判为非法、**保存按钮被禁用**（"能读不能改"）。
+     */
     function validate() {
       if (mode !== 'json') { return null; }
       var v = ta.value.trim();
       if (v === '') { return null; }
       try {
-        JSON.parse(v);
+        if (allowComments && window.CCL.jsonc) {
+          window.CCL.jsonc.parse(v);
+        } else {
+          JSON.parse(v);
+        }
         return null;
       } catch (e) {
         return e.message;

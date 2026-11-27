@@ -1,3 +1,12 @@
+// Package provider 管理 ~/.cc-launcher/providers/ 下的 provider 配置。
+//
+// **读 provider 配置一律用 jsonc.Unmarshal**，不要用标准的 json.Unmarshal——
+// provider 配置支持 JSONC 注释（`//` 与 `/* */`），而配置里最该被解释的就是
+// 那些需要外部知识才能填对的字段（"这个 accessKey 去哪申请"、"这个 endpoint
+// 是私有网关"）。
+//
+// **漏一处后果很隐蔽**：某个读路径用标准解析、另一个用 JSONC，就会造出
+// "provider 在列表里能看见、额度却查不了"这种极难查的现象。
 package provider
 
 import (
@@ -9,6 +18,7 @@ import (
 	"slices"
 	"strings"
 
+	"cc-launcher/internal/jsonc"
 	"cc-launcher/internal/safefile"
 	"cc-launcher/internal/settingsschema"
 )
@@ -215,7 +225,7 @@ func (m *Manager) List() ([]Info, error) {
 			info.Error = err.Error()
 		} else {
 			var cfg configFile
-			if err := json.Unmarshal(data, &cfg); err != nil {
+			if err := jsonc.Unmarshal(data, &cfg); err != nil {
 				info.Error = fmt.Sprintf("JSON 解析失败: %s", err.Error())
 			} else {
 				info.Note = cfg.Note
@@ -232,7 +242,7 @@ func (m *Manager) List() ([]Info, error) {
 			// 校验失败不阻断 List()——列表要把所有 provider 都列出来，
 			// 问题在渲染层标出来。
 			var raw map[string]any
-			if err := json.Unmarshal(data, &raw); err == nil {
+			if err := jsonc.Unmarshal(data, &raw); err == nil {
 				for k := range raw {
 					if k == "env" || IsReservedKey(k) {
 						continue
@@ -270,7 +280,7 @@ func (m *Manager) Get(name string) (map[string]any, error) {
 		return nil, err
 	}
 	var cfg map[string]any
-	if err := json.Unmarshal(data, &cfg); err != nil {
+	if err := jsonc.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("提供商 %q 配置解析失败: %w", name, err)
 	}
 	return cfg, nil
@@ -301,7 +311,7 @@ func (m *Manager) SaveRaw(name string, content []byte) error {
 	}
 
 	var raw map[string]any
-	if err := json.Unmarshal(content, &raw); err != nil {
+	if err := jsonc.Unmarshal(content, &raw); err != nil {
 		return fmt.Errorf("配置不是合法 JSON: %w", err)
 	}
 	if res := settingsschema.Validate(raw); !res.OK() {

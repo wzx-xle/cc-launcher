@@ -443,6 +443,9 @@
     editor = window.CCL.createEditor(zone, {
       value: state.content || '',
       mode: 'json',
+      /* provider 配置支持 JSONC 注释（后端 internal/jsonc 已容忍）——
+       * 前端不跟上就会「能读不能改」：带注释的配置被判非法，保存按钮被禁用。 */
+      jsonc: true,
       onChange: function (value) {
         state.content = value;
         var err = editor.validate();

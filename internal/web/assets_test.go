@@ -66,7 +66,7 @@ func TestUI_ServesShellWithThreeViews(t *testing.T) {
 		t.Error("页面应含主题开关")
 	}
 	// 脚本引用
-	for _, s := range []string{"usage.js", "highlight.js", "editor.js", "providers.js", "claude.js", "app.js"} {
+	for _, s := range []string{"usage.js", "highlight.js", "jsonc.js", "editor.js", "providers.js", "claude.js", "app.js"} {
 		if !strings.Contains(html, "/ui/"+s) {
 			t.Errorf("页面应引用 /ui/%s", s)
 		}
@@ -100,6 +100,7 @@ func TestAssets_AllServed(t *testing.T) {
 		"claude.js":    "application/javascript",
 		"editor.js":    "application/javascript",
 		"highlight.js": "application/javascript",
+		"jsonc.js":     "application/javascript",
 		"style.css":    "text/css",
 	}
 	for name, wantType := range cases {

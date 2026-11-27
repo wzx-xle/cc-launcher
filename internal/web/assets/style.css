@@ -676,6 +676,7 @@ tbody tr:last-child td { border-bottom: 0; }
 .editor .tok-num { color: #b3541e; }
 .editor .tok-lit { color: #0550ae; }
 .editor .tok-punct { color: var(--text-muted); }
+.editor .tok-comment { color: var(--text-muted); font-style: italic; }
 
 @media (prefers-color-scheme: dark) {
   :root:where(:not([data-theme="light"])) .editor .tok-key { color: #d2a8ff; }
@@ -687,6 +688,7 @@ tbody tr:last-child td { border-bottom: 0; }
 :root[data-theme="dark"] .editor .tok-str { color: #7ee787; }
 :root[data-theme="dark"] .editor .tok-num { color: #ffa657; }
 :root[data-theme="dark"] .editor .tok-lit { color: #79c0ff; }
+:root[data-theme="dark"] .editor .tok-comment { color: #8b949e; font-style: italic; }
 
 .editor-foot {
   display: flex;

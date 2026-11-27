@@ -50,6 +50,31 @@
         continue;
       }
 
+      /* 注释（JSONC）——必须在字符串之前判吗？不：**相反**。
+       *
+       * 字符串里的 "//" 不是注释（provider 配置里全是 URL），所以**字符串
+       * 分支必须先判**——它已经在上面了（`c === '"'` 的分支在前）。
+       * 走到这里的 "//" 一定在字符串外。
+       *
+       * **不处理注释会导致高亮错乱**：注释里的引号会被当字符串开始，后面
+       * 整片内容都跟着错。
+       */
+      if (c === '/' && i + 1 < n && out[i + 1] === '/') {
+        var je = i;
+        while (je < n && src.charAt(je) !== '\n') { je++; }
+        out.push({ cls: 'tok-comment', text: src.slice(i, je) });
+        i = je;
+        continue;
+      }
+      if (c === '/' && i + 1 < n && src.charAt(i + 1) === '*') {
+        var je2 = i + 2;
+        while (je2 + 1 < n && !(src.charAt(je2) === '*' && src.charAt(je2 + 1) === '/')) { je2++; }
+        var end = (je2 + 1 < n) ? je2 + 2 : n;
+        out.push({ cls: 'tok-comment', text: src.slice(i, end) });
+        i = end;
+        continue;
+      }
+
       /* 数字 */
       if (c === '-' || (c >= '0' && c <= '9')) {
         var j2 = i;

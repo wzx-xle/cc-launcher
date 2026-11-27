@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"cc-launcher/internal/jsonc"
 )
 
 // ErrNoQuotaInterface 表示"这个 provider 没有额度接口"。
@@ -435,7 +437,7 @@ func Enumerate(providersDir string) ([]ProviderRef, error) {
 			continue
 		}
 		var cfg map[string]any
-		if err := json.Unmarshal(data, &cfg); err != nil {
+		if err := jsonc.Unmarshal(data, &cfg); err != nil {
 			continue
 		}
 		ref, ok := refFromConfig(name, cfg)
@@ -464,7 +466,7 @@ func LoadProviderRef(providersDir, name string) (ProviderRef, bool, error) {
 		return ProviderRef{Name: name}, false, err
 	}
 	var cfg map[string]any
-	if err := json.Unmarshal(data, &cfg); err != nil {
+	if err := jsonc.Unmarshal(data, &cfg); err != nil {
 		return ProviderRef{Name: name}, false, fmt.Errorf("提供商 %q 配置解析失败: %w", name, err)
 	}
 	ref, ok := refFromConfig(name, cfg)
