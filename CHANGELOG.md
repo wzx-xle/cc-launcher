@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-11-27 — quota-ark-agent-plan + provider-jsonc-comments
+
+### Features
+- **新增火山方舟 Agent Plan 个人版额度 adapter**（provider 配置里写 `"quota": {"source": "ark", "accessKey": "…", "secretKey": "…"}`）：读管控面的 `POST https://ark.<region>.volcengineapi.com/?Action=GetAFPUsage&Version=2024-01-01`，输出**三个窗口维度**（5h / 周 / 月，单位 AFP）
+  - **这个接口只认 Access Key 签名**：拿推理用的 `ark-…` API Key 打过去是 400 `InvalidAuthorization`（100024），无鉴权是 400 `InvalidCredential`（100025）→ ccl 自研了火山引擎 **V4 签名**（`internal/quota/arksign.go`，只用标准库，**不引官方 SDK**）；实现已与 `volcengine-go-sdk v1.0.260` 的签名输出**逐字节比对通过**，并用真实凭证打出 HTTP 200
+  - **凭证走 `quota` 块，不走 `env` 块**：`env` 块会**原样交付给 Claude Code**（经 `--settings`），账号级 AK/SK 不能交给模型、它的 hook 与它的子进程。不想明文落盘的话，环境变量 `VOLCENGINE_ACCESS_KEY_ID` / `VOLCENGINE_SECRET_ACCESS_KEY` 兜底（**改完要重启 `ccl serve`**——daemon 是常驻进程，环境变量在它启动时就固定了）
+  - **识别要 host + path 两个条件**：按量部署是**同一个 host**（`ark.cn-beijing.volces.com`）但路径是 `/api/v3`，它没有 Agent Plan 套餐——只看 host 会把按量用户也识别成套餐用户，然后拿着不存在的套餐去查
+  - **报的是账号额度，不是这把 API Key 的额度**：接口入参里**没有 API Key 的位置**（签名只有 AK 代表"调用者是谁"），官方口径也一致（"主账号下所有子账号共享该额度池"）→ 同一账号下多个 provider 显示的是**同一个数**。实测子账号 AK 与主账号 AK 查到的额度**完全一致**
+  - **额度池按 Access Key 分**（不是按 API key）：AFP 是**账号套餐级**配额，同一对 AK 下的多个推理 key 共用一个池——按 API key 分池会让同一份额度被查多次、存多份、还多消耗管控面配额
+  - **日额度窗口不报**：接口返回四个窗口，但 `AFPDaily.Used` 在**文本模型推理场景恒为 0**（实测同刻 5h 窗口 328.5542 AFP、daily 是 0）——方舟文档写明日限额"仅限视觉/语音模型、Harness"，它计的是图片/语音模型与 Harness 能力调用；官方 CLI `arkcli usage plan` 同样只输出三个窗口
+  - **AFP = Agent Fuel Point**（厂商文档写成 "Agent Frame Point"，是笔误），`1 AFP ≈ 0.01 元`（按量口径）；**1 AFP 不是固定的 token 数**（抵扣系数随模型变，`deepseek-v4.1-flash` 是 2.5、`deepseek-v4-flash` 是 0.5）→ **不换算成 token 显示**
+  - **权限最小化**：查额度是纯只读需求，**用只读 IAM 子账号的 AK**（实测子账号可用），别用主账号 AK（那是账号全权：能建资源、改账单、买套餐）
+- **额度接口新增"Access Key 签名鉴权"这一类厂商**：厂商差异仍全部关在 adapter 里（识别 / 端点推导 / 请求 / 解析 / 成功判据），ccl 的其它层（store / refresh / 命令）不变。**额度池键从"一律按 API key"放宽为"厂商可自带池键"**（可选接口 `PoolKeyer`，不实现就回退原行为——已有 adapter 零改动）
+- **provider 的 JSON 配置支持 JSONC 注释**（`//` 与 `/* */`）：provider 配置里最该被解释的就是那些需要外部知识才能填对的字段——「这个 accessKey 去哪申请」「这个 endpoint 是私有网关」「这个额度是账号级还是 key 级」，而 JSON 的语法不允许注释（写进去就是解析失败，provider 直接加载不了），于是这些信息**只存在于人的脑子里**
+  - **注释在保存后保留**：保存走**原样写盘**（`SaveRaw` 不做 `MarshalIndent`），所以只要解析端容忍注释，注释就不会丢——网页编辑器保存后**逐字节不变**
+  - **注释不进 Claude Code**：交付的 settings 是**重新序列化**出来的，注释只活在 provider 自己的文件里（透传出去等于给 Claude Code 塞一个它不认识的键）
+  - **解析错误带行号列号**：剥注释时用**等长空白**替换、**换行保留** → 每个字节的位置不变 → 报的行号仍指向**原文件**（删掉注释会让后面所有行往上移，用户看到"第 3 行出错"实际是第 47 行的注释有问题）
+  - **不支持尾随逗号**：JSONC 规范（jsonc.org）本身不允许，且尾随逗号是"删键忘删逗号"的高发区，报错比容忍更有帮助
+  - **不引第三方库**：ccl 只有 2 个直接依赖（bubbletea / lipgloss），是刻意保持轻量的；剥离器自己写（~80 行状态机）
+  - **字符串里的 `//` 不是注释**——provider 配置里全是 URL（`https://ark.cn-beijing.volces.com/api/plan`），判错就整行废了；状态机**必须先判字符串再判注释**
+  - **网页的 provider 编辑器也认注释**：后端容忍了而前端用标准 `JSON.parse` 的话，带注释的配置会被判非法、**保存按钮被禁用**（"能读不能改"）→ 前端也加剥离器（`assets/jsonc.js`，与 Go 版同语义）
+  - **高亮器也认注释**：`highlight.js` 的 tokenizer 遇到 `//` / `/* */` 输出注释 token——**不处理会导致高亮错乱**（注释里的引号会被当字符串开始，后面整片内容跟着错）
+
+### Fixes
+- **网页刷新额度失败时错误信息重复前缀**：后端返回 `"刷新失败: <原因>"`、前端又拼一层 `'刷新失败：'` → 页面上显示成"刷新失败：刷新失败: 未知的 quota.source …"。后端改成只给**原因**，前缀归展示层
+
+### Tests
+- **新增 `internal/quota/arksign_test.go`**：两条**黄金向量**（长期 AK / STS 临时凭证，均由官方 SDK 在**固定 `X-Date`** 下产出——签名把时间算进哈希，用"当前时间"就永远复现不了）+ 护栏用例：多一个 `X-` 头**必须**进签名列表（写死列表将来会漏签 → 服务端 403 且报错完全看不出是漏签）、query 里的空格要 `%20` 不是 `+`、空 body 用 `sha256(空串)`、端口 80/443 要剥离
+- **新增 `internal/quota/adapter_ark_test.go`**：以**真机响应**为夹具（medium 档：`Quota` 10000/35000/100000、`Used` 328.5542、`AFPDaily.Used` 0）断言产出 5h/7d/30d 三个维度且**没有** daily；额度字段 **number 与 string 两种形态**都能解（官方文档写 string、真机返回 number）；字段级非法只丢**那一个**维度、不让整个响应解析失败；`Quota == 0` → unlimited；无 `Result` → 失败；429 → `RateLimitError`；错误信息带厂商 `Code`；**错误信息不含 AK/SK**；池键**不明文落盘**（只存 sha256）
+- **新增 `internal/jsonc/jsonc_test.go`**：位置不变（**行号指向原文件**）、无注释时逐字节恒等、URL 里的 `//` 不是注释、字符串里的 `/* */` 不是注释、转义引号后的 `//` 不是注释、注释出现在任何位置、尾随逗号仍被拒、块注释没闭合报错
+- **新增 `internal/web/jstest/jsonc.test.mjs`**：与 Go 版一一对应——**两份实现必然漂移，要测的正是浏览器里跑的那份**（node 加载 assets 里的真实 JS，vm 沙箱，无 DOM 依赖）。注意 **Node 24 的 V8 错误格式有两种**：`Expected … at position N`（带位置）与 `Unexpected token 'X', "…" is not valid JSON`（**只有片段、无位置**）→ 后者要用"出错字符在字符串字面量之外的第一次出现"来定位
+- **新增 provider / quota / web 三个包的注释行为测试**：带注释的配置在 `List()` / `Get()` / `SaveRaw` 校验 / `Enumerate` / `LoadProviderRef` **五条路径上行为一致**（漏一处就会造出"provider 在列表里能看见、额度却查不了"）、保存后注释逐字节保留、注释不进 Claude Code、解析错误的行号指向原文件
+
+### Docs
+- **`docs/provider-quota.md`**：新增「provider 配置支持 JSONC 注释」一节（注释规则表、**尾随逗号不支持**、保存保留、不进 Claude Code、错误带行号，以及**划界**：`~/.claude/settings.json` 的注释**仍会丢**——网页的 Claude 视图是原样写盘能保留，但 CLI 的迁移路径用 `json.MarshalIndent` 重写整个文件）；「外部行为实测结论」补**「怎么申请这个 AK/SK」的操作步骤**（建只读 IAM 子账号 → 绑只读策略 → 建 AccessKey → 填进 `quota` 块）与三个坑（策略生效延迟 1~5 分钟、必须绑定同一套餐主账号、官方没列最小策略清单）
+- **`docs/provider-quota.md`**：「`quota` 块」补 `accessKey` / `secretKey` 两键，以及「**为什么不放 `env` 块**」与「改了环境变量要重启 `ccl serve`」；adapter 表补 ark 一行与「host + path 缺一不可」；「外部行为实测结论」补方舟的**实测契约**——端点与入参、错误码（100024 / 100025 / 100026 均为实测）、**`Quota`/`Used` 实测是 number 而文档写 string**、日额度恒为 0 的原因、账号级语义、AFP 单位与"不换算 token"的理由、窗口时长的近似规则（5h 锚在首次请求 / 周是自然周 / 月是**订阅月**不是固定 30 天）
+
+### OpenSpec
+- **归档 `quota-ark-agent-plan` change**（`openspec/changes/archive/2026-11-27-quota-ark-agent-plan/`）：`provider-quota` spec **+2 added / ~2 modified** —— 新增「读取火山方舟 Agent Plan 额度接口」与「用 Access Key 签名鉴权」两条 requirement；修改「解析 adapter 与端点」（加方舟的识别与端点推导规则）与「daemon 周期刷新」（额度池键可由厂商自带）
+- **归档 `provider-jsonc-comments` change**（`openspec/changes/archive/2026-11-27-provider-jsonc-comments/`）：`provider-list-rendering` spec **+2 added** —— 新增「provider 配置文件接受 JSONC 注释」与「网页的 provider 编辑器接受注释」两条 requirement
+
 ## [0.24.1] - 2026-11-18 — web-unlimited-quota-amount
 
 ### Fixes
